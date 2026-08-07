@@ -1612,7 +1612,27 @@ Views.quotations = ()=>Quotations.render();
 ===================================================================== */
 const Payments = {
   render(){
-    const list = Store.data.payments.slice().sort((a,b)=>(a.followupDate||'').localeCompare(b.followupDate||''));
+    const searchEl = document.getElementById('paySearch');
+    const searchHadFocus = document.activeElement === searchEl;
+    const caretPos = searchHadFocus ? searchEl.selectionStart : null;
+
+    const q = (document.getElementById('paySearch')?document.getElementById('paySearch').value:'').toLowerCase();
+    const fStatus = document.getElementById('payStatusFilter')?document.getElementById('payStatusFilter').value:'';
+    const fCompany = document.getElementById('payCompanyFilter')?document.getElementById('payCompanyFilter').value:'';
+    const fParty = document.getElementById('payPartyFilter')?document.getElementById('payPartyFilter').value:'';
+    const fOverdue = document.getElementById('payOverdueFilter')?document.getElementById('payOverdueFilter').checked:false;
+
+    let list = Store.data.payments.slice().sort((a,b)=>(a.followupDate||'').localeCompare(b.followupDate||''));
+
+    if(q) list = list.filter(p=>(p.party||'').toLowerCase().includes(q) || (p.invoiceNumber||'').toLowerCase().includes(q) || (p.id||'').toLowerCase().includes(q) || (p.contact||'').toLowerCase().includes(q) || (p.phone||'').includes(q));
+    if(fStatus) list = list.filter(p=>p.status===fStatus);
+    if(fCompany) list = list.filter(p=>p.companyName===fCompany);
+    if(fParty) list = list.filter(p=>p.party===fParty);
+    if(fOverdue) list = list.filter(p=>p.status!=='Paid' && p.followupDate && p.followupDate < Util.todayISO());
+
+    const partyNames = [...new Set(Store.data.payments.map(p=>p.party).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+    const partyPendingTotal = fParty ? list.reduce((s,p)=>s+Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0),0) : null;
+
     const totalPending = list.reduce((s,p)=>s+Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0),0);
     const totalPaid = list.reduce((s,p)=>s+(Number(p.amountPaid)||0),0);
     document.getElementById('content').innerHTML = `
@@ -1625,6 +1645,27 @@ const Payments = {
         <button class="btn btn-outline btn-sm" onclick="document.getElementById('payImportFile').click()">&#128229; Import from Excel</button>
         <button class="btn btn-primary btn-sm" onclick="Payments.openForm(null)">&#65291; Add Invoice</button>
       </div>
+      <div class="toolbar">
+        <div class="search"><span class="ic">&#128269;</span><input id="paySearch" placeholder="Search party, invoice #, contact, phone..." oninput="Payments.render()" value="${Util.escapeHtml(q)}"></div>
+        <select id="payStatusFilter" onchange="Payments.render()">
+          <option value="">All Statuses</option>
+          <option value="Pending" ${fStatus==='Pending'?'selected':''}>Unpaid</option>
+          <option value="Paid" ${fStatus==='Paid'?'selected':''}>Paid</option>
+        </select>
+        <select id="payCompanyFilter" onchange="Payments.render()">
+          <option value="">All Companies</option>
+          ${DROPDOWNS.companyName.map(c=>`<option value="${c}" ${c===fCompany?'selected':''}>${c}</option>`).join('')}
+        </select>
+        <select id="payPartyFilter" onchange="Payments.render()">
+          <option value="">All Parties</option>
+          ${partyNames.map(p=>`<option value="${Util.escapeHtml(p)}" ${p===fParty?'selected':''}>${Util.escapeHtml(p)}</option>`).join('')}
+        </select>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-mute);white-space:nowrap;">
+          <input type="checkbox" id="payOverdueFilter" onchange="Payments.render()" ${fOverdue?'checked':''}> Overdue only
+        </label>
+        ${fParty ? `<span class="badge badge-amber" style="font-size:12px;padding:6px 12px;">${Util.escapeHtml(fParty)} pending: ${Util.fmtMoney(partyPendingTotal)}</span>` : ''}
+        ${(q||fStatus||fCompany||fParty||fOverdue) ? `<button class="btn btn-outline btn-sm" onclick="Payments.clearFilters()">Clear</button>` : ''}
+      </div>
       <div class="card"><div class="table-wrap">
       ${list.length ? `<table><thead><tr><th>Party Name</th><th>Company Name</th><th>Invoice Number</th><th>Invoice Date</th><th>Taxable Value</th><th>CGST</th><th>SGST</th><th>IGST</th><th>Round Off</th><th>Invoice Amount</th><th>Due Amount</th><th>Payment Status</th><th>Contact</th><th>Follow-up Date</th><th>Response</th><th></th></tr></thead><tbody>
         ${list.map(p=>{
@@ -1632,7 +1673,7 @@ const Payments = {
           const paidAmt = Number(p.amountPaid)||0;
           const pendingAmt = p.dueAmount!==undefined ? Math.max(Number(p.dueAmount)||0,0) : Math.max((Number(p.amount)||0)-paidAmt,0);
           return `<tr>
-          <td class="cell-main">${Util.escapeHtml(p.party)}</td>
+          <td class="cell-main" style="cursor:pointer;" onclick="Payments.filterByParty('${Util.escapeHtml(p.party).replace(/'/g,"\\'")}')" title="View all pending for this party">${Util.escapeHtml(p.party)}</td>
           <td>${p.companyName? `<span class="badge badge-blue">${Util.escapeHtml(p.companyName)}</span>` : '—'}</td>
           <td class="mono cell-mute">${Util.escapeHtml(p.invoiceNumber||p.id)}</td>
           <td class="cell-mute">${Util.fmtDate(p.invoiceDate)}</td>
@@ -1654,10 +1695,29 @@ const Payments = {
             <button class="icon-btn" onclick="Payments.remove('${p.id}')">&#128465;</button>
           </td>
         </tr>`;}).join('')}
-      </tbody></table>` : `<div class="empty-state"><div class="ic">&#128179;</div><div class="t">No pending payments</div><div class="d">Log an invoice to start tracking payment follow-ups, or import a batch from Excel.</div>
+      </tbody></table>` : `<div class="empty-state"><div class="ic">&#128179;</div><div class="t">${(q||fStatus||fCompany||fParty||fOverdue)?'No matching invoices':'No pending payments'}</div><div class="d">${(q||fStatus||fCompany||fParty||fOverdue)?'Try clearing filters or adjusting your search.':'Log an invoice to start tracking payment follow-ups, or import a batch from Excel.'}</div>
       <button class="btn btn-primary btn-sm" onclick="Payments.openForm(null)">&#65291; Add Invoice</button></div>`}
       </div></div>
     `;
+    if(searchHadFocus){
+      const el = document.getElementById('paySearch');
+      if(el){ el.focus(); el.setSelectionRange(caretPos, caretPos); }
+    }
+  },
+  filterByParty(party){
+    const sel = document.getElementById('payPartyFilter');
+    const stat = document.getElementById('payStatusFilter');
+    if(sel) sel.value = party;
+    if(stat) stat.value = 'Pending';
+    this.render();
+  },
+  clearFilters(){
+    ['paySearch'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
+    const st=document.getElementById('payStatusFilter'); if(st) st.value='';
+    const co=document.getElementById('payCompanyFilter'); if(co) co.value='';
+    const pt=document.getElementById('payPartyFilter'); if(pt) pt.value='';
+    const ov=document.getElementById('payOverdueFilter'); if(ov) ov.checked=false;
+    this.render();
   },
   openForm(id, presetCustomerId){
     const rec = id ? Store.data.payments.find(x=>x.id===id) : null;
