@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <style>
   :root{
     --navy:#0B1424;
@@ -512,8 +513,12 @@ const DROPDOWNS = {
 const STAGE_FLOW = ['First Contact','WhatsApp Sent','Quotation Sent','Follow-up','Payment Status'];
 
 /* =====================================================================
-   STORE  (persisted via window.storage, shared across the team)
+   STORE  (persisted to Supabase, shared across the team)
 ===================================================================== */
+const SUPABASE_URL = 'https://ufpaxvflwaqesdueqiob.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVmcGF4dmZsd2FxZXNkdWVxaW9iIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODYwODAxMjMsImV4cCI6MjEwMTY1NjEyM30.WFmQiDSODiq1_Bem2Wk8xrkxNGY6wlrTVX9ToN_QVyA';
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
 const Store = {
   data: {
     customers: [], products: [], quotations: [], payments: [],
@@ -533,14 +538,17 @@ const Store = {
   },
   async loadKey(key, fallback){
     try{
-      const r = await window.storage.get(key, true);
-      if(r && r.value){ return JSON.parse(r.value); }
+      const { data, error } = await sb.from('jays_crm_store').select('value').eq('key', key).maybeSingle();
+      if(error) throw error;
+      if(data && data.value !== null && data.value !== undefined) return data.value;
       return fallback;
-    }catch(e){ return fallback; }
+    }catch(e){ console.error('storage load failed', key, e); return fallback; }
   },
   async saveKey(key, value){
-    try{ await window.storage.set(key, JSON.stringify(value), true); }
-    catch(e){ console.error('storage save failed', key, e); }
+    try{
+      const { error } = await sb.from('jays_crm_store').upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+      if(error) throw error;
+    }catch(e){ console.error('storage save failed', key, e); }
     return value;
   },
   async loadAll(){
@@ -645,15 +653,14 @@ const Auth = {
     if(!match){ err.style.display='block'; return; }
     err.style.display='none';
     this.session = match;
-    await Store.saveKey('jays_session_local', match.username);
+    try{ localStorage.setItem('jays_session_local', match.username); }catch(e){}
     await Activity.log('Login', match.username+' signed in');
     App.boot();
   },
   async tryRestore(){
     try{
-      const r = await window.storage.get('jays_session_local', false);
-      if(r && r.value){
-        const uname = JSON.parse(r.value);
+      const uname = localStorage.getItem('jays_session_local');
+      if(uname){
         const match = Store.data.users.find(x=>x.username===uname);
         if(match){ this.session = match; return true; }
       }
@@ -663,7 +670,7 @@ const Auth = {
   async logout(){
     await Activity.log('Logout', (this.session&&this.session.username)+' signed out');
     this.session = null;
-    try{ await window.storage.set('jays_session_local', 'null', false); }catch(e){}
+    try{ localStorage.removeItem('jays_session_local'); }catch(e){}
     document.getElementById('appScreen').style.display='none';
     document.getElementById('loginScreen').style.display='flex';
     document.getElementById('loginUser').value='';
@@ -964,6 +971,10 @@ function statusBadge(status){
 const Customers = {
   filterMode: 'all',
   render(){
+    const searchEl = document.getElementById('custSearch');
+    const searchHadFocus = document.activeElement === searchEl;
+    const caretPos = searchHadFocus ? searchEl.selectionStart : null;
+
     let list = Store.data.customers.slice();
     const q = (document.getElementById('custSearch')?document.getElementById('custSearch').value:'').toLowerCase();
     const fStatus = document.getElementById('custStatusFilter')?document.getElementById('custStatusFilter').value:'';
@@ -1011,7 +1022,7 @@ const Customers = {
       </div>
       <div class="card">
         <div class="table-wrap">
-        ${list.length ? `<table><thead><tr><th>Name</th><th>Phone</th><th>District</th><th>Area / Panchayath</th><th>Assigned To</th><th>Status</th><th>Last Contact</th><th></th></tr></thead><tbody>
+        ${list.length ? `<table><thead><tr><th>Name</th><th>Phone</th><th>District</th><th>Area / Panchayath</th><th>Assigned To</th><th>Status</th><th>Notes</th><th>Last Contact</th><th></th></tr></thead><tbody>
           ${list.map(x=>`<tr>
             <td class="cell-main" onclick="Customers.openDetail('${x.id}')">${Util.escapeHtml(x.name)}</td>
             <td class="mono cell-mute">${Util.escapeHtml(x.phone)}</td>
@@ -1019,6 +1030,7 @@ const Customers = {
             <td class="cell-mute">${Util.escapeHtml(x.panchayath||'—')}</td>
             <td class="cell-mute">${Util.escapeHtml(x.assignedTo||'—')}</td>
             <td>${statusBadge(x.status)}</td>
+            <td class="cell-mute" style="white-space:normal;max-width:220px;">${x.notes? Util.escapeHtml(x.notes.length>80? x.notes.slice(0,80)+'…' : x.notes) : '—'}</td>
             <td class="cell-mute">${Util.fmtDate(x.lastContact)}</td>
             <td style="display:flex;gap:5px;">
               <a class="icon-btn" style="color:#3B82C4;" title="Call" href="tel:${Util.escapeHtml(x.phone)}">&#128222;</a>
@@ -1033,11 +1045,15 @@ const Customers = {
         </div>
       </div>
     `;
+    if(searchHadFocus){
+      const el = document.getElementById('custSearch');
+      if(el){ el.focus(); el.setSelectionRange(caretPos, caretPos); }
+    }
   },
   setFilter(mode){ this.filterMode = mode; this.render(); },
   openForm(id){
     const rec = id ? Store.data.customers.find(x=>x.id===id) : null;
-    const v = rec || {name:'',phone:'',email:'',district:'',panchayath:'',assignedTo:'',status:'New Lead', lastContact: Util.todayISO()};
+    const v = rec || {name:'',phone:'',email:'',district:'',panchayath:'',assignedTo:'',status:'New Lead', lastContact: Util.todayISO(), notes:''};
     UI.openModal(rec? 'Edit Lead / Customer' : 'Add Lead / Customer', `
       <div class="form-row">
         <div class="field"><label>Full Name *</label><input id="f_name" value="${Util.escapeHtml(v.name)}"></div>
@@ -1055,6 +1071,7 @@ const Customers = {
         <div class="field"><label>Status</label><select id="f_status">${DROPDOWNS.status.map(s=>`<option ${s===v.status?'selected':''}>${s}</option>`).join('')}</select></div>
         <div class="field"><label>Last Contact Date</label><input type="date" id="f_lastContact" value="${v.lastContact||''}"></div>
       </div>
+      <div class="field"><label>Notes (reply / remarks)</label><textarea id="f_notes" placeholder="e.g. Asked for a call back next week, wants bulk discount...">${Util.escapeHtml(v.notes||'')}</textarea></div>
       <datalist id="dl_district">${DROPDOWNS.district.map(d=>`<option value="${d}">`).join('')}</datalist>
     `, `
       <button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button>
@@ -1076,6 +1093,7 @@ const Customers = {
       assignedTo: document.getElementById('f_assignedTo').value,
       status: newStatus,
       lastContact: document.getElementById('f_lastContact').value,
+      notes: document.getElementById('f_notes').value.trim(),
       createdDate: (prev && prev.createdDate) || Util.todayISO(),
       timeline: (prev && prev.timeline) || []
     };
@@ -1180,6 +1198,11 @@ const Customers = {
             <a class="btn btn-outline btn-sm" style="text-decoration:none;flex:1;text-align:center;" href="tel:${Util.escapeHtml(x.phone)}">&#128222; Call</a>
           </div>
         </div>
+
+        ${x.notes? `<div class="card card-pad" style="margin-bottom:14px;">
+          <div class="cell-mute" style="font-size:11px;margin-bottom:4px;">NOTES</div>
+          <div style="white-space:pre-wrap;font-size:13px;">${Util.escapeHtml(x.notes)}</div>
+        </div>` : ''}
 
         <h4 style="font-size:12.5px;text-transform:uppercase;color:var(--text-mute);margin:16px 0 8px;">Quick Actions</h4>
         <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px;">
@@ -1603,25 +1626,29 @@ const Payments = {
         <button class="btn btn-primary btn-sm" onclick="Payments.openForm(null)">&#65291; Add Invoice</button>
       </div>
       <div class="card"><div class="table-wrap">
-      ${list.length ? `<table><thead><tr><th>Invoice #</th><th>Company</th><th>Date</th><th>Party</th><th>Amount</th><th>Bill Pending Amount</th><th>Amount Paid</th><th>Contact</th><th>Follow-up Date</th><th>Response</th><th>Status</th><th></th></tr></thead><tbody>
+      ${list.length ? `<table><thead><tr><th>Party Name</th><th>Company Name</th><th>Invoice Number</th><th>Invoice Date</th><th>Taxable Value</th><th>CGST</th><th>SGST</th><th>IGST</th><th>Round Off</th><th>Invoice Amount</th><th>Due Amount</th><th>Payment Status</th><th>Contact</th><th>Follow-up Date</th><th>Response</th><th></th></tr></thead><tbody>
         ${list.map(p=>{
           const overdue = p.status!=='Paid' && p.followupDate && p.followupDate < Util.todayISO();
           const paidAmt = Number(p.amountPaid)||0;
-          const pendingAmt = Math.max((Number(p.amount)||0)-paidAmt,0);
+          const pendingAmt = p.dueAmount!==undefined ? Math.max(Number(p.dueAmount)||0,0) : Math.max((Number(p.amount)||0)-paidAmt,0);
           return `<tr>
-          <td class="mono cell-main">${p.id}</td>
-          <td>${p.companyName? `<span class="badge badge-blue">${Util.escapeHtml(p.companyName)}</span>` : '—'}</td>
-          <td class="cell-mute">${Util.fmtDate(p.invoiceDate)}</td>
           <td class="cell-main">${Util.escapeHtml(p.party)}</td>
+          <td>${p.companyName? `<span class="badge badge-blue">${Util.escapeHtml(p.companyName)}</span>` : '—'}</td>
+          <td class="mono cell-mute">${Util.escapeHtml(p.invoiceNumber||p.id)}</td>
+          <td class="cell-mute">${Util.fmtDate(p.invoiceDate)}</td>
+          <td class="mono">${Util.fmtMoney(p.taxableValue||0)}</td>
+          <td class="mono">${Util.fmtMoney(p.cgst||0)}</td>
+          <td class="mono">${Util.fmtMoney(p.sgst||0)}</td>
+          <td class="mono">${Util.fmtMoney(p.igst||0)}</td>
+          <td class="mono">${Util.fmtMoney(p.roundOff||0)}</td>
           <td class="mono">${Util.fmtMoney(p.amount)}</td>
           <td class="mono" style="color:${pendingAmt>0?'var(--red)':'var(--text-mute)'};">${Util.fmtMoney(pendingAmt)}</td>
-          <td class="mono" style="color:var(--accent-dark);">${Util.fmtMoney(paidAmt)}</td>
+          <td>${statusBadge(p.status)}</td>
           <td class="cell-mute">${Util.escapeHtml(p.contact||'')}<br><span class="mono" style="font-size:11px;">${Util.escapeHtml(p.phone||'')}</span></td>
           <td>${overdue?'<span class="badge badge-red">Overdue</span> ':''}${Util.fmtDate(p.followupDate)}</td>
           <td class="cell-mute">${Util.escapeHtml(p.response||'—')}</td>
-          <td>${statusBadge(p.status)}</td>
           <td style="display:flex;gap:5px;">
-            <a class="icon-btn" style="color:#25D366;text-decoration:none;" title="WhatsApp reminder" href="${Util.waLink(p.phone,'Hi '+p.contact+', this is a reminder that invoice '+p.id+' for '+Util.fmtMoney(pendingAmt).replace('&#8377;','Rs.')+' is pending. Kindly clear at the earliest. - Jays Trading and Business Solution')}" target="_blank">&#128172;</a>
+            <a class="icon-btn" style="color:#25D366;text-decoration:none;" title="WhatsApp reminder" href="${Util.waLink(p.phone,'Hi '+p.contact+', this is a reminder that invoice '+(p.invoiceNumber||p.id)+' for '+Util.fmtMoney(pendingAmt).replace('&#8377;','Rs.')+' is pending. Kindly clear at the earliest. - Jays Trading and Business Solution')}" target="_blank">&#128172;</a>
             <button class="icon-btn" onclick="Payments.markPaid('${p.id}')" title="Mark paid">&#10003;</button>
             <button class="icon-btn" onclick="Payments.openForm('${p.id}')">&#9998;</button>
             <button class="icon-btn" onclick="Payments.remove('${p.id}')">&#128465;</button>
@@ -1635,29 +1662,41 @@ const Payments = {
   openForm(id, presetCustomerId){
     const rec = id ? Store.data.payments.find(x=>x.id===id) : null;
     const presetCust = presetCustomerId ? Store.data.customers.find(c=>c.id===presetCustomerId) : null;
-    const v = rec || {companyName:'JAYS', invoiceDate:Util.todayISO(), party:presetCust?presetCust.name:'', amount:'', amountPaid:0, contact:presetCust?presetCust.name:'', phone:presetCust?presetCust.phone:'', followupDate:'', response:'', status:'Pending', customerId:presetCustomerId||''};
+    const v = rec || {companyName:'JAYS', invoiceNumber:'', invoiceDate:Util.todayISO(), party:presetCust?presetCust.name:'', taxableValue:'', cgst:'', sgst:'', igst:'', roundOff:0, amount:'', amountPaid:0, contact:presetCust?presetCust.name:'', phone:presetCust?presetCust.phone:'', followupDate:'', response:'', status:'Pending', customerId:presetCustomerId||''};
     const custOptions = Store.data.customers.map(c=>`<option value="${c.id}" ${c.id===v.customerId?'selected':''}>${Util.escapeHtml(c.name)} — ${Util.escapeHtml(c.phone)}</option>`).join('');
     UI.openModal(rec?'Edit Invoice':'Add Invoice / Payment', `
       <div class="field"><label>Contact (from Customers)</label><select id="p_cust" onchange="Payments.autofill()"><option value="">— manual entry —</option>${custOptions}</select></div>
+      <div class="form-row">
+        <div class="field"><label>Party Name *</label><input id="p_party" value="${Util.escapeHtml(v.party)}"></div>
+        <div class="field"><label>Invoice Number</label><input id="p_invoiceNumber" value="${Util.escapeHtml(v.invoiceNumber||'')}"></div>
+      </div>
       <div class="form-row">
         <div class="field"><label>Company Name</label><select id="p_companyName">${DROPDOWNS.companyName.map(c=>`<option ${c===v.companyName?'selected':''}>${c}</option>`).join('')}</select></div>
         <div class="field"><label>Invoice Date</label><input type="date" id="p_invoiceDate" value="${v.invoiceDate}"></div>
       </div>
       <div class="form-row">
+        <div class="field"><label>Taxable Value</label><input type="number" id="p_taxableValue" value="${v.taxableValue||''}" oninput="Payments.updatePendingPreview()"></div>
+        <div class="field"><label>Round Off</label><input type="number" id="p_roundOff" value="${v.roundOff||0}" oninput="Payments.updatePendingPreview()"></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>CGST</label><input type="number" id="p_cgst" value="${v.cgst||''}" oninput="Payments.updatePendingPreview()"></div>
+        <div class="field"><label>SGST</label><input type="number" id="p_sgst" value="${v.sgst||''}" oninput="Payments.updatePendingPreview()"></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>IGST</label><input type="number" id="p_igst" value="${v.igst||''}" oninput="Payments.updatePendingPreview()"></div>
         <div class="field"><label>Invoice Amount *</label><input type="number" id="p_amount" value="${v.amount}" oninput="Payments.updatePendingPreview()"></div>
-        <div class="field"><label>Party Name *</label><input id="p_party" value="${Util.escapeHtml(v.party)}"></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>Amount Paid</label><input type="number" id="p_amountPaid" value="${v.amountPaid||0}" oninput="Payments.updatePendingPreview()"></div>
+        <div class="field"><label>Due Amount</label><input type="number" id="p_pendingPreview" value="${Math.max((Number(v.amount)||0)-(Number(v.amountPaid)||0),0)}" disabled></div>
       </div>
       <div class="form-row">
         <div class="field"><label>Contact Person</label><input id="p_contact" value="${Util.escapeHtml(v.contact)}"></div>
         <div class="field"><label>Phone Number</label><input id="p_phone" value="${Util.escapeHtml(v.phone)}"></div>
       </div>
       <div class="form-row">
-        <div class="field"><label>Amount Paid</label><input type="number" id="p_amountPaid" value="${v.amountPaid||0}" oninput="Payments.updatePendingPreview()"></div>
-        <div class="field"><label>Bill Pending Amount</label><input type="number" id="p_pendingPreview" value="${Math.max((Number(v.amount)||0)-(Number(v.amountPaid)||0),0)}" disabled></div>
-      </div>
-      <div class="form-row">
         <div class="field"><label>Follow-up Date</label><input type="date" id="p_followupDate" value="${v.followupDate}"></div>
-        <div class="field"><label>Status</label><select id="p_status"><option ${v.status==='Pending'?'selected':''}>Pending</option><option ${v.status==='Paid'?'selected':''}>Paid</option></select></div>
+        <div class="field"><label>Payment Status</label><select id="p_status"><option value="Pending" ${v.status==='Pending'?'selected':''}>Unpaid</option><option value="Paid" ${v.status==='Paid'?'selected':''}>Paid</option></select></div>
       </div>
       <div class="field"><label>Response / Notes</label><textarea id="p_response">${Util.escapeHtml(v.response)}</textarea></div>
       <input type="hidden" id="p_customerId" value="${v.customerId||''}">
@@ -1690,8 +1729,16 @@ const Payments = {
       id: id || (Store.data.settings.payPrefix||'INV-')+String(Store.data.settings.payNext||1).padStart(4,'0'),
       customerId: custId,
       companyName: document.getElementById('p_companyName').value,
+      invoiceNumber: document.getElementById('p_invoiceNumber').value.trim(),
       invoiceDate: document.getElementById('p_invoiceDate').value,
-      party, amount: Number(amount), amountPaid,
+      party,
+      taxableValue: Number(document.getElementById('p_taxableValue').value)||0,
+      cgst: Number(document.getElementById('p_cgst').value)||0,
+      sgst: Number(document.getElementById('p_sgst').value)||0,
+      igst: Number(document.getElementById('p_igst').value)||0,
+      roundOff: Number(document.getElementById('p_roundOff').value)||0,
+      amount: Number(amount), amountPaid,
+      dueAmount: Math.max(Number(amount)-amountPaid,0),
       contact: document.getElementById('p_contact').value.trim(),
       phone: document.getElementById('p_phone').value.trim(),
       followupDate: document.getElementById('p_followupDate').value,
@@ -1720,8 +1767,8 @@ const Payments = {
   downloadSampleTemplate(){
     try{
       const sample = [
-        {CompanyName:'JAYS', InvoiceDate:Util.todayISO(), Party:'ABC Enterprises', Amount:25000, AmountPaid:10000, Contact:'Ramesh Kumar', Phone:'9876543210', FollowupDate:Util.todayISO(), Status:'Pending', Response:'Promised to pay next week'},
-        {CompanyName:'LLP', InvoiceDate:Util.todayISO(), Party:'Green Panchayath Office', Amount:15000, AmountPaid:15000, Contact:'Secretary', Phone:'9847012345', FollowupDate:'', Status:'Paid', Response:'Paid in full'}
+        {'Party Name':'SECRETARY PANDIKKAD GRAMAPANCHAYATH','Company Name':'JAYS','Invoice Number':'INV103','Invoice Date':'30-03-2026','Taxable Value':41864.41,'CGST':3767.8,'SGST':3767.8,'IGST':0,'Round Off':-0.01,'Invoice Amount':49400,'Due Amount':49400,'Payment Status':'Unpaid'},
+        {'Party Name':'ABC Enterprises','Company Name':'LLP','Invoice Number':'INV104','Invoice Date':'01-04-2026','Taxable Value':21186.44,'CGST':1906.78,'SGST':1906.78,'IGST':0,'Round Off':0,'Invoice Amount':25000,'Due Amount':0,'Payment Status':'Paid'}
       ];
       const ws = XLSX.utils.json_to_sheet(sample);
       const wb = XLSX.utils.book_new();
@@ -1729,6 +1776,20 @@ const Payments = {
       XLSX.writeFile(wb, 'jays-crm-payments-sample-template.xlsx');
       UI.toast('Sample template downloaded');
     }catch(e){ console.error(e); UI.toast('Could not generate template'); }
+  },
+  _num(v){
+    if(v===undefined||v===null||v==='') return 0;
+    if(typeof v==='number') return v;
+    return Number(String(v).replace(/[₹,\s]/g,''))||0;
+  },
+  _date(v){
+    if(!v) return '';
+    if(v instanceof Date) return v.toISOString().slice(0,10);
+    const s = String(v).trim();
+    if(/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0,10);
+    const m = s.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})$/);
+    if(m) return m[3]+'-'+m[2].padStart(2,'0')+'-'+m[1].padStart(2,'0');
+    return s;
   },
   async importExcel(file){
     if(!file) return;
@@ -1740,19 +1801,33 @@ const Payments = {
       if(!rows.length){ UI.toast('No rows found in file'); return; }
       let count = 0;
       rows.forEach(r=>{
-        const party = r.Party||r.party; if(!party) return;
-        const amount = Number(r.Amount||r.amount)||0;
-        const amountPaid = Number(r.AmountPaid||r.amountPaid||r['Amount Paid'])||0;
-        let status = r.Status||r.status||'Pending';
-        if(amountPaid>=amount && amount>0) status='Paid';
-        let companyName = String(r.CompanyName||r.companyName||r['Company Name']||r.Company||'').trim().toUpperCase();
-        if(!DROPDOWNS.companyName.includes(companyName)) companyName = DROPDOWNS.companyName[0];
+        const party = r['Party Name']||r.Party||r.party; if(!party) return;
+        const invoiceNumber = String(r['Invoice Number']||r.InvoiceNumber||r.invoiceNumber||'').trim();
+        const taxableValue = this._num(r['Taxable Value']||r.TaxableValue);
+        const cgst = this._num(r.CGST||r.cgst);
+        const sgst = this._num(r.SGST||r.sgst);
+        const igst = this._num(r.IGST||r.igst);
+        const roundOff = this._num(r['Round Off']||r.RoundOff);
+        const amount = this._num(r['Invoice Amount']||r.Amount||r.amount);
+        const dueAmount = this._num(r['Due Amount']||r.DueAmount||r.dueAmount);
+        const amountPaid = Math.max(amount-dueAmount,0);
+        let statusRaw = String(r['Payment Status']||r.Status||r.status||'Pending').trim().toLowerCase();
+        let status = statusRaw==='paid' ? 'Paid' : 'Pending';
+        if(dueAmount<=0 && amount>0) status='Paid';
+        let companyName = String(r['Company Name']||r.CompanyName||r.companyName||r.Company||'').trim().toUpperCase();
+        if(!DROPDOWNS.companyName.includes(companyName)){
+          const match = DROPDOWNS.companyName.find(c=>companyName.includes(c) || c.includes(companyName));
+          companyName = match || DROPDOWNS.companyName[0];
+        }
         Store.data.payments.unshift({
           id: (Store.data.settings.payPrefix||'INV-')+String(Store.data.settings.payNext||1).padStart(4,'0'),
           customerId: '',
           companyName,
-          invoiceDate: r.InvoiceDate||r.invoiceDate||Util.todayISO(),
-          party: String(party), amount, amountPaid,
+          invoiceNumber,
+          invoiceDate: this._date(r['Invoice Date']||r.InvoiceDate||r.invoiceDate)||Util.todayISO(),
+          party: String(party),
+          taxableValue, cgst, sgst, igst, roundOff,
+          amount, amountPaid, dueAmount,
           contact: r.Contact||r.contact||'',
           phone: String(r.Phone||r.phone||''),
           followupDate: r.FollowupDate||r.followupDate||r['Follow-up Date']||'',
@@ -1958,7 +2033,7 @@ const Reports = {
     } else if(view==='quotations'){
       rows = Store.data.quotations.map(q=>({ID:q.id, Date:q.date, Customer:q.customerName, Phone:q.phone, Subtotal:q.subtotal, GST:q.gst, Total:q.total, Status:q.status}));
     } else if(view==='payments'){
-      rows = Store.data.payments.map(p=>({ID:p.id, CompanyName:p.companyName||'', InvoiceDate:p.invoiceDate, Party:p.party, Amount:p.amount, AmountPaid:p.amountPaid||0, BillPendingAmount:Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0), Contact:p.contact, Phone:p.phone, FollowupDate:p.followupDate, Response:p.response, Status:p.status}));
+      rows = Store.data.payments.map(p=>({'Party Name':p.party, 'Company Name':p.companyName||'', 'Invoice Number':p.invoiceNumber||p.id, 'Invoice Date':p.invoiceDate, 'Taxable Value':p.taxableValue||0, 'CGST':p.cgst||0, 'SGST':p.sgst||0, 'IGST':p.igst||0, 'Round Off':p.roundOff||0, 'Invoice Amount':p.amount, 'Due Amount':p.dueAmount!==undefined?p.dueAmount:Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0), 'Payment Status':p.status==='Paid'?'Paid':'Unpaid', Contact:p.contact, Phone:p.phone, FollowupDate:p.followupDate, Response:p.response}));
     } else if(view==='followupcentre'){
       rows = Store.data.followups.map(f=>({ID:f.id, Date:f.date, Customer:f.customerName, Phone:f.phone, Purpose:f.purpose, Status:f.status, Notes:f.notes}));
     } else if(view==='tasks'){
@@ -2102,7 +2177,7 @@ const Backup = {
         Customers: Store.data.customers.map(x=>({ID:x.id,Name:x.name,Phone:x.phone,Email:x.email,District:x.district,Area:x.panchayath,AssignedTo:x.assignedTo,Status:x.status,LastContact:x.lastContact,CreatedDate:x.createdDate})),
         Products: Store.data.products.map(p=>({Code:p.code,Category:p.category,Name:p.name,Unit:p.unit,Price:p.price,Stock:p.stock})),
         Quotations: Store.data.quotations.map(q=>({ID:q.id,Date:q.date,Customer:q.customerName,Phone:q.phone,Subtotal:q.subtotal,GST:q.gst,Total:q.total,Status:q.status})),
-        Payments: Store.data.payments.map(p=>({ID:p.id,CompanyName:p.companyName||'',InvoiceDate:p.invoiceDate,Party:p.party,Amount:p.amount,AmountPaid:p.amountPaid||0,BillPendingAmount:Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0),Contact:p.contact,Phone:p.phone,FollowupDate:p.followupDate,Status:p.status})),
+        Payments: Store.data.payments.map(p=>({'Party Name':p.party,'Company Name':p.companyName||'','Invoice Number':p.invoiceNumber||p.id,'Invoice Date':p.invoiceDate,'Taxable Value':p.taxableValue||0,'CGST':p.cgst||0,'SGST':p.sgst||0,'IGST':p.igst||0,'Round Off':p.roundOff||0,'Invoice Amount':p.amount,'Due Amount':p.dueAmount!==undefined?p.dueAmount:Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0),'Payment Status':p.status==='Paid'?'Paid':'Unpaid',Contact:p.contact,Phone:p.phone,FollowupDate:p.followupDate})),
         Followups: Store.data.followups.map(f=>({ID:f.id,Date:f.date,Customer:f.customerName,Phone:f.phone,Purpose:f.purpose,Status:f.status})),
         Tasks: Store.data.tasks.map(t=>({ID:t.id,Date:t.date,Type:t.type,AssignedTo:t.assignedTo,Customer:t.customer,Notes:t.notes,Done:t.done})),
         Notes: Store.data.notes.map(n=>({ID:n.id,Date:n.date,Note:n.text,Remark:n.remark})),
