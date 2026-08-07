@@ -504,6 +504,7 @@ const DROPDOWNS = {
   interactionType: ['Phone','Email','Whatsapp','Demo'],
   taskType: ['Product Rate and Spec Req','Payment Pending','New Enquiry','Lead Followup','New Item Request','Payment Details Enquiry'],
   district: ['Thiruvananthapuram','Kollam','Pathanamthitta','Alappuzha','Kottayam','Idukki','Ernakulam','Thrissur','Palakkad','Malappuram','Kozhikode','Wayanad','Kannur','Kasaragod'],
+  companyName: ['JAYS','LLP'],
   productCategories: [...new Set(SEED_PRODUCTS.map(p=>p.category))],
   timelineStage: ['First Contact','WhatsApp Sent','Quotation Sent','Follow-up','Payment Status','Site Visit','Note','Status Change','Other']
 };
@@ -1602,13 +1603,14 @@ const Payments = {
         <button class="btn btn-primary btn-sm" onclick="Payments.openForm(null)">&#65291; Add Invoice</button>
       </div>
       <div class="card"><div class="table-wrap">
-      ${list.length ? `<table><thead><tr><th>Invoice #</th><th>Date</th><th>Party</th><th>Amount</th><th>Bill Pending Amount</th><th>Amount Paid</th><th>Contact</th><th>Follow-up Date</th><th>Response</th><th>Status</th><th></th></tr></thead><tbody>
+      ${list.length ? `<table><thead><tr><th>Invoice #</th><th>Company</th><th>Date</th><th>Party</th><th>Amount</th><th>Bill Pending Amount</th><th>Amount Paid</th><th>Contact</th><th>Follow-up Date</th><th>Response</th><th>Status</th><th></th></tr></thead><tbody>
         ${list.map(p=>{
           const overdue = p.status!=='Paid' && p.followupDate && p.followupDate < Util.todayISO();
           const paidAmt = Number(p.amountPaid)||0;
           const pendingAmt = Math.max((Number(p.amount)||0)-paidAmt,0);
           return `<tr>
           <td class="mono cell-main">${p.id}</td>
+          <td>${p.companyName? `<span class="badge badge-blue">${Util.escapeHtml(p.companyName)}</span>` : '—'}</td>
           <td class="cell-mute">${Util.fmtDate(p.invoiceDate)}</td>
           <td class="cell-main">${Util.escapeHtml(p.party)}</td>
           <td class="mono">${Util.fmtMoney(p.amount)}</td>
@@ -1633,15 +1635,18 @@ const Payments = {
   openForm(id, presetCustomerId){
     const rec = id ? Store.data.payments.find(x=>x.id===id) : null;
     const presetCust = presetCustomerId ? Store.data.customers.find(c=>c.id===presetCustomerId) : null;
-    const v = rec || {invoiceDate:Util.todayISO(), party:presetCust?presetCust.name:'', amount:'', amountPaid:0, contact:presetCust?presetCust.name:'', phone:presetCust?presetCust.phone:'', followupDate:'', response:'', status:'Pending', customerId:presetCustomerId||''};
+    const v = rec || {companyName:'JAYS', invoiceDate:Util.todayISO(), party:presetCust?presetCust.name:'', amount:'', amountPaid:0, contact:presetCust?presetCust.name:'', phone:presetCust?presetCust.phone:'', followupDate:'', response:'', status:'Pending', customerId:presetCustomerId||''};
     const custOptions = Store.data.customers.map(c=>`<option value="${c.id}" ${c.id===v.customerId?'selected':''}>${Util.escapeHtml(c.name)} — ${Util.escapeHtml(c.phone)}</option>`).join('');
     UI.openModal(rec?'Edit Invoice':'Add Invoice / Payment', `
       <div class="field"><label>Contact (from Customers)</label><select id="p_cust" onchange="Payments.autofill()"><option value="">— manual entry —</option>${custOptions}</select></div>
       <div class="form-row">
+        <div class="field"><label>Company Name</label><select id="p_companyName">${DROPDOWNS.companyName.map(c=>`<option ${c===v.companyName?'selected':''}>${c}</option>`).join('')}</select></div>
         <div class="field"><label>Invoice Date</label><input type="date" id="p_invoiceDate" value="${v.invoiceDate}"></div>
-        <div class="field"><label>Invoice Amount *</label><input type="number" id="p_amount" value="${v.amount}" oninput="Payments.updatePendingPreview()"></div>
       </div>
-      <div class="field"><label>Party Name *</label><input id="p_party" value="${Util.escapeHtml(v.party)}"></div>
+      <div class="form-row">
+        <div class="field"><label>Invoice Amount *</label><input type="number" id="p_amount" value="${v.amount}" oninput="Payments.updatePendingPreview()"></div>
+        <div class="field"><label>Party Name *</label><input id="p_party" value="${Util.escapeHtml(v.party)}"></div>
+      </div>
       <div class="form-row">
         <div class="field"><label>Contact Person</label><input id="p_contact" value="${Util.escapeHtml(v.contact)}"></div>
         <div class="field"><label>Phone Number</label><input id="p_phone" value="${Util.escapeHtml(v.phone)}"></div>
@@ -1684,6 +1689,7 @@ const Payments = {
     const rec = {
       id: id || (Store.data.settings.payPrefix||'INV-')+String(Store.data.settings.payNext||1).padStart(4,'0'),
       customerId: custId,
+      companyName: document.getElementById('p_companyName').value,
       invoiceDate: document.getElementById('p_invoiceDate').value,
       party, amount: Number(amount), amountPaid,
       contact: document.getElementById('p_contact').value.trim(),
@@ -1714,8 +1720,8 @@ const Payments = {
   downloadSampleTemplate(){
     try{
       const sample = [
-        {InvoiceDate:Util.todayISO(), Party:'ABC Enterprises', Amount:25000, AmountPaid:10000, Contact:'Ramesh Kumar', Phone:'9876543210', FollowupDate:Util.todayISO(), Status:'Pending', Response:'Promised to pay next week'},
-        {InvoiceDate:Util.todayISO(), Party:'Green Panchayath Office', Amount:15000, AmountPaid:15000, Contact:'Secretary', Phone:'9847012345', FollowupDate:'', Status:'Paid', Response:'Paid in full'}
+        {CompanyName:'JAYS', InvoiceDate:Util.todayISO(), Party:'ABC Enterprises', Amount:25000, AmountPaid:10000, Contact:'Ramesh Kumar', Phone:'9876543210', FollowupDate:Util.todayISO(), Status:'Pending', Response:'Promised to pay next week'},
+        {CompanyName:'LLP', InvoiceDate:Util.todayISO(), Party:'Green Panchayath Office', Amount:15000, AmountPaid:15000, Contact:'Secretary', Phone:'9847012345', FollowupDate:'', Status:'Paid', Response:'Paid in full'}
       ];
       const ws = XLSX.utils.json_to_sheet(sample);
       const wb = XLSX.utils.book_new();
@@ -1739,9 +1745,12 @@ const Payments = {
         const amountPaid = Number(r.AmountPaid||r.amountPaid||r['Amount Paid'])||0;
         let status = r.Status||r.status||'Pending';
         if(amountPaid>=amount && amount>0) status='Paid';
+        let companyName = String(r.CompanyName||r.companyName||r['Company Name']||r.Company||'').trim().toUpperCase();
+        if(!DROPDOWNS.companyName.includes(companyName)) companyName = DROPDOWNS.companyName[0];
         Store.data.payments.unshift({
           id: (Store.data.settings.payPrefix||'INV-')+String(Store.data.settings.payNext||1).padStart(4,'0'),
           customerId: '',
+          companyName,
           invoiceDate: r.InvoiceDate||r.invoiceDate||Util.todayISO(),
           party: String(party), amount, amountPaid,
           contact: r.Contact||r.contact||'',
@@ -1949,7 +1958,7 @@ const Reports = {
     } else if(view==='quotations'){
       rows = Store.data.quotations.map(q=>({ID:q.id, Date:q.date, Customer:q.customerName, Phone:q.phone, Subtotal:q.subtotal, GST:q.gst, Total:q.total, Status:q.status}));
     } else if(view==='payments'){
-      rows = Store.data.payments.map(p=>({ID:p.id, InvoiceDate:p.invoiceDate, Party:p.party, Amount:p.amount, AmountPaid:p.amountPaid||0, BillPendingAmount:Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0), Contact:p.contact, Phone:p.phone, FollowupDate:p.followupDate, Response:p.response, Status:p.status}));
+      rows = Store.data.payments.map(p=>({ID:p.id, CompanyName:p.companyName||'', InvoiceDate:p.invoiceDate, Party:p.party, Amount:p.amount, AmountPaid:p.amountPaid||0, BillPendingAmount:Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0), Contact:p.contact, Phone:p.phone, FollowupDate:p.followupDate, Response:p.response, Status:p.status}));
     } else if(view==='followupcentre'){
       rows = Store.data.followups.map(f=>({ID:f.id, Date:f.date, Customer:f.customerName, Phone:f.phone, Purpose:f.purpose, Status:f.status, Notes:f.notes}));
     } else if(view==='tasks'){
@@ -2093,7 +2102,7 @@ const Backup = {
         Customers: Store.data.customers.map(x=>({ID:x.id,Name:x.name,Phone:x.phone,Email:x.email,District:x.district,Area:x.panchayath,AssignedTo:x.assignedTo,Status:x.status,LastContact:x.lastContact,CreatedDate:x.createdDate})),
         Products: Store.data.products.map(p=>({Code:p.code,Category:p.category,Name:p.name,Unit:p.unit,Price:p.price,Stock:p.stock})),
         Quotations: Store.data.quotations.map(q=>({ID:q.id,Date:q.date,Customer:q.customerName,Phone:q.phone,Subtotal:q.subtotal,GST:q.gst,Total:q.total,Status:q.status})),
-        Payments: Store.data.payments.map(p=>({ID:p.id,InvoiceDate:p.invoiceDate,Party:p.party,Amount:p.amount,AmountPaid:p.amountPaid||0,BillPendingAmount:Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0),Contact:p.contact,Phone:p.phone,FollowupDate:p.followupDate,Status:p.status})),
+        Payments: Store.data.payments.map(p=>({ID:p.id,CompanyName:p.companyName||'',InvoiceDate:p.invoiceDate,Party:p.party,Amount:p.amount,AmountPaid:p.amountPaid||0,BillPendingAmount:Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0),Contact:p.contact,Phone:p.phone,FollowupDate:p.followupDate,Status:p.status})),
         Followups: Store.data.followups.map(f=>({ID:f.id,Date:f.date,Customer:f.customerName,Phone:f.phone,Purpose:f.purpose,Status:f.status})),
         Tasks: Store.data.tasks.map(t=>({ID:t.id,Date:t.date,Type:t.type,AssignedTo:t.assignedTo,Customer:t.customer,Notes:t.notes,Done:t.done})),
         Notes: Store.data.notes.map(n=>({ID:n.id,Date:n.date,Note:n.text,Remark:n.remark})),
