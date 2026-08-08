@@ -191,6 +191,11 @@
 
   /* ---------- TABLE ---------- */
   .table-wrap{overflow-x:auto;}
+  .bottom-scrollbar{position:fixed;left:236px;right:0;bottom:0;height:16px;overflow-x:auto;overflow-y:hidden;background:var(--bg);border-top:1px solid var(--border);z-index:85;display:none;}
+  .bottom-scrollbar::-webkit-scrollbar{height:12px;}
+  .bottom-scrollbar::-webkit-scrollbar-thumb{background:#B7C2D0;border-radius:8px;}
+  .bottom-scrollbar-inner{height:1px;}
+  @media(max-width:880px){ .bottom-scrollbar{left:0;} }
   table{width:100%;border-collapse:collapse;font-size:13px;}
   thead th{
     text-align:left;padding:10px 14px;font-size:10.5px;text-transform:uppercase;letter-spacing:0.5px;
@@ -349,7 +354,6 @@
         <input id="loginPass" type="password" placeholder="••••••••" autocomplete="current-password">
       </div>
       <button class="btn btn-primary btn-block" onclick="Auth.login()">Sign in</button>
-      <div class="demo-note">Demo logins &mdash; Admin: <b>admin / admin123</b><br>Sales: <b>sales1 / Najiya</b></div>
     </div>
   </div>
 </div>
@@ -411,6 +415,7 @@
 
 <div class="toast" id="toast"></div>
 <div id="printArea" class="print-only"></div>
+<div class="bottom-scrollbar" id="bottomScrollbar"><div class="bottom-scrollbar-inner" id="bottomScrollbarInner"></div></div>
 
 <script>
 /* =====================================================================
@@ -507,7 +512,11 @@ const DROPDOWNS = {
   district: ['Thiruvananthapuram','Kollam','Pathanamthitta','Alappuzha','Kottayam','Idukki','Ernakulam','Thrissur','Palakkad','Malappuram','Kozhikode','Wayanad','Kannur','Kasaragod'],
   companyName: ['JAYS','LLP'],
   productCategories: [...new Set(SEED_PRODUCTS.map(p=>p.category))],
-  timelineStage: ['First Contact','WhatsApp Sent','Quotation Sent','Follow-up','Payment Status','Site Visit','Note','Status Change','Other']
+  timelineStage: ['First Contact','WhatsApp Sent','Quotation Sent','Follow-up','Payment Status','Site Visit','Note','Status Change','Other'],
+  gemcracStatus: ['Needs Update','Updated'],
+  buyingMode: ['DIRECT','BIDDING','REVERSE AUCTION'],
+  orderStatus: ['In Progress','Work Order Done','Product Reached','Dispatched','Payment Received'],
+  complaintStatus: ['Initiated','Pending','Solved']
 };
 
 const STAGE_FLOW = ['First Contact','WhatsApp Sent','Quotation Sent','Follow-up','Payment Status'];
@@ -522,7 +531,8 @@ const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const Store = {
   data: {
     customers: [], products: [], quotations: [], payments: [],
-    followups: [], tasks: [], notes: [], users: [], settings: {}, activityLog: []
+    followups: [], tasks: [], notes: [], users: [], settings: {}, activityLog: [],
+    gemcrac: [], orders: [], complaints: []
   },
   defaults(){
     return {
@@ -533,6 +543,8 @@ const Store = {
       gstPercent: 0,
       quoPrefix: 'Q-', quoNext: 1,
       payPrefix: 'INV-', payNext: 1,
+      ordPrefix: 'ORD-', ordNext: 1,
+      cmpPrefix: 'CMP-', cmpNext: 1,
       lastBackupAt: ''
     };
   },
@@ -566,6 +578,9 @@ const Store = {
     this.data.tasks = await this.loadKey('jays_tasks', []);
     this.data.notes = await this.loadKey('jays_notes', []);
     this.data.activityLog = await this.loadKey('jays_activitylog', []);
+    this.data.gemcrac = await this.loadKey('jays_gemcrac', []);
+    this.data.orders = await this.loadKey('jays_orders', []);
+    this.data.complaints = await this.loadKey('jays_complaints', []);
 
     const settings = await this.loadKey('jays_settings', null);
     this.data.settings = settings || this.defaults();
@@ -727,7 +742,10 @@ const NAV = [
   ]},
   {sec:'Operations', items:[
     {id:'products', ic:'&#128230;', label:'Products'},
+    {id:'orders', ic:'&#128230;', label:'New Order'},
     {id:'payments', ic:'&#128179;', label:'Payment Followup'},
+    {id:'gemcrac', ic:'&#128257;', label:'GEM CRAC'},
+    {id:'complaints', ic:'&#9888;', label:'Complaint Management'},
     {id:'tasks', ic:'&#9989;', label:'Tasks'},
     {id:'notes', ic:'&#128221;', label:'Notes'},
   ]},
@@ -748,7 +766,10 @@ const PAGE_META = {
   followupcentre:['Follow-up Centre','Today, tomorrow, overdue &amp; upcoming — one click away'],
   quotations:['Quotations','Create and track quotes'],
   products:['Product Master','Catalog & pricing'],
+  orders:['New Order','Track orders from placement to payment'],
   payments:['Payment Followup','Pending invoices & reminders'],
+  gemcrac:['GEM CRAC','GEM order CRAC tracking & delivery-extension requests'],
+  complaints:['Complaint Management','Log and track customer complaints'],
   tasks:['Tasks','Team to-do list'],
   notes:['Notes','Quick notes & reminders'],
   reports:['Reports','Business performance'],
@@ -767,6 +788,12 @@ function navBadgeCount(id){
   }
   if(id==='payments'){
     return Store.data.payments.filter(p=>p.status==='Pending').length;
+  }
+  if(id==='gemcrac'){
+    return Store.data.gemcrac.filter(g=>g.status==='Needs Update').length;
+  }
+  if(id==='complaints'){
+    return Store.data.complaints.filter(c=>c.status!=='Solved').length;
   }
   return 0;
 }
@@ -811,6 +838,7 @@ const App = {
     document.getElementById('userName').textContent = Auth.session.name || Auth.session.username;
     document.getElementById('userRole').textContent = Auth.session.role;
     document.getElementById('userAvatar').textContent = (Auth.session.name||Auth.session.username).slice(0,1).toUpperCase();
+    if(!BottomScroll.bar) BottomScroll.init();
     go('dashboard');
   }
 };
@@ -821,7 +849,52 @@ document.getElementById('loginUser').addEventListener('keydown', e=>{ if(e.key==
    ROUTER
 ===================================================================== */
 const Views = {};
-const Router = { render(view){ const fn = Views[view]; if(fn) fn(); } };
+const Router = { render(view){ const fn = Views[view]; if(fn) fn(); BottomScroll.refresh(); } };
+
+/* =====================================================================
+   BOTTOM SCROLLBAR (screen-fixed horizontal scrollbar mirroring the
+   active data table, so you don't need to scroll to the table's own
+   bottom edge to scroll it sideways)
+===================================================================== */
+const BottomScroll = {
+  bar: null, inner: null, table: null, _syncing: false,
+  init(){
+    this.bar = document.getElementById('bottomScrollbar');
+    this.inner = document.getElementById('bottomScrollbarInner');
+    this.bar.addEventListener('scroll', ()=>{
+      if(!this.table || this._syncing) return;
+      this._syncing = true;
+      this.table.scrollLeft = this.bar.scrollLeft;
+      this._syncing = false;
+    });
+    window.addEventListener('resize', ()=>this.refresh());
+    const observer = new MutationObserver(()=>this.refresh());
+    observer.observe(document.getElementById('content'), {childList:true, subtree:true});
+  },
+  refresh(){
+    clearTimeout(this._t);
+    this._t = setTimeout(()=>this._doRefresh(), 60);
+  },
+  _doRefresh(){
+    if(this.table) this.table.removeEventListener('scroll', this._onTableScroll);
+    this.table = null;
+    const wraps = document.querySelectorAll('#content .table-wrap');
+    let widest = null;
+    wraps.forEach(w=>{ if(w.scrollWidth > w.clientWidth + 4){ if(!widest || w.scrollWidth > widest.scrollWidth) widest = w; } });
+    if(!widest){ this.bar.style.display='none'; return; }
+    this.table = widest;
+    this.inner.style.width = widest.scrollWidth + 'px';
+    this.bar.style.display = 'block';
+    this.bar.scrollLeft = widest.scrollLeft;
+    this._onTableScroll = ()=>{
+      if(this._syncing) return;
+      this._syncing = true;
+      this.bar.scrollLeft = widest.scrollLeft;
+      this._syncing = false;
+    };
+    this.table.addEventListener('scroll', this._onTableScroll);
+  }
+};
 
 /* =====================================================================
    SMALL CHART HELPERS (pure SVG, no deps)
@@ -1667,7 +1740,7 @@ const Payments = {
         ${(q||fStatus||fCompany||fParty||fOverdue) ? `<button class="btn btn-outline btn-sm" onclick="Payments.clearFilters()">Clear</button>` : ''}
       </div>
       <div class="card"><div class="table-wrap">
-      ${list.length ? `<table><thead><tr><th>Party Name</th><th>Company Name</th><th>Invoice Number</th><th>Invoice Date</th><th>Taxable Value</th><th>CGST</th><th>SGST</th><th>IGST</th><th>Round Off</th><th>Invoice Amount</th><th>Due Amount</th><th>Payment Status</th><th>Contact</th><th>Follow-up Date</th><th>Response</th><th></th></tr></thead><tbody>
+      ${list.length ? `<table><thead><tr><th>Party Name</th><th>Company Name</th><th>Product</th><th>Invoice Number</th><th>Invoice Date</th><th>Taxable Value</th><th>CGST</th><th>SGST</th><th>IGST</th><th>Round Off</th><th>Invoice Amount</th><th>Due Amount</th><th>Payment Status</th><th>Contact</th><th>Follow-up Date</th><th>Response</th><th></th></tr></thead><tbody>
         ${list.map(p=>{
           const overdue = p.status!=='Paid' && p.followupDate && p.followupDate < Util.todayISO();
           const paidAmt = Number(p.amountPaid)||0;
@@ -1675,6 +1748,7 @@ const Payments = {
           return `<tr>
           <td class="cell-main" style="cursor:pointer;" onclick="Payments.filterByParty('${Util.escapeHtml(p.party).replace(/'/g,"\\'")}')" title="View all pending for this party">${Util.escapeHtml(p.party)}</td>
           <td>${p.companyName? `<span class="badge badge-blue">${Util.escapeHtml(p.companyName)}</span>` : '—'}</td>
+          <td class="cell-mute">${Util.escapeHtml(p.product||'—')}</td>
           <td class="mono cell-mute">${Util.escapeHtml(p.invoiceNumber||p.id)}</td>
           <td class="cell-mute">${Util.fmtDate(p.invoiceDate)}</td>
           <td class="mono">${Util.fmtMoney(p.taxableValue||0)}</td>
@@ -1722,7 +1796,7 @@ const Payments = {
   openForm(id, presetCustomerId){
     const rec = id ? Store.data.payments.find(x=>x.id===id) : null;
     const presetCust = presetCustomerId ? Store.data.customers.find(c=>c.id===presetCustomerId) : null;
-    const v = rec || {companyName:'JAYS', invoiceNumber:'', invoiceDate:Util.todayISO(), party:presetCust?presetCust.name:'', taxableValue:'', cgst:'', sgst:'', igst:'', roundOff:0, amount:'', amountPaid:0, contact:presetCust?presetCust.name:'', phone:presetCust?presetCust.phone:'', followupDate:'', response:'', status:'Pending', customerId:presetCustomerId||''};
+    const v = rec || {companyName:'JAYS', product:'', invoiceNumber:'', invoiceDate:Util.todayISO(), party:presetCust?presetCust.name:'', taxableValue:'', cgst:'', sgst:'', igst:'', roundOff:0, amount:'', amountPaid:0, contact:presetCust?presetCust.name:'', phone:presetCust?presetCust.phone:'', followupDate:'', response:'', status:'Pending', customerId:presetCustomerId||''};
     const custOptions = Store.data.customers.map(c=>`<option value="${c.id}" ${c.id===v.customerId?'selected':''}>${Util.escapeHtml(c.name)} — ${Util.escapeHtml(c.phone)}</option>`).join('');
     UI.openModal(rec?'Edit Invoice':'Add Invoice / Payment', `
       <div class="field"><label>Contact (from Customers)</label><select id="p_cust" onchange="Payments.autofill()"><option value="">— manual entry —</option>${custOptions}</select></div>
@@ -1734,6 +1808,7 @@ const Payments = {
         <div class="field"><label>Company Name</label><select id="p_companyName">${DROPDOWNS.companyName.map(c=>`<option ${c===v.companyName?'selected':''}>${c}</option>`).join('')}</select></div>
         <div class="field"><label>Invoice Date</label><input type="date" id="p_invoiceDate" value="${v.invoiceDate}"></div>
       </div>
+      <div class="field"><label>Product</label><select id="p_product"><option value="">— select product —</option>${Store.data.products.map(pr=>`<option value="${Util.escapeHtml(pr.name)}" ${pr.name===v.product?'selected':''}>${Util.escapeHtml(pr.name)}</option>`).join('')}</select></div>
       <div class="form-row">
         <div class="field"><label>Taxable Value</label><input type="number" id="p_taxableValue" value="${v.taxableValue||''}" oninput="Payments.updatePendingPreview()"></div>
         <div class="field"><label>Round Off</label><input type="number" id="p_roundOff" value="${v.roundOff||0}" oninput="Payments.updatePendingPreview()"></div>
@@ -1789,6 +1864,7 @@ const Payments = {
       id: id || (Store.data.settings.payPrefix||'INV-')+String(Store.data.settings.payNext||1).padStart(4,'0'),
       customerId: custId,
       companyName: document.getElementById('p_companyName').value,
+      product: document.getElementById('p_product').value,
       invoiceNumber: document.getElementById('p_invoiceNumber').value.trim(),
       invoiceDate: document.getElementById('p_invoiceDate').value,
       party,
@@ -1827,8 +1903,8 @@ const Payments = {
   downloadSampleTemplate(){
     try{
       const sample = [
-        {'Party Name':'SECRETARY PANDIKKAD GRAMAPANCHAYATH','Company Name':'JAYS','Invoice Number':'INV103','Invoice Date':'30-03-2026','Taxable Value':41864.41,'CGST':3767.8,'SGST':3767.8,'IGST':0,'Round Off':-0.01,'Invoice Amount':49400,'Due Amount':49400,'Payment Status':'Unpaid'},
-        {'Party Name':'ABC Enterprises','Company Name':'LLP','Invoice Number':'INV104','Invoice Date':'01-04-2026','Taxable Value':21186.44,'CGST':1906.78,'SGST':1906.78,'IGST':0,'Round Off':0,'Invoice Amount':25000,'Due Amount':0,'Payment Status':'Paid'}
+        {'Party Name':'SECRETARY PANDIKKAD GRAMAPANCHAYATH','Company Name':'JAYS','Product':'','Invoice Number':'INV103','Invoice Date':'30-03-2026','Taxable Value':41864.41,'CGST':3767.8,'SGST':3767.8,'IGST':0,'Round Off':-0.01,'Invoice Amount':49400,'Due Amount':49400,'Payment Status':'Unpaid'},
+        {'Party Name':'ABC Enterprises','Company Name':'LLP','Product':'','Invoice Number':'INV104','Invoice Date':'01-04-2026','Taxable Value':21186.44,'CGST':1906.78,'SGST':1906.78,'IGST':0,'Round Off':0,'Invoice Amount':25000,'Due Amount':0,'Payment Status':'Paid'}
       ];
       const ws = XLSX.utils.json_to_sheet(sample);
       const wb = XLSX.utils.book_new();
@@ -1883,6 +1959,7 @@ const Payments = {
           id: (Store.data.settings.payPrefix||'INV-')+String(Store.data.settings.payNext||1).padStart(4,'0'),
           customerId: '',
           companyName,
+          product: String(r['Product']||r.Product||r.product||'').trim(),
           invoiceNumber,
           invoiceDate: this._date(r['Invoice Date']||r.InvoiceDate||r.invoiceDate)||Util.todayISO(),
           party: String(party),
@@ -1907,6 +1984,545 @@ const Payments = {
   }
 };
 Views.payments = ()=>Payments.render();
+
+/* =====================================================================
+   GEM CRAC (GEM order delivery-extension / invoice tracking)
+===================================================================== */
+const GemCrac = {
+  render(){
+    const searchEl = document.getElementById('gcSearch');
+    const searchHadFocus = document.activeElement === searchEl;
+    const caretPos = searchHadFocus ? searchEl.selectionStart : null;
+
+    const q = (document.getElementById('gcSearch')?document.getElementById('gcSearch').value:'').toLowerCase();
+    const fStatus = document.getElementById('gcStatusFilter')?document.getElementById('gcStatusFilter').value:'';
+    const fCompany = document.getElementById('gcCompanyFilter')?document.getElementById('gcCompanyFilter').value:'';
+
+    let list = Store.data.gemcrac.slice().sort((a,b)=>(b.orderDate||'').localeCompare(a.orderDate||''));
+    if(q) list = list.filter(g=>(g.party||'').toLowerCase().includes(q) || (g.gemcNumber||'').toLowerCase().includes(q) || (g.productName||'').toLowerCase().includes(q));
+    if(fStatus) list = list.filter(g=>g.status===fStatus);
+    if(fCompany) list = list.filter(g=>g.companyName===fCompany);
+
+    const needsUpdate = Store.data.gemcrac.filter(g=>g.status==='Needs Update').length;
+
+    document.getElementById('content').innerHTML = `
+      <div class="toolbar">
+        <span class="badge badge-red" style="font-size:12px;padding:6px 12px;">Needs Update: ${needsUpdate}</span>
+        <div class="toolbar-spacer"></div>
+        <input type="file" id="gcImportFile" accept=".xlsx,.xls,.csv" style="display:none;" onchange="GemCrac.importExcel(this.files[0])">
+        <button class="btn btn-outline btn-sm" onclick="GemCrac.downloadSampleTemplate()">&#128190; Sample Template</button>
+        <button class="btn btn-outline btn-sm" onclick="document.getElementById('gcImportFile').click()">&#128229; Import from Excel</button>
+        <button class="btn btn-wa btn-sm" onclick="GemCrac.openGenerator()">&#128172; WhatsApp Generator</button>
+        <button class="btn btn-primary btn-sm" onclick="GemCrac.openForm(null)">&#65291; Add Record</button>
+      </div>
+      <div class="toolbar">
+        <div class="search"><span class="ic">&#128269;</span><input id="gcSearch" placeholder="Search party, GEM number, product..." oninput="GemCrac.render()" value="${Util.escapeHtml(q)}"></div>
+        <select id="gcStatusFilter" onchange="GemCrac.render()">
+          <option value="">All Statuses</option>
+          ${DROPDOWNS.gemcracStatus.map(s=>`<option ${s===fStatus?'selected':''}>${s}</option>`).join('')}
+        </select>
+        <select id="gcCompanyFilter" onchange="GemCrac.render()">
+          <option value="">All Companies</option>
+          ${DROPDOWNS.companyName.map(c=>`<option ${c===fCompany?'selected':''}>${c}</option>`).join('')}
+        </select>
+        ${(q||fStatus||fCompany) ? `<button class="btn btn-outline btn-sm" onclick="GemCrac.clearFilters()">Clear</button>` : ''}
+      </div>
+      <div class="card"><div class="table-wrap">
+      ${list.length ? `<table><thead><tr><th>Party / Panchayath</th><th>Company</th><th>GEM Number</th><th>Product Name</th><th>Buying Mode</th><th>Order Date</th><th>Amount</th><th>Qty</th><th>Status</th><th>Remark</th><th>Contact</th><th></th></tr></thead><tbody>
+        ${list.map(g=>`<tr>
+          <td class="cell-main">${Util.escapeHtml(g.party||'')}</td>
+          <td>${g.companyName? `<span class="badge badge-blue">${Util.escapeHtml(g.companyName)}</span>`:'—'}</td>
+          <td class="mono cell-mute">${Util.escapeHtml(g.gemcNumber||'')}</td>
+          <td class="cell-mute">${Util.escapeHtml(g.productName||'')}</td>
+          <td class="cell-mute">${Util.escapeHtml(g.buyingMode||'')}</td>
+          <td class="cell-mute">${Util.fmtDate(g.orderDate)}</td>
+          <td class="mono">${Util.fmtMoney(g.amount||0)}</td>
+          <td class="mono">${g.qty||0}</td>
+          <td>${g.status==='Needs Update'? '<span class="badge badge-red">Needs Update</span>' : '<span class="badge badge-green">Updated</span>'}</td>
+          <td class="cell-mute">${Util.escapeHtml(g.remark||'—')}</td>
+          <td class="cell-mute">${Util.escapeHtml(g.phone||'')}</td>
+          <td style="display:flex;gap:5px;">
+            ${g.phone? `<a class="icon-btn" style="color:#25D366;text-decoration:none;" title="WhatsApp" href="${Util.waLink(g.phone,'')}" target="_blank">&#128172;</a>` : ''}
+            <button class="icon-btn" onclick="GemCrac.openForm('${g.id}')">&#9998;</button>
+            <button class="icon-btn" onclick="GemCrac.remove('${g.id}')">&#128465;</button>
+          </td>
+        </tr>`).join('')}
+      </tbody></table>` : `<div class="empty-state"><div class="ic">&#128257;</div><div class="t">${(q||fStatus||fCompany)?'No matching records':'No GEM CRAC records yet'}</div><div class="d">${(q||fStatus||fCompany)?'Try clearing filters.':'Add a record, or import a batch from Excel.'}</div>
+      <button class="btn btn-primary btn-sm" onclick="GemCrac.openForm(null)">&#65291; Add Record</button></div>`}
+      </div></div>
+    `;
+    if(searchHadFocus){
+      const el = document.getElementById('gcSearch');
+      if(el){ el.focus(); el.setSelectionRange(caretPos, caretPos); }
+    }
+  },
+  clearFilters(){
+    const s = document.getElementById('gcSearch'); if(s) s.value='';
+    const st = document.getElementById('gcStatusFilter'); if(st) st.value='';
+    const c = document.getElementById('gcCompanyFilter'); if(c) c.value='';
+    this.render();
+  },
+  openForm(id){
+    const rec = id ? Store.data.gemcrac.find(x=>x.id===id) : null;
+    const v = rec || {companyName:'JAYS', customerId:'', party:'', contact:'', phone:'', buyingMode:'DIRECT', productName:'', orderDate:Util.todayISO(), amount:'', qty:'', gemcNumber:'', status:'Needs Update', remark:''};
+    const custOptions = Store.data.customers.map(c=>`<option value="${c.id}" ${c.id===v.customerId?'selected':''}>${Util.escapeHtml(c.name)} — ${Util.escapeHtml(c.panchayath||'')}</option>`).join('');
+    UI.openModal(rec?'Edit GEM CRAC Record':'Add GEM CRAC Record', `
+      <div class="field"><label>Fetch Contact (from Customers)</label><select id="g_cust" onchange="GemCrac.autofill()"><option value="">— manual entry —</option>${custOptions}</select></div>
+      <div class="form-row">
+        <div class="field"><label>Party / Panchayath Name *</label><input id="g_party" value="${Util.escapeHtml(v.party)}"></div>
+        <div class="field"><label>Company Name</label><select id="g_companyName">${DROPDOWNS.companyName.map(c=>`<option ${c===v.companyName?'selected':''}>${c}</option>`).join('')}</select></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>GEM Order Number (GEMC) *</label><input id="g_gemcNumber" value="${Util.escapeHtml(v.gemcNumber)}"></div>
+        <div class="field"><label>Buying Mode</label><select id="g_buyingMode">${DROPDOWNS.buyingMode.map(b=>`<option ${b===v.buyingMode?'selected':''}>${b}</option>`).join('')}</select></div>
+      </div>
+      <div class="field"><label>Product Name</label><input id="g_productName" value="${Util.escapeHtml(v.productName)}"></div>
+      <div class="form-row">
+        <div class="field"><label>Order Date</label><input type="date" id="g_orderDate" value="${v.orderDate}"></div>
+        <div class="field"><label>Order Value (Amount)</label><input type="number" id="g_amount" value="${v.amount}"></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>Quantity</label><input type="number" id="g_qty" value="${v.qty}"></div>
+        <div class="field"><label>Status</label><select id="g_status">${DROPDOWNS.gemcracStatus.map(s=>`<option ${s===v.status?'selected':''}>${s}</option>`).join('')}</select></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>Contact Person</label><input id="g_contact" value="${Util.escapeHtml(v.contact||'')}"></div>
+        <div class="field"><label>Phone Number</label><input id="g_phone" value="${Util.escapeHtml(v.phone)}"></div>
+      </div>
+      <div class="field"><label>Remark</label><textarea id="g_remark">${Util.escapeHtml(v.remark)}</textarea></div>
+      <input type="hidden" id="g_customerId" value="${v.customerId||''}">
+    `, `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="GemCrac.save('${id||''}')">Save</button>`);
+  },
+  autofill(){
+    const id = document.getElementById('g_cust').value;
+    document.getElementById('g_customerId').value = id;
+    const c = Store.data.customers.find(x=>x.id===id);
+    if(c){
+      document.getElementById('g_party').value = c.panchayath || c.name;
+      document.getElementById('g_contact').value = c.name;
+      document.getElementById('g_phone').value = c.phone;
+    }
+  },
+  async save(id){
+    const party = document.getElementById('g_party').value.trim();
+    const gemcNumber = document.getElementById('g_gemcNumber').value.trim();
+    if(!party || !gemcNumber){ UI.toast('Party name and GEM number are required'); return; }
+    const rec = {
+      id: id || Util.uid('GC', Store.data.gemcrac),
+      customerId: document.getElementById('g_customerId').value,
+      companyName: document.getElementById('g_companyName').value,
+      party,
+      gemcNumber,
+      buyingMode: document.getElementById('g_buyingMode').value,
+      productName: document.getElementById('g_productName').value.trim(),
+      orderDate: document.getElementById('g_orderDate').value,
+      amount: Number(document.getElementById('g_amount').value)||0,
+      qty: Number(document.getElementById('g_qty').value)||0,
+      status: document.getElementById('g_status').value,
+      contact: document.getElementById('g_contact').value.trim(),
+      phone: document.getElementById('g_phone').value.trim(),
+      remark: document.getElementById('g_remark').value.trim()
+    };
+    if(id){ const i=Store.data.gemcrac.findIndex(x=>x.id===id); Store.data.gemcrac[i]=rec; }
+    else Store.data.gemcrac.unshift(rec);
+    await Store.save('gemcrac');
+    await Activity.log(id?'Updated GEM CRAC record':'Added GEM CRAC record', gemcNumber+' — '+party);
+    UI.closeModal(); UI.toast('Saved'); Router.render('gemcrac');
+  },
+  async remove(id){
+    if(!confirm('Delete this GEM CRAC record?')) return;
+    Store.data.gemcrac = Store.data.gemcrac.filter(x=>x.id!==id);
+    await Store.save('gemcrac'); UI.toast('Deleted'); Router.render('gemcrac');
+  },
+  downloadSampleTemplate(){
+    try{
+      const sample = [
+        {'COMPANY NAME':'JAYS','Buying Mode':'DIRECT','Product Name':'Unbranded 8 White','Buyer Organization':'N/A','Order Date':'22/08/2024','Order Value(Rs.)':14000,'Product Quantity':40,'Order ID':'GEMC-511687704545023','PANCHAYATH NAME':'Ayiloor gramapanchayat','NEED TO UPDATE':'NO','REMARK':''}
+      ];
+      const ws = XLSX.utils.json_to_sheet(sample);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'GEM CRAC');
+      XLSX.writeFile(wb, 'jays-crm-gemcrac-sample-template.xlsx');
+      UI.toast('Sample template downloaded');
+    }catch(e){ console.error(e); UI.toast('Could not generate template'); }
+  },
+  _date(v){
+    if(!v) return '';
+    if(v instanceof Date) return v.toISOString().slice(0,10);
+    const s = String(v).trim();
+    if(/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0,10);
+    const m = s.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})$/);
+    if(m) return m[3]+'-'+m[2].padStart(2,'0')+'-'+m[1].padStart(2,'0');
+    return s;
+  },
+  async importExcel(file){
+    if(!file) return;
+    try{
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, {type:'array', cellDates:true});
+      let count = 0;
+      wb.SheetNames.forEach(sheetName=>{
+        const ws = wb.Sheets[sheetName];
+        const rows = XLSX.utils.sheet_to_json(ws);
+        const sheetCompanyDefault = /llp/i.test(sheetName) ? 'LLP' : 'JAYS';
+        rows.forEach(r=>{
+          const gemcNumber = String(r['Order ID']||r.OrderID||r['GEM Number']||'').trim();
+          const party = String(r['PANCHAYATH NAME']||r['Buyer Organization']||r.Party||'').trim();
+          if(!gemcNumber && !party) return;
+          let companyName = String(r['COMPANY NAME']||r.CompanyName||'').trim().toUpperCase();
+          if(!DROPDOWNS.companyName.includes(companyName)) companyName = sheetCompanyDefault;
+          const needUpdateRaw = String(r['NEED TO UPDATE']||'').trim().toLowerCase();
+          const status = needUpdateRaw==='yes' ? 'Needs Update' : 'Updated';
+          Store.data.gemcrac.unshift({
+            id: Util.uid('GC', Store.data.gemcrac),
+            customerId: '',
+            companyName,
+            party,
+            gemcNumber,
+            buyingMode: String(r['Buying Mode']||'DIRECT').trim().toUpperCase(),
+            productName: String(r['Product Name']||'').trim(),
+            orderDate: this._date(r['Order Date']),
+            amount: Number(r['Order Value(Rs.)']||r['Order Value']||0)||0,
+            qty: Number(r['Product Quantity']||0)||0,
+            status,
+            contact: '', phone: '',
+            remark: String(r['REMARK']||'').trim()
+          });
+          count++;
+        });
+      });
+      if(!count){ UI.toast('No rows found in file'); return; }
+      await Store.save('gemcrac');
+      await Activity.log('Excel import', count+' GEM CRAC row(s) imported from '+file.name);
+      UI.toast(count+' row(s) imported');
+      const inp = document.getElementById('gcImportFile'); if(inp) inp.value = '';
+      Router.render('gemcrac');
+    }catch(e){ console.error(e); UI.toast('Import failed — check the file format'); }
+  },
+
+  /* ---------- WhatsApp CRAC-update-request generator ---------- */
+  _msgEdited: false,
+  openGenerator(){
+    this._msgEdited = false;
+    const custOptions = Store.data.customers.map(c=>`<option value="${c.id}">${Util.escapeHtml(c.name)} — ${Util.escapeHtml(c.panchayath||'')} — ${Util.escapeHtml(c.phone)}</option>`).join('');
+    UI.openModal('WhatsApp GEM CRAC Update Request', `
+      <div class="field"><label>Select Party (from Customers)</label><select id="wg_cust" onchange="GemCrac.buildMessage()"><option value="">— select party —</option>${custOptions}</select></div>
+      <div class="field" id="wg_ordersField" style="display:none;"><label>Include Orders</label><div id="wg_orders" style="max-height:160px;overflow-y:auto;border:1.5px solid var(--border);border-radius:9px;padding:8px;"></div></div>
+      <div class="field"><label>Message Preview</label><textarea id="wg_message" rows="10" style="font-family:inherit;"></textarea></div>
+    `, `<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>
+        <button class="btn btn-outline" onclick="GemCrac.copyMessage()">&#128203; Copy Text</button>
+        <button class="btn btn-wa" id="wg_sendBtn" onclick="GemCrac.sendWhatsApp()" disabled>&#128172; Open WhatsApp</button>`, true);
+  },
+  buildMessage(){
+    const custId = document.getElementById('wg_cust').value;
+    const ordersField = document.getElementById('wg_ordersField');
+    const ordersBox = document.getElementById('wg_orders');
+    const sendBtn = document.getElementById('wg_sendBtn');
+    if(!custId){
+      ordersField.style.display='none'; ordersBox.innerHTML='';
+      document.getElementById('wg_message').value = '';
+      sendBtn.disabled = true;
+      return;
+    }
+    const cust = Store.data.customers.find(c=>c.id===custId);
+    const pan = (cust.panchayath||'').trim().toLowerCase();
+    const matches = Store.data.gemcrac.filter(g=>{
+      if(g.customerId === custId) return true;
+      if(!pan) return false;
+      const gp = (g.party||'').trim().toLowerCase();
+      return gp && (gp.includes(pan) || pan.includes(gp));
+    });
+    if(!matches.length){
+      ordersField.style.display='none'; ordersBox.innerHTML='';
+      document.getElementById('wg_message').value = 'No GEM CRAC orders found on file for '+cust.name+' ('+(cust.panchayath||'—')+').';
+      sendBtn.disabled = !cust.phone;
+      return;
+    }
+    ordersField.style.display='block';
+    ordersBox.innerHTML = matches.map(g=>`
+      <label style="display:flex;align-items:center;gap:8px;padding:5px 2px;font-size:12.5px;border-bottom:1px solid var(--border);">
+        <input type="checkbox" class="wg_ord" value="${g.id}" ${g.status==='Needs Update'?'checked':''} onchange="GemCrac.regenerateMessage()">
+        <span class="mono">${Util.escapeHtml(g.gemcNumber)}</span> — ${Util.fmtMoney(g.amount).replace('&#8377;','Rs.')} — ${Util.fmtDate(g.orderDate)}
+        ${g.status==='Needs Update'?'<span class="badge badge-red" style="font-size:10px;">Needs Update</span>':'<span class="badge badge-green" style="font-size:10px;">Updated</span>'}
+      </label>`).join('');
+    this.regenerateMessage();
+    sendBtn.disabled = !cust.phone;
+  },
+  regenerateMessage(){
+    const custId = document.getElementById('wg_cust').value;
+    const cust = Store.data.customers.find(c=>c.id===custId);
+    if(!cust) return;
+    const checked = Array.from(document.querySelectorAll('.wg_ord:checked')).map(el=>el.value);
+    const selected = Store.data.gemcrac.filter(g=>checked.includes(g.id));
+    const intro = 'സർ,\nഇത് jays trading and business solution ൽ നിന്നാണ്.. അങ്ങയുടെ പഞ്ചായത്തിൽ നിന്നും മുൻപ് GEM വഴി പർച്ചെയ്‌സ് ചെയ്തിരുന്ന താഴെ കാണിച്ചിരിക്കുന്ന GEM order കൾക്ക് ചില സാങ്കേതിക കാരണങ്ങളാൽ GEM invoice generate ചെയ്യാൻ സാധിച്ചിരുന്നില്ല..\nആയത് പരിഹരിക്കുവാൻ Delivery extension request ചെയ്തിട്ടുണ്ട്...\nആയത് അപ്പ്രൂവ് ചെയ്തു തരുവാൻ അഭ്യർത്ഥിക്കുന്നു...';
+    const list = selected.map((g,i)=>{
+      const plainDate = g.orderDate ? Util.fmtDate(g.orderDate).replace(/<[^>]+>/g,'') : '—';
+      return (i+1)+'. '+g.gemcNumber+' — '+Util.fmtMoney(g.amount).replace('&#8377;','Rs.')+' — '+plainDate+(g.productName?' — '+g.productName:'');
+    }).join('\n');
+    const msg = intro + (list? ('\n\n'+list) : '');
+    document.getElementById('wg_message').value = msg;
+  },
+  copyMessage(){
+    const el = document.getElementById('wg_message');
+    const text = el.value;
+    const done = ()=>UI.toast('Message copied');
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).then(done).catch(()=>{ el.select(); document.execCommand('copy'); done(); });
+    } else { el.select(); document.execCommand('copy'); done(); }
+  },
+  sendWhatsApp(){
+    const custId = document.getElementById('wg_cust').value;
+    const cust = Store.data.customers.find(c=>c.id===custId);
+    if(!cust || !cust.phone){ UI.toast('This customer has no phone number on file'); return; }
+    const msg = document.getElementById('wg_message').value;
+    window.open(Util.waLink(cust.phone, msg), '_blank');
+  }
+};
+Views.gemcrac = ()=>GemCrac.render();
+
+/* =====================================================================
+   NEW ORDER
+===================================================================== */
+const OrdersMgmt = {
+  render(){
+    const searchEl = document.getElementById('ordSearch');
+    const searchHadFocus = document.activeElement === searchEl;
+    const caretPos = searchHadFocus ? searchEl.selectionStart : null;
+
+    const q = (document.getElementById('ordSearch')?document.getElementById('ordSearch').value:'').toLowerCase();
+    const fStatus = document.getElementById('ordStatusFilter')?document.getElementById('ordStatusFilter').value:'';
+
+    let list = Store.data.orders.slice().sort((a,b)=>(b.orderDate||'').localeCompare(a.orderDate||''));
+    if(q) list = list.filter(o=>(o.party||'').toLowerCase().includes(q) || (o.gemcNumber||'').toLowerCase().includes(q) || (o.productName||'').toLowerCase().includes(q) || (o.phone||'').includes(q));
+    if(fStatus) list = list.filter(o=>o.status===fStatus);
+
+    document.getElementById('content').innerHTML = `
+      <div class="toolbar">
+        <div class="toolbar-spacer"></div>
+        <button class="btn btn-primary btn-sm" onclick="OrdersMgmt.openForm(null)">&#65291; Add Order</button>
+      </div>
+      <div class="toolbar">
+        <div class="search"><span class="ic">&#128269;</span><input id="ordSearch" placeholder="Search party, GEM number, product, phone..." oninput="OrdersMgmt.render()" value="${Util.escapeHtml(q)}"></div>
+        <select id="ordStatusFilter" onchange="OrdersMgmt.render()">
+          <option value="">All Statuses</option>
+          ${DROPDOWNS.orderStatus.map(s=>`<option ${s===fStatus?'selected':''}>${s}</option>`).join('')}
+        </select>
+        ${(q||fStatus) ? `<button class="btn btn-outline btn-sm" onclick="OrdersMgmt.clearFilters()">Clear</button>` : ''}
+      </div>
+      <div class="card"><div class="table-wrap">
+      ${list.length ? `<table><thead><tr><th>Order Date</th><th>GEM Order Number</th><th>Order From</th><th>Product Name</th><th>Party Name</th><th>Party Phone</th><th>Assigned To</th><th>Status</th><th></th></tr></thead><tbody>
+        ${list.map(o=>`<tr>
+          <td class="cell-mute">${Util.fmtDate(o.orderDate)}</td>
+          <td class="mono cell-mute">${Util.escapeHtml(o.gemcNumber||'')}</td>
+          <td class="cell-mute">${Util.escapeHtml(o.orderFrom||'')}</td>
+          <td class="cell-main">${Util.escapeHtml(o.productName||'')}</td>
+          <td class="cell-mute">${Util.escapeHtml(o.party||'')}</td>
+          <td class="mono cell-mute">${Util.escapeHtml(o.phone||'')}</td>
+          <td class="cell-mute">${Util.escapeHtml(o.assignedTo||'')}</td>
+          <td>${orderStatusBadge(o.status)}</td>
+          <td style="display:flex;gap:5px;">
+            ${o.phone? `<a class="icon-btn" style="color:#25D366;text-decoration:none;" title="WhatsApp" href="${Util.waLink(o.phone,'')}" target="_blank">&#128172;</a>` : ''}
+            <button class="icon-btn" onclick="OrdersMgmt.openForm('${o.id}')">&#9998;</button>
+            <button class="icon-btn" onclick="OrdersMgmt.remove('${o.id}')">&#128465;</button>
+          </td>
+        </tr>`).join('')}
+      </tbody></table>` : `<div class="empty-state"><div class="ic">&#128230;</div><div class="t">${(q||fStatus)?'No matching orders':'No orders yet'}</div><div class="d">${(q||fStatus)?'Try clearing filters.':'Add a new order to start tracking it end to end.'}</div>
+      <button class="btn btn-primary btn-sm" onclick="OrdersMgmt.openForm(null)">&#65291; Add Order</button></div>`}
+      </div></div>
+    `;
+    if(searchHadFocus){
+      const el = document.getElementById('ordSearch');
+      if(el){ el.focus(); el.setSelectionRange(caretPos, caretPos); }
+    }
+  },
+  clearFilters(){
+    const s = document.getElementById('ordSearch'); if(s) s.value='';
+    const st = document.getElementById('ordStatusFilter'); if(st) st.value='';
+    this.render();
+  },
+  openForm(id){
+    const rec = id ? Store.data.orders.find(x=>x.id===id) : null;
+    const v = rec || {orderDate:Util.todayISO(), gemcNumber:'', orderFrom:'', productName:'', customerId:'', party:'', phone:'', assignedTo:'', status:'In Progress'};
+    const custOptions = Store.data.customers.map(c=>`<option value="${c.id}" ${c.id===v.customerId?'selected':''}>${Util.escapeHtml(c.name)} — ${Util.escapeHtml(c.phone)}</option>`).join('');
+    UI.openModal(rec?'Edit Order':'Add New Order', `
+      <div class="form-row">
+        <div class="field"><label>Order Date</label><input type="date" id="o_orderDate" value="${v.orderDate}"></div>
+        <div class="field"><label>GEM Order Number</label><input id="o_gemcNumber" value="${Util.escapeHtml(v.gemcNumber)}"></div>
+      </div>
+      <div class="field"><label>Order From</label><input id="o_orderFrom" placeholder="e.g. GEM Portal, Direct, Tender" value="${Util.escapeHtml(v.orderFrom)}"></div>
+      <div class="field"><label>Product Name</label><select id="o_productName"><option value="">— select product —</option>${Store.data.products.map(p=>`<option value="${Util.escapeHtml(p.name)}" ${p.name===v.productName?'selected':''}>${Util.escapeHtml(p.name)}</option>`).join('')}</select></div>
+      <div class="field"><label>Party Name (from Customers)</label><select id="o_cust" onchange="OrdersMgmt.autofill()"><option value="">— manual entry —</option>${custOptions}</select></div>
+      <div class="form-row">
+        <div class="field"><label>Party Name *</label><input id="o_party" value="${Util.escapeHtml(v.party)}"></div>
+        <div class="field"><label>Party Phone Number</label><input id="o_phone" value="${Util.escapeHtml(v.phone)}"></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>Order Assigned To</label><select id="o_assignedTo"><option value="">— unassigned —</option>${DROPDOWNS.assignedTo.map(a=>`<option ${a===v.assignedTo?'selected':''}>${a}</option>`).join('')}</select></div>
+        <div class="field"><label>Order Status</label><select id="o_status">${DROPDOWNS.orderStatus.map(s=>`<option ${s===v.status?'selected':''}>${s}</option>`).join('')}</select></div>
+      </div>
+      <input type="hidden" id="o_customerId" value="${v.customerId||''}">
+    `, `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="OrdersMgmt.save('${id||''}')">Save</button>`);
+  },
+  autofill(){
+    const id = document.getElementById('o_cust').value;
+    document.getElementById('o_customerId').value = id;
+    const c = Store.data.customers.find(x=>x.id===id);
+    if(c){
+      document.getElementById('o_party').value = c.name;
+      document.getElementById('o_phone').value = c.phone;
+    }
+  },
+  async save(id){
+    const party = document.getElementById('o_party').value.trim();
+    if(!party){ UI.toast('Party name is required'); return; }
+    const rec = {
+      id: id || (Store.data.settings.ordPrefix||'ORD-')+String(Store.data.settings.ordNext||1).padStart(4,'0'),
+      customerId: document.getElementById('o_customerId').value,
+      orderDate: document.getElementById('o_orderDate').value,
+      gemcNumber: document.getElementById('o_gemcNumber').value.trim(),
+      orderFrom: document.getElementById('o_orderFrom').value.trim(),
+      productName: document.getElementById('o_productName').value,
+      party,
+      phone: document.getElementById('o_phone').value.trim(),
+      assignedTo: document.getElementById('o_assignedTo').value,
+      status: document.getElementById('o_status').value
+    };
+    if(id){ const i=Store.data.orders.findIndex(x=>x.id===id); Store.data.orders[i]=rec; }
+    else { Store.data.orders.unshift(rec); Store.data.settings.ordNext=(Store.data.settings.ordNext||1)+1; await Store.save('settings'); }
+    await Store.save('orders');
+    await Activity.log(id?'Updated order':'Added order', rec.id+' — '+party);
+    UI.closeModal(); UI.toast('Saved'); Router.render('orders');
+  },
+  async remove(id){
+    if(!confirm('Delete this order?')) return;
+    Store.data.orders = Store.data.orders.filter(x=>x.id!==id);
+    await Store.save('orders'); UI.toast('Deleted'); Router.render('orders');
+  }
+};
+function orderStatusBadge(status){
+  const map = {'In Progress':'amber','Work Order Done':'blue','Product Reached':'violet','Dispatched':'blue','Payment Received':'green'};
+  const color = map[status]||'gray';
+  return `<span class="badge badge-${color}">${Util.escapeHtml(status||'—')}</span>`;
+}
+Views.orders = ()=>OrdersMgmt.render();
+
+/* =====================================================================
+   COMPLAINT MANAGEMENT
+===================================================================== */
+const Complaints = {
+  render(){
+    const searchEl = document.getElementById('cmpSearch');
+    const searchHadFocus = document.activeElement === searchEl;
+    const caretPos = searchHadFocus ? searchEl.selectionStart : null;
+
+    const q = (document.getElementById('cmpSearch')?document.getElementById('cmpSearch').value:'').toLowerCase();
+    const fStatus = document.getElementById('cmpStatusFilter')?document.getElementById('cmpStatusFilter').value:'';
+
+    let list = Store.data.complaints.slice().sort((a,b)=>(b.complaintDate||'').localeCompare(a.complaintDate||''));
+    if(q) list = list.filter(c=>(c.complaintFrom||'').toLowerCase().includes(q) || (c.productName||'').toLowerCase().includes(q) || (c.note||'').toLowerCase().includes(q));
+    if(fStatus) list = list.filter(c=>c.status===fStatus);
+
+    document.getElementById('content').innerHTML = `
+      <div class="toolbar">
+        <div class="toolbar-spacer"></div>
+        <button class="btn btn-primary btn-sm" onclick="Complaints.openForm(null)">&#65291; Log Complaint</button>
+      </div>
+      <div class="toolbar">
+        <div class="search"><span class="ic">&#128269;</span><input id="cmpSearch" placeholder="Search complainant, product, note..." oninput="Complaints.render()" value="${Util.escapeHtml(q)}"></div>
+        <select id="cmpStatusFilter" onchange="Complaints.render()">
+          <option value="">All Statuses</option>
+          ${DROPDOWNS.complaintStatus.map(s=>`<option ${s===fStatus?'selected':''}>${s}</option>`).join('')}
+        </select>
+        ${(q||fStatus) ? `<button class="btn btn-outline btn-sm" onclick="Complaints.clearFilters()">Clear</button>` : ''}
+      </div>
+      <div class="card"><div class="table-wrap">
+      ${list.length ? `<table><thead><tr><th>Complaint Date</th><th>Complaint From</th><th>Product Name</th><th>Complaint Note</th><th>Assigned To</th><th>Status</th><th>Updated Date</th><th></th></tr></thead><tbody>
+        ${list.map(c=>`<tr>
+          <td class="cell-mute">${Util.fmtDate(c.complaintDate)}</td>
+          <td class="cell-main">${Util.escapeHtml(c.complaintFrom||'')}</td>
+          <td class="cell-mute">${Util.escapeHtml(c.productName||'')}</td>
+          <td class="cell-mute">${Util.escapeHtml(c.note||'')}</td>
+          <td class="cell-mute">${Util.escapeHtml(c.assignedTo||'')}</td>
+          <td>${complaintStatusBadge(c.status)}</td>
+          <td class="cell-mute">${Util.fmtDate(c.updatedDate)}</td>
+          <td style="display:flex;gap:5px;">
+            <button class="icon-btn" onclick="Complaints.openForm('${c.id}')">&#9998;</button>
+            <button class="icon-btn" onclick="Complaints.remove('${c.id}')">&#128465;</button>
+          </td>
+        </tr>`).join('')}
+      </tbody></table>` : `<div class="empty-state"><div class="ic">&#9888;</div><div class="t">${(q||fStatus)?'No matching complaints':'No complaints logged'}</div><div class="d">${(q||fStatus)?'Try clearing filters.':'Log a complaint to start tracking resolution.'}</div>
+      <button class="btn btn-primary btn-sm" onclick="Complaints.openForm(null)">&#65291; Log Complaint</button></div>`}
+      </div></div>
+    `;
+    if(searchHadFocus){
+      const el = document.getElementById('cmpSearch');
+      if(el){ el.focus(); el.setSelectionRange(caretPos, caretPos); }
+    }
+  },
+  clearFilters(){
+    const s = document.getElementById('cmpSearch'); if(s) s.value='';
+    const st = document.getElementById('cmpStatusFilter'); if(st) st.value='';
+    this.render();
+  },
+  openForm(id){
+    const rec = id ? Store.data.complaints.find(x=>x.id===id) : null;
+    const v = rec || {complaintDate:Util.todayISO(), customerId:'', complaintFrom:'', productName:'', note:'', assignedTo:'', status:'Initiated', updatedDate:Util.todayISO()};
+    const custOptions = Store.data.customers.map(c=>`<option value="${c.id}" ${c.id===v.customerId?'selected':''}>${Util.escapeHtml(c.name)} — ${Util.escapeHtml(c.phone)}</option>`).join('');
+    UI.openModal(rec?'Edit Complaint':'Log Complaint', `
+      <div class="field"><label>Complaint From (from Customers)</label><select id="c_cust" onchange="Complaints.autofill()"><option value="">— manual entry —</option>${custOptions}</select></div>
+      <div class="form-row">
+        <div class="field"><label>Complaint From *</label><input id="c_complaintFrom" value="${Util.escapeHtml(v.complaintFrom)}"></div>
+        <div class="field"><label>Complaint Date</label><input type="date" id="c_complaintDate" value="${v.complaintDate}"></div>
+      </div>
+      <div class="field"><label>Product Name</label><select id="c_productName"><option value="">— select product —</option>${Store.data.products.map(p=>`<option value="${Util.escapeHtml(p.name)}" ${p.name===v.productName?'selected':''}>${Util.escapeHtml(p.name)}</option>`).join('')}</select></div>
+      <div class="field"><label>Complaint Note</label><textarea id="c_note">${Util.escapeHtml(v.note)}</textarea></div>
+      <div class="form-row">
+        <div class="field"><label>Complaint Assigned To</label><select id="c_assignedTo"><option value="">— unassigned —</option>${DROPDOWNS.assignedTo.map(a=>`<option ${a===v.assignedTo?'selected':''}>${a}</option>`).join('')}</select></div>
+        <div class="field"><label>Complaint Status</label><select id="c_status">${DROPDOWNS.complaintStatus.map(s=>`<option ${s===v.status?'selected':''}>${s}</option>`).join('')}</select></div>
+      </div>
+      <input type="hidden" id="c_customerId" value="${v.customerId||''}">
+    `, `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="Complaints.save('${id||''}')">Save</button>`);
+  },
+  autofill(){
+    const id = document.getElementById('c_cust').value;
+    document.getElementById('c_customerId').value = id;
+    const c = Store.data.customers.find(x=>x.id===id);
+    if(c) document.getElementById('c_complaintFrom').value = c.name;
+  },
+  async save(id){
+    const complaintFrom = document.getElementById('c_complaintFrom').value.trim();
+    if(!complaintFrom){ UI.toast('Complaint from is required'); return; }
+    const prevStatus = id ? (Store.data.complaints.find(x=>x.id===id)||{}).status : null;
+    const status = document.getElementById('c_status').value;
+    const rec = {
+      id: id || (Store.data.settings.cmpPrefix||'CMP-')+String(Store.data.settings.cmpNext||1).padStart(4,'0'),
+      customerId: document.getElementById('c_customerId').value,
+      complaintFrom,
+      complaintDate: document.getElementById('c_complaintDate').value,
+      productName: document.getElementById('c_productName').value,
+      note: document.getElementById('c_note').value.trim(),
+      assignedTo: document.getElementById('c_assignedTo').value,
+      status,
+      updatedDate: (!id || prevStatus!==status) ? Util.todayISO() : (Store.data.complaints.find(x=>x.id===id)||{}).updatedDate
+    };
+    if(id){ const i=Store.data.complaints.findIndex(x=>x.id===id); Store.data.complaints[i]=rec; }
+    else { Store.data.complaints.unshift(rec); Store.data.settings.cmpNext=(Store.data.settings.cmpNext||1)+1; await Store.save('settings'); }
+    await Store.save('complaints');
+    await Activity.log(id?'Updated complaint':'Logged complaint', rec.id+' — '+complaintFrom);
+    UI.closeModal(); UI.toast('Saved'); Router.render('complaints');
+  },
+  async remove(id){
+    if(!confirm('Delete this complaint record?')) return;
+    Store.data.complaints = Store.data.complaints.filter(x=>x.id!==id);
+    await Store.save('complaints'); UI.toast('Deleted'); Router.render('complaints');
+  }
+};
+function complaintStatusBadge(status){
+  const map = {'Solved':'green','Pending':'amber','Initiated':'blue'};
+  const color = map[status]||'gray';
+  return `<span class="badge badge-${color}">${Util.escapeHtml(status||'—')}</span>`;
+}
+Views.complaints = ()=>Complaints.render();
 
 /* =====================================================================
    TASKS
@@ -2093,13 +2709,19 @@ const Reports = {
     } else if(view==='quotations'){
       rows = Store.data.quotations.map(q=>({ID:q.id, Date:q.date, Customer:q.customerName, Phone:q.phone, Subtotal:q.subtotal, GST:q.gst, Total:q.total, Status:q.status}));
     } else if(view==='payments'){
-      rows = Store.data.payments.map(p=>({'Party Name':p.party, 'Company Name':p.companyName||'', 'Invoice Number':p.invoiceNumber||p.id, 'Invoice Date':p.invoiceDate, 'Taxable Value':p.taxableValue||0, 'CGST':p.cgst||0, 'SGST':p.sgst||0, 'IGST':p.igst||0, 'Round Off':p.roundOff||0, 'Invoice Amount':p.amount, 'Due Amount':p.dueAmount!==undefined?p.dueAmount:Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0), 'Payment Status':p.status==='Paid'?'Paid':'Unpaid', Contact:p.contact, Phone:p.phone, FollowupDate:p.followupDate, Response:p.response}));
+      rows = Store.data.payments.map(p=>({'Party Name':p.party, 'Company Name':p.companyName||'', 'Product':p.product||'', 'Invoice Number':p.invoiceNumber||p.id, 'Invoice Date':p.invoiceDate, 'Taxable Value':p.taxableValue||0, 'CGST':p.cgst||0, 'SGST':p.sgst||0, 'IGST':p.igst||0, 'Round Off':p.roundOff||0, 'Invoice Amount':p.amount, 'Due Amount':p.dueAmount!==undefined?p.dueAmount:Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0), 'Payment Status':p.status==='Paid'?'Paid':'Unpaid', Contact:p.contact, Phone:p.phone, FollowupDate:p.followupDate, Response:p.response}));
     } else if(view==='followupcentre'){
       rows = Store.data.followups.map(f=>({ID:f.id, Date:f.date, Customer:f.customerName, Phone:f.phone, Purpose:f.purpose, Status:f.status, Notes:f.notes}));
     } else if(view==='tasks'){
       rows = Store.data.tasks.map(t=>({ID:t.id, Date:t.date, Type:t.type, AssignedTo:t.assignedTo, Customer:t.customer, Phone:t.phone, Notes:t.notes, Done:t.done}));
     } else if(view==='notes'){
       rows = Store.data.notes.map(n=>({ID:n.id, Date:n.date, Note:n.text, Remark:n.remark}));
+    } else if(view==='gemcrac'){
+      rows = Store.data.gemcrac.map(g=>({'Party/Panchayath':g.party, 'Company Name':g.companyName||'', 'GEM Order Number':g.gemcNumber, 'Product Name':g.productName||'', 'Buying Mode':g.buyingMode||'', 'Order Date':g.orderDate, 'Order Value':g.amount||0, 'Quantity':g.qty||0, 'Status':g.status, Contact:g.contact||'', Phone:g.phone||'', Remark:g.remark||''}));
+    } else if(view==='orders'){
+      rows = Store.data.orders.map(o=>({ID:o.id, 'Order Date':o.orderDate, 'GEM Order Number':o.gemcNumber||'', 'Order From':o.orderFrom||'', 'Product Name':o.productName||'', 'Party Name':o.party, 'Party Phone':o.phone||'', 'Assigned To':o.assignedTo||'', 'Status':o.status}));
+    } else if(view==='complaints'){
+      rows = Store.data.complaints.map(c=>({ID:c.id, 'Complaint Date':c.complaintDate, 'Complaint From':c.complaintFrom, 'Product Name':c.productName||'', 'Complaint Note':c.note||'', 'Assigned To':c.assignedTo||'', 'Status':c.status, 'Updated Date':c.updatedDate}));
     } else {
       rows = Store.data.customers.map(x=>({ID:x.id, Name:x.name, Phone:x.phone, Status:x.status}));
     }
@@ -2175,6 +2797,7 @@ const Backup = {
             <option value="products">Products</option>
           </select>
           <button class="btn btn-outline btn-sm" onclick="document.getElementById('importFile').click()">&#128229; Choose Excel File</button>
+          <p style="margin:6px 0 0;font-size:11.5px;color:var(--text-mute);">Tip: GEM CRAC has its own dedicated importer on the GEM CRAC page (handles the multi-sheet GEM order format).</p>
         </div>
       </div>
 
@@ -2194,7 +2817,8 @@ const Backup = {
       customers: Store.data.customers, products: Store.data.products,
       quotations: Store.data.quotations, payments: Store.data.payments,
       followups: Store.data.followups, tasks: Store.data.tasks, notes: Store.data.notes,
-      users: Store.data.users, settings: Store.data.settings
+      users: Store.data.users, settings: Store.data.settings,
+      gemcrac: Store.data.gemcrac, orders: Store.data.orders, complaints: Store.data.complaints
     };
   },
   downloadJSON(){
@@ -2221,10 +2845,10 @@ const Backup = {
     try{
       const text = await file.text();
       const data = JSON.parse(text);
-      ['customers','products','quotations','payments','followups','tasks','notes','users','settings'].forEach(k=>{
+      ['customers','products','quotations','payments','followups','tasks','notes','users','settings','gemcrac','orders','complaints'].forEach(k=>{
         if(data[k]!==undefined) Store.data[k] = data[k];
       });
-      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','users','settings'].map(k=>Store.save(k)));
+      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','users','settings','gemcrac','orders','complaints'].map(k=>Store.save(k)));
       await Activity.log('Data restored', 'Restored from backup file '+file.name);
       UI.toast('Data restored successfully');
       Router.render('backup');
@@ -2237,10 +2861,13 @@ const Backup = {
         Customers: Store.data.customers.map(x=>({ID:x.id,Name:x.name,Phone:x.phone,Email:x.email,District:x.district,Area:x.panchayath,AssignedTo:x.assignedTo,Status:x.status,LastContact:x.lastContact,CreatedDate:x.createdDate})),
         Products: Store.data.products.map(p=>({Code:p.code,Category:p.category,Name:p.name,Unit:p.unit,Price:p.price,Stock:p.stock})),
         Quotations: Store.data.quotations.map(q=>({ID:q.id,Date:q.date,Customer:q.customerName,Phone:q.phone,Subtotal:q.subtotal,GST:q.gst,Total:q.total,Status:q.status})),
-        Payments: Store.data.payments.map(p=>({'Party Name':p.party,'Company Name':p.companyName||'','Invoice Number':p.invoiceNumber||p.id,'Invoice Date':p.invoiceDate,'Taxable Value':p.taxableValue||0,'CGST':p.cgst||0,'SGST':p.sgst||0,'IGST':p.igst||0,'Round Off':p.roundOff||0,'Invoice Amount':p.amount,'Due Amount':p.dueAmount!==undefined?p.dueAmount:Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0),'Payment Status':p.status==='Paid'?'Paid':'Unpaid',Contact:p.contact,Phone:p.phone,FollowupDate:p.followupDate})),
+        Payments: Store.data.payments.map(p=>({'Party Name':p.party,'Company Name':p.companyName||'','Product':p.product||'','Invoice Number':p.invoiceNumber||p.id,'Invoice Date':p.invoiceDate,'Taxable Value':p.taxableValue||0,'CGST':p.cgst||0,'SGST':p.sgst||0,'IGST':p.igst||0,'Round Off':p.roundOff||0,'Invoice Amount':p.amount,'Due Amount':p.dueAmount!==undefined?p.dueAmount:Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0),'Payment Status':p.status==='Paid'?'Paid':'Unpaid',Contact:p.contact,Phone:p.phone,FollowupDate:p.followupDate})),
         Followups: Store.data.followups.map(f=>({ID:f.id,Date:f.date,Customer:f.customerName,Phone:f.phone,Purpose:f.purpose,Status:f.status})),
         Tasks: Store.data.tasks.map(t=>({ID:t.id,Date:t.date,Type:t.type,AssignedTo:t.assignedTo,Customer:t.customer,Notes:t.notes,Done:t.done})),
         Notes: Store.data.notes.map(n=>({ID:n.id,Date:n.date,Note:n.text,Remark:n.remark})),
+        GemCrac: Store.data.gemcrac.map(g=>({'Party/Panchayath':g.party,'Company Name':g.companyName||'','GEM Order Number':g.gemcNumber,'Product Name':g.productName||'','Buying Mode':g.buyingMode||'','Order Date':g.orderDate,'Order Value':g.amount||0,'Quantity':g.qty||0,'Status':g.status,Contact:g.contact||'',Phone:g.phone||'',Remark:g.remark||''})),
+        Orders: Store.data.orders.map(o=>({ID:o.id,'Order Date':o.orderDate,'GEM Order Number':o.gemcNumber||'','Order From':o.orderFrom||'','Product Name':o.productName||'','Party Name':o.party,'Party Phone':o.phone||'','Assigned To':o.assignedTo||'','Status':o.status})),
+        Complaints: Store.data.complaints.map(c=>({ID:c.id,'Complaint Date':c.complaintDate,'Complaint From':c.complaintFrom,'Product Name':c.productName||'','Complaint Note':c.note||'','Assigned To':c.assignedTo||'','Status':c.status,'Updated Date':c.updatedDate})),
         ActivityLog: Store.data.activityLog.map(a=>({Time:a.ts,User:a.user,Action:a.action,Details:a.details}))
       };
       Object.keys(sheets).forEach(name=>{
