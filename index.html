@@ -191,11 +191,22 @@
 
   /* ---------- TABLE ---------- */
   .table-wrap{overflow-x:auto;}
-  .bottom-scrollbar{position:fixed;left:236px;right:0;bottom:0;height:16px;overflow-x:auto;overflow-y:hidden;background:var(--bg);border-top:1px solid var(--border);z-index:85;display:none;}
-  .bottom-scrollbar::-webkit-scrollbar{height:12px;}
-  .bottom-scrollbar::-webkit-scrollbar-thumb{background:#B7C2D0;border-radius:8px;}
-  .bottom-scrollbar-inner{height:1px;}
-  @media(max-width:880px){ .bottom-scrollbar{left:0;} }
+  /* Custom screen-fixed horizontal scrollbar for wide tables. Drawn manually
+     (not relying on the native OS scrollbar) so it is always visible on every
+     browser/OS/trackpad, including Mac/touch "overlay" scrollbars that only
+     reveal themselves on hover and are otherwise invisible. */
+  .bottom-scrollbar{
+    position:fixed;left:236px;right:0;bottom:0;height:18px;
+    background:#EDF0F5;border-top:1px solid var(--border);z-index:85;display:none;
+    cursor:pointer;
+  }
+  .bottom-scrollbar-thumb{
+    position:absolute;top:3px;height:12px;min-width:40px;border-radius:8px;
+    background:#9AA9BC;cursor:grab;transition:background .12s;
+  }
+  .bottom-scrollbar-thumb:hover{background:#7C8CA3;}
+  .bottom-scrollbar.dragging .bottom-scrollbar-thumb{background:var(--orange);cursor:grabbing;}
+  @media(max-width:880px){ .bottom-scrollbar{left:0;height:22px;} .bottom-scrollbar-thumb{top:4px;height:14px;} }
   table{width:100%;border-collapse:collapse;font-size:13px;}
   thead th{
     text-align:left;padding:10px 14px;font-size:10.5px;text-transform:uppercase;letter-spacing:0.5px;
@@ -415,7 +426,7 @@
 
 <div class="toast" id="toast"></div>
 <div id="printArea" class="print-only"></div>
-<div class="bottom-scrollbar" id="bottomScrollbar"><div class="bottom-scrollbar-inner" id="bottomScrollbarInner"></div></div>
+<div class="bottom-scrollbar" id="bottomScrollbar"><div class="bottom-scrollbar-thumb" id="bottomScrollbarThumb"></div></div>
 
 <script>
 /* =====================================================================
@@ -857,16 +868,51 @@ const Router = { render(view){ const fn = Views[view]; if(fn) fn(); BottomScroll
    bottom edge to scroll it sideways)
 ===================================================================== */
 const BottomScroll = {
-  bar: null, inner: null, table: null, _syncing: false,
+  bar: null, thumb: null, table: null, _syncing: false, _dragging: false, _dragStartX: 0, _dragStartScroll: 0,
   init(){
     this.bar = document.getElementById('bottomScrollbar');
-    this.inner = document.getElementById('bottomScrollbarInner');
-    this.bar.addEventListener('scroll', ()=>{
-      if(!this.table || this._syncing) return;
-      this._syncing = true;
-      this.table.scrollLeft = this.bar.scrollLeft;
-      this._syncing = false;
+    this.thumb = document.getElementById('bottomScrollbarThumb');
+
+    // Click/tap anywhere on the track (but not on the thumb itself) jumps the thumb there.
+    this.bar.addEventListener('pointerdown', (e)=>{
+      if(!this.table || e.target === this.thumb) return;
+      const barRect = this.bar.getBoundingClientRect();
+      const thumbW = this.thumb.offsetWidth;
+      const targetLeft = Math.min(Math.max(e.clientX - barRect.left - thumbW/2, 0), barRect.width - thumbW);
+      const maxScroll = this.table.scrollWidth - this.table.clientWidth;
+      const trackRange = barRect.width - thumbW;
+      this.table.scrollLeft = trackRange > 0 ? (targetLeft / trackRange) * maxScroll : 0;
     });
+
+    // Dragging the thumb itself.
+    this.thumb.addEventListener('pointerdown', (e)=>{
+      if(!this.table) return;
+      this._dragging = true;
+      this.bar.classList.add('dragging');
+      this._dragStartX = e.clientX;
+      this._dragStartScroll = this.table.scrollLeft;
+      this.thumb.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    this.thumb.addEventListener('pointermove', (e)=>{
+      if(!this._dragging || !this.table) return;
+      const barRect = this.bar.getBoundingClientRect();
+      const thumbW = this.thumb.offsetWidth;
+      const trackRange = barRect.width - thumbW;
+      const maxScroll = this.table.scrollWidth - this.table.clientWidth;
+      const dx = e.clientX - this._dragStartX;
+      const scrollDelta = trackRange > 0 ? (dx / trackRange) * maxScroll : 0;
+      this.table.scrollLeft = Math.min(Math.max(this._dragStartScroll + scrollDelta, 0), maxScroll);
+    });
+    const endDrag = (e)=>{
+      if(!this._dragging) return;
+      this._dragging = false;
+      this.bar.classList.remove('dragging');
+      try{ this.thumb.releasePointerCapture(e.pointerId); }catch(err){}
+    };
+    this.thumb.addEventListener('pointerup', endDrag);
+    this.thumb.addEventListener('pointercancel', endDrag);
+
     window.addEventListener('resize', ()=>this.refresh());
     const observer = new MutationObserver(()=>this.refresh());
     observer.observe(document.getElementById('content'), {childList:true, subtree:true});
@@ -883,16 +929,21 @@ const BottomScroll = {
     wraps.forEach(w=>{ if(w.scrollWidth > w.clientWidth + 4){ if(!widest || w.scrollWidth > widest.scrollWidth) widest = w; } });
     if(!widest){ this.bar.style.display='none'; return; }
     this.table = widest;
-    this.inner.style.width = widest.scrollWidth + 'px';
     this.bar.style.display = 'block';
-    this.bar.scrollLeft = widest.scrollLeft;
-    this._onTableScroll = ()=>{
-      if(this._syncing) return;
-      this._syncing = true;
-      this.bar.scrollLeft = widest.scrollLeft;
-      this._syncing = false;
-    };
+    this._onTableScroll = ()=>{ this._positionThumb(); };
     this.table.addEventListener('scroll', this._onTableScroll);
+    this._positionThumb();
+  },
+  _positionThumb(){
+    if(!this.table) return;
+    const barW = this.bar.getBoundingClientRect().width;
+    const ratio = this.table.clientWidth / this.table.scrollWidth;
+    const thumbW = Math.max(barW * ratio, 40);
+    const maxScroll = this.table.scrollWidth - this.table.clientWidth;
+    const trackRange = barW - thumbW;
+    const left = maxScroll > 0 ? (this.table.scrollLeft / maxScroll) * trackRange : 0;
+    this.thumb.style.width = thumbW + 'px';
+    this.thumb.style.left = left + 'px';
   }
 };
 
