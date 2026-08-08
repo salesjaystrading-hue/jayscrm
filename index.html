@@ -189,6 +189,20 @@
   .bar-orange{background:var(--orange);}
   .bar-violet{background:var(--violet);}
 
+  /* ---------- SEARCHABLE CUSTOMER PICKER ---------- */
+  .cust-picker{position:relative;}
+  .cust-picker-input{width:100%;}
+  .cust-picker-list{display:none;margin-top:6px;max-height:230px;overflow-y:auto;border:1.5px solid var(--border);border-radius:9px;background:#fff;}
+  .cust-picker-item{padding:8px 12px;cursor:pointer;font-size:12.5px;border-bottom:1px solid #F1F4F8;display:flex;flex-direction:column;gap:1px;}
+  .cust-picker-item:last-child{border-bottom:none;}
+  .cust-picker-item:hover{background:#F6F8FB;}
+  .cust-picker-item .cpi-name{font-weight:700;color:var(--text);}
+  .cust-picker-item .cpi-sub{color:var(--text-mute);font-size:11px;}
+  .cust-picker-clear{color:var(--red);font-weight:700;}
+  .cust-picker-empty{color:var(--text-mute);cursor:default;}
+  .cust-picker-empty:hover{background:none;}
+  .row-check{width:16px;height:16px;cursor:pointer;}
+
   /* ---------- TABLE ---------- */
   .table-wrap{overflow-x:auto;}
   /* Custom screen-fixed horizontal scrollbar for wide tables. Drawn manually
@@ -666,6 +680,76 @@ const Util = {
   csvSafe(v){ return v===undefined||v===null? '' : v; }
 };
 
+/* Returns the linked customer's Area/Panchayath for any record that stores
+   a customerId, so tables/listings can show it next to a name. */
+function custArea(customerId){
+  if(!customerId) return '—';
+  const c = Store.data.customers.find(x=>x.id===customerId);
+  return c ? (Util.escapeHtml(c.panchayath||'—')) : '—';
+}
+
+/* =====================================================================
+   SEARCHABLE CUSTOMER PICKER — used by every "Contact (from Customers)"
+   field so people can search by name / phone / Area-Panchayath instead
+   of scrolling a giant plain dropdown, and see the Area/Panchayath for
+   each match. Selecting a customer NEVER touches a form's own Party
+   Name field — it only fills in the contact-specific fields via the
+   named callback, so party/panchayath text entered or imported earlier
+   is never silently overwritten.
+===================================================================== */
+const CustPicker = {
+  html(prefix, selectedId, cbName, placeholder){
+    const c = selectedId ? Store.data.customers.find(x=>x.id===selectedId) : null;
+    const label = c ? (c.name+' — '+(c.panchayath||'—')+' — '+(c.phone||'')) : '';
+    return `<div class="cust-picker" id="${prefix}_pickerWrap" data-cb="${cbName||''}">
+      <input type="text" id="${prefix}_custSearch" class="cust-picker-input" placeholder="${Util.escapeHtml(placeholder||'Search name, phone, or Area / Panchayath...')}" autocomplete="off" value="${Util.escapeHtml(label)}" oninput="CustPicker.filter('${prefix}')" onfocus="CustPicker.open('${prefix}')">
+      <div class="cust-picker-list" id="${prefix}_custList"></div>
+      <input type="hidden" id="${prefix}_customerId" value="${selectedId||''}">
+    </div>`;
+  },
+  open(prefix){
+    const inp = document.getElementById(prefix+'_custSearch');
+    if(inp) inp.select();
+    this.renderList(prefix, '');
+  },
+  filter(prefix){
+    const inp = document.getElementById(prefix+'_custSearch');
+    this.renderList(prefix, inp ? inp.value.toLowerCase().trim() : '');
+  },
+  renderList(prefix, q){
+    const box = document.getElementById(prefix+'_custList');
+    if(!box) return;
+    const list = Store.data.customers.filter(c=>!q || (c.name||'').toLowerCase().includes(q) || (c.phone||'').includes(q) || (c.panchayath||'').toLowerCase().includes(q)).slice(0,50);
+    box.innerHTML = `<div class="cust-picker-item cust-picker-clear" onclick="CustPicker.clear('${prefix}')">&times; Clear selection / manual entry</div>` +
+      (list.length ? list.map(c=>`<div class="cust-picker-item" onclick="CustPicker.select('${prefix}','${c.id}')"><span class="cpi-name">${Util.escapeHtml(c.name)}</span><span class="cpi-sub">${Util.escapeHtml(c.panchayath||'—')} &middot; ${Util.escapeHtml(c.phone||'')}</span></div>`).join('') : `<div class="cust-picker-item cust-picker-empty">No matching customers</div>`);
+    box.style.display = 'block';
+  },
+  select(prefix, custId){
+    const c = Store.data.customers.find(x=>x.id===custId);
+    if(!c) return;
+    document.getElementById(prefix+'_customerId').value = custId;
+    document.getElementById(prefix+'_custSearch').value = c.name+' — '+(c.panchayath||'—')+' — '+(c.phone||'');
+    document.getElementById(prefix+'_custList').style.display = 'none';
+    const wrap = document.getElementById(prefix+'_pickerWrap');
+    const cb = wrap ? wrap.dataset.cb : '';
+    if(cb && typeof window[cb]==='function') window[cb](c);
+  },
+  clear(prefix){
+    document.getElementById(prefix+'_customerId').value = '';
+    document.getElementById(prefix+'_custSearch').value = '';
+    document.getElementById(prefix+'_custList').style.display = 'none';
+    const wrap = document.getElementById(prefix+'_pickerWrap');
+    const cb = wrap ? wrap.dataset.cb : '';
+    if(cb && typeof window[cb]==='function') window[cb](null);
+  },
+  closeAll(){
+    document.querySelectorAll('.cust-picker-list').forEach(el=>el.style.display='none');
+  }
+};
+document.addEventListener('click', (e)=>{
+  if(!e.target.closest || !e.target.closest('.cust-picker')) CustPicker.closeAll();
+});
+
 /* =====================================================================
    AUTH
 ===================================================================== */
@@ -1109,7 +1193,7 @@ const Customers = {
     else if(this.filterMode==='customers') list = list.filter(x=>['Payment Received','Converted Customer'].includes(x.status));
     else if(this.filterMode==='lost') list = list.filter(x=>['Not Interested','Closed Lost'].includes(x.status));
 
-    if(q) list = list.filter(x=>(x.name||'').toLowerCase().includes(q) || (x.phone||'').includes(q) || (x.district||'').toLowerCase().includes(q));
+    if(q) list = list.filter(x=>(x.name||'').toLowerCase().includes(q) || (x.phone||'').includes(q) || (x.district||'').toLowerCase().includes(q) || (x.panchayath||'').toLowerCase().includes(q));
     if(fStatus) list = list.filter(x=>x.status===fStatus);
     if(fAssigned) list = list.filter(x=>x.assignedTo===fAssigned);
 
@@ -1132,7 +1216,14 @@ const Customers = {
         <button class="tab-btn ${this.filterMode==='lost'?'active':''}" onclick="Customers.setFilter('lost')">Lost / Not Interested <span class="cnt">${counts.lost}</span></button>
       </div>
       <div class="toolbar">
-        <div class="search"><span class="ic">&#128269;</span><input id="custSearch" placeholder="Search name, phone, district..." oninput="Customers.render()" value="${Util.escapeHtml(q)}"></div>
+        <input type="file" id="custImportFile" accept=".xlsx,.xls,.csv" style="display:none;" onchange="Customers.importExcel(this.files[0])">
+        <button class="btn btn-outline btn-sm" onclick="Customers.downloadSampleTemplate()">&#128190; Sample Template</button>
+        <button class="btn btn-outline btn-sm" onclick="document.getElementById('custImportFile').click()">&#128229; Import from Excel</button>
+        <div class="toolbar-spacer"></div>
+        <button class="btn btn-primary btn-sm" onclick="Customers.openForm(null)">&#65291; Add Lead / Customer</button>
+      </div>
+      <div class="toolbar">
+        <div class="search"><span class="ic">&#128269;</span><input id="custSearch" placeholder="Search name, phone, district, Area / Panchayath..." oninput="Customers.render()" value="${Util.escapeHtml(q)}"></div>
         <select id="custStatusFilter" onchange="Customers.render()">
           <option value="">All Statuses</option>
           ${DROPDOWNS.status.map(s=>`<option value="${s}" ${s===fStatus?'selected':''}>${s}</option>`).join('')}
@@ -1141,8 +1232,6 @@ const Customers = {
           <option value="">Everyone</option>
           ${DROPDOWNS.assignedTo.map(s=>`<option value="${s}" ${s===fAssigned?'selected':''}>${s}</option>`).join('')}
         </select>
-        <div class="toolbar-spacer"></div>
-        <button class="btn btn-primary btn-sm" onclick="Customers.openForm(null)">&#65291; Add Lead / Customer</button>
       </div>
       <div class="card">
         <div class="table-wrap">
@@ -1175,6 +1264,58 @@ const Customers = {
     }
   },
   setFilter(mode){ this.filterMode = mode; this.render(); },
+  downloadSampleTemplate(){
+    try{
+      const sample = [
+        {'Name':'Rajesh Kumar','Phone':'9847012345','Email':'','District':'Malappuram','Area / Panchayath':'Pandikkad Gramapanchayath','Assigned To':'NAJIYA','Status':'New Lead','Notes':''}
+      ];
+      const ws = XLSX.utils.json_to_sheet(sample);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Customers');
+      XLSX.writeFile(wb, 'jays-crm-customers-sample-template.xlsx');
+      UI.toast('Sample template downloaded');
+    }catch(e){ console.error(e); UI.toast('Could not generate template'); }
+  },
+  async importExcel(file){
+    if(!file) return;
+    try{
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, {type:'array'});
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws);
+      if(!rows.length){ UI.toast('No rows found in file'); return; }
+      let count = 0;
+      rows.forEach(r=>{
+        const name = String(r['Name']||r.Name||r.name||'').trim();
+        const phone = String(r['Phone']||r.Phone||r.phone||'').trim();
+        if(!name || !phone) return;
+        let status = String(r['Status']||r.status||'New Lead').trim();
+        if(!DROPDOWNS.status.includes(status)) status = 'New Lead';
+        let assignedTo = String(r['Assigned To']||r.AssignedTo||r.assignedTo||'').trim().toUpperCase();
+        if(!DROPDOWNS.assignedTo.includes(assignedTo)) assignedTo = '';
+        Store.data.customers.unshift({
+          id: Util.uid('C', Store.data.customers),
+          name, phone,
+          email: String(r['Email']||r.email||'').trim(),
+          district: String(r['District']||r.district||'').trim(),
+          panchayath: String(r['Area / Panchayath']||r['Panchayath']||r.Panchayath||r.panchayath||'').trim(),
+          assignedTo,
+          status,
+          createdDate: Util.todayISO(),
+          lastContact: Util.todayISO(),
+          notes: String(r['Notes']||r.notes||'').trim(),
+          timeline: []
+        });
+        count++;
+      });
+      if(!count){ UI.toast('No valid rows found — Name and Phone are required'); return; }
+      await Store.save('customers');
+      await Activity.log('Excel import', count+' lead(s)/customer(s) imported from '+file.name);
+      UI.toast(count+' record(s) imported');
+      const inp = document.getElementById('custImportFile'); if(inp) inp.value = '';
+      Router.render('customers');
+    }catch(e){ console.error(e); UI.toast('Import failed — check the file format'); }
+  },
   openForm(id){
     const rec = id ? Store.data.customers.find(x=>x.id===id) : null;
     const v = rec || {name:'',phone:'',email:'',district:'',panchayath:'',assignedTo:'',status:'New Lead', lastContact: Util.todayISO(), notes:''};
@@ -1734,6 +1875,16 @@ Views.quotations = ()=>Quotations.render();
 /* =====================================================================
    PAYMENT PENDING FOLLOWUP
 ===================================================================== */
+/* Called by CustPicker when a customer is selected in the Payments form.
+   Fills only the Contact Name / Phone fields — the Party Name field
+   (which may be an office/institution, not the contact's own name) is
+   left exactly as typed or imported. */
+function paymentsCustSelected(c){
+  const contactEl = document.getElementById('p_contact');
+  const phoneEl = document.getElementById('p_phone');
+  if(contactEl) contactEl.value = c ? c.name : '';
+  if(phoneEl) phoneEl.value = c ? c.phone : '';
+}
 const Payments = {
   render(){
     const searchEl = document.getElementById('paySearch');
@@ -1767,6 +1918,7 @@ const Payments = {
         <input type="file" id="payImportFile" accept=".xlsx,.xls,.csv" style="display:none;" onchange="Payments.importExcel(this.files[0])">
         <button class="btn btn-outline btn-sm" onclick="Payments.downloadSampleTemplate()">&#128190; Sample Template</button>
         <button class="btn btn-outline btn-sm" onclick="document.getElementById('payImportFile').click()">&#128229; Import from Excel</button>
+        <button class="btn btn-outline btn-sm" style="color:var(--red);" onclick="Payments.deleteAll()">&#128465; Delete All</button>
         <button class="btn btn-primary btn-sm" onclick="Payments.openForm(null)">&#65291; Add Invoice</button>
       </div>
       <div class="toolbar">
@@ -1791,7 +1943,7 @@ const Payments = {
         ${(q||fStatus||fCompany||fParty||fOverdue) ? `<button class="btn btn-outline btn-sm" onclick="Payments.clearFilters()">Clear</button>` : ''}
       </div>
       <div class="card"><div class="table-wrap">
-      ${list.length ? `<table><thead><tr><th>Party Name</th><th>Company Name</th><th>Product</th><th>Invoice Number</th><th>Invoice Date</th><th>Taxable Value</th><th>CGST</th><th>SGST</th><th>IGST</th><th>Round Off</th><th>Invoice Amount</th><th>Due Amount</th><th>Payment Status</th><th>Contact</th><th>Follow-up Date</th><th>Response</th><th></th></tr></thead><tbody>
+      ${list.length ? `<table><thead><tr><th>Party Name</th><th>Company Name</th><th>Product</th><th>Invoice Number</th><th>Invoice Date</th><th>Invoice Amount</th><th>Due Amount</th><th>Payment Status</th><th>Contact Name</th><th>Area / Panchayath</th><th>Phone</th><th>Follow-up Date</th><th>Response</th><th></th></tr></thead><tbody>
         ${list.map(p=>{
           const overdue = p.status!=='Paid' && p.followupDate && p.followupDate < Util.todayISO();
           const paidAmt = Number(p.amountPaid)||0;
@@ -1802,15 +1954,12 @@ const Payments = {
           <td class="cell-mute">${Util.escapeHtml(p.product||'—')}</td>
           <td class="mono cell-mute">${Util.escapeHtml(p.invoiceNumber||p.id)}</td>
           <td class="cell-mute">${Util.fmtDate(p.invoiceDate)}</td>
-          <td class="mono">${Util.fmtMoney(p.taxableValue||0)}</td>
-          <td class="mono">${Util.fmtMoney(p.cgst||0)}</td>
-          <td class="mono">${Util.fmtMoney(p.sgst||0)}</td>
-          <td class="mono">${Util.fmtMoney(p.igst||0)}</td>
-          <td class="mono">${Util.fmtMoney(p.roundOff||0)}</td>
           <td class="mono">${Util.fmtMoney(p.amount)}</td>
           <td class="mono" style="color:${pendingAmt>0?'var(--red)':'var(--text-mute)'};">${Util.fmtMoney(pendingAmt)}</td>
           <td>${statusBadge(p.status)}</td>
-          <td class="cell-mute">${Util.escapeHtml(p.contact||'')}<br><span class="mono" style="font-size:11px;">${Util.escapeHtml(p.phone||'')}</span></td>
+          <td class="cell-mute">${Util.escapeHtml(p.contact||'—')}</td>
+          <td class="cell-mute">${custArea(p.customerId)}</td>
+          <td class="mono cell-mute">${Util.escapeHtml(p.phone||'')}</td>
           <td>${overdue?'<span class="badge badge-red">Overdue</span> ':''}${Util.fmtDate(p.followupDate)}</td>
           <td class="cell-mute">${Util.escapeHtml(p.response||'—')}</td>
           <td style="display:flex;gap:5px;">
@@ -1848,9 +1997,8 @@ const Payments = {
     const rec = id ? Store.data.payments.find(x=>x.id===id) : null;
     const presetCust = presetCustomerId ? Store.data.customers.find(c=>c.id===presetCustomerId) : null;
     const v = rec || {companyName:'JAYS', product:'', invoiceNumber:'', invoiceDate:Util.todayISO(), party:presetCust?presetCust.name:'', taxableValue:'', cgst:'', sgst:'', igst:'', roundOff:0, amount:'', amountPaid:0, contact:presetCust?presetCust.name:'', phone:presetCust?presetCust.phone:'', followupDate:'', response:'', status:'Pending', customerId:presetCustomerId||''};
-    const custOptions = Store.data.customers.map(c=>`<option value="${c.id}" ${c.id===v.customerId?'selected':''}>${Util.escapeHtml(c.name)} — ${Util.escapeHtml(c.phone)}</option>`).join('');
     UI.openModal(rec?'Edit Invoice':'Add Invoice / Payment', `
-      <div class="field"><label>Contact (from Customers)</label><select id="p_cust" onchange="Payments.autofill()"><option value="">— manual entry —</option>${custOptions}</select></div>
+      <div class="field"><label>Contact (from Customers)</label>${CustPicker.html('p', v.customerId, 'paymentsCustSelected')}</div>
       <div class="form-row">
         <div class="field"><label>Party Name *</label><input id="p_party" value="${Util.escapeHtml(v.party)}"></div>
         <div class="field"><label>Invoice Number</label><input id="p_invoiceNumber" value="${Util.escapeHtml(v.invoiceNumber||'')}"></div>
@@ -1885,18 +2033,7 @@ const Payments = {
         <div class="field"><label>Payment Status</label><select id="p_status"><option value="Pending" ${v.status==='Pending'?'selected':''}>Unpaid</option><option value="Paid" ${v.status==='Paid'?'selected':''}>Paid</option></select></div>
       </div>
       <div class="field"><label>Response / Notes</label><textarea id="p_response">${Util.escapeHtml(v.response)}</textarea></div>
-      <input type="hidden" id="p_customerId" value="${v.customerId||''}">
     `, `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="Payments.save('${id||''}')">Save</button>`);
-  },
-  autofill(){
-    const id = document.getElementById('p_cust').value;
-    document.getElementById('p_customerId').value = id;
-    const c = Store.data.customers.find(x=>x.id===id);
-    if(c){
-      document.getElementById('p_party').value = c.name;
-      document.getElementById('p_contact').value = c.name;
-      document.getElementById('p_phone').value = c.phone;
-    }
   },
   updatePendingPreview(){
     const amount = Number(document.getElementById('p_amount').value)||0;
@@ -1950,6 +2087,16 @@ const Payments = {
     if(!confirm('Delete this invoice record?')) return;
     Store.data.payments = Store.data.payments.filter(x=>x.id!==id);
     await Store.save('payments'); UI.toast('Deleted'); Router.render('payments');
+  },
+  async deleteAll(){
+    if(!Store.data.payments.length){ UI.toast('There is nothing to delete'); return; }
+    if(!confirm('This will permanently delete ALL '+Store.data.payments.length+' Payment Followup records for everyone on the team. This cannot be undone. Continue?')) return;
+    if(!confirm('Are you absolutely sure? Type OK in the next prompt only if you really want to wipe all payment records.')) return;
+    Store.data.payments = [];
+    await Store.save('payments');
+    await Activity.log('Deleted ALL Payment Followup records', '');
+    UI.toast('All Payment Followup records deleted');
+    Router.render('payments');
   },
   downloadSampleTemplate(){
     try{
@@ -2039,7 +2186,21 @@ Views.payments = ()=>Payments.render();
 /* =====================================================================
    GEM CRAC (GEM order delivery-extension / invoice tracking)
 ===================================================================== */
+/* Called by CustPicker in the GEM CRAC form. Fills only Contact Name /
+   Phone — the Party / Panchayath field (imported from GEM data) is
+   left untouched. */
+function gemcracCustSelected(c){
+  const contactEl = document.getElementById('g_contact');
+  const phoneEl = document.getElementById('g_phone');
+  if(contactEl) contactEl.value = c ? c.name : '';
+  if(phoneEl) phoneEl.value = c ? c.phone : '';
+}
+/* Called by CustPicker in the WhatsApp Generator when a party is picked. */
+function gemcracGeneratorCustSelected(c){
+  GemCrac.buildMessage();
+}
 const GemCrac = {
+  selected: {},
   render(){
     const searchEl = document.getElementById('gcSearch');
     const searchHadFocus = document.activeElement === searchEl;
@@ -2048,21 +2209,29 @@ const GemCrac = {
     const q = (document.getElementById('gcSearch')?document.getElementById('gcSearch').value:'').toLowerCase();
     const fStatus = document.getElementById('gcStatusFilter')?document.getElementById('gcStatusFilter').value:'';
     const fCompany = document.getElementById('gcCompanyFilter')?document.getElementById('gcCompanyFilter').value:'';
+    const fContacted = document.getElementById('gcContactedFilter')?document.getElementById('gcContactedFilter').value:'';
 
     let list = Store.data.gemcrac.slice().sort((a,b)=>(b.orderDate||'').localeCompare(a.orderDate||''));
     if(q) list = list.filter(g=>(g.party||'').toLowerCase().includes(q) || (g.gemcNumber||'').toLowerCase().includes(q) || (g.productName||'').toLowerCase().includes(q));
     if(fStatus) list = list.filter(g=>g.status===fStatus);
     if(fCompany) list = list.filter(g=>g.companyName===fCompany);
+    if(fContacted==='yes') list = list.filter(g=>!!g.contactedDate);
+    else if(fContacted==='no') list = list.filter(g=>!g.contactedDate);
 
     const needsUpdate = Store.data.gemcrac.filter(g=>g.status==='Needs Update').length;
+    const selectedCount = Object.keys(this.selected).filter(k=>this.selected[k]).length;
 
     document.getElementById('content').innerHTML = `
       <div class="toolbar">
         <span class="badge badge-red" style="font-size:12px;padding:6px 12px;">Needs Update: ${needsUpdate}</span>
+        ${selectedCount? `<span class="badge badge-blue" style="font-size:12px;padding:6px 12px;">${selectedCount} selected</span>
+        <button class="btn btn-outline btn-sm" onclick="GemCrac.openBulkAssign()">&#128100; Assign Contact to Selected</button>
+        <button class="btn btn-outline btn-sm" onclick="GemCrac.clearSelection()">Clear Selection</button>` : ''}
         <div class="toolbar-spacer"></div>
         <input type="file" id="gcImportFile" accept=".xlsx,.xls,.csv" style="display:none;" onchange="GemCrac.importExcel(this.files[0])">
         <button class="btn btn-outline btn-sm" onclick="GemCrac.downloadSampleTemplate()">&#128190; Sample Template</button>
         <button class="btn btn-outline btn-sm" onclick="document.getElementById('gcImportFile').click()">&#128229; Import from Excel</button>
+        <button class="btn btn-outline btn-sm" style="color:var(--red);" onclick="GemCrac.deleteAll()">&#128465; Delete All</button>
         <button class="btn btn-wa btn-sm" onclick="GemCrac.openGenerator()">&#128172; WhatsApp Generator</button>
         <button class="btn btn-primary btn-sm" onclick="GemCrac.openForm(null)">&#65291; Add Record</button>
       </div>
@@ -2076,12 +2245,19 @@ const GemCrac = {
           <option value="">All Companies</option>
           ${DROPDOWNS.companyName.map(c=>`<option ${c===fCompany?'selected':''}>${c}</option>`).join('')}
         </select>
-        ${(q||fStatus||fCompany) ? `<button class="btn btn-outline btn-sm" onclick="GemCrac.clearFilters()">Clear</button>` : ''}
+        <select id="gcContactedFilter" onchange="GemCrac.render()">
+          <option value="">Contacted: All</option>
+          <option value="yes" ${fContacted==='yes'?'selected':''}>Contacted: Yes</option>
+          <option value="no" ${fContacted==='no'?'selected':''}>Contacted: No</option>
+        </select>
+        ${(q||fStatus||fCompany||fContacted) ? `<button class="btn btn-outline btn-sm" onclick="GemCrac.clearFilters()">Clear</button>` : ''}
       </div>
       <div class="card"><div class="table-wrap">
-      ${list.length ? `<table><thead><tr><th>Party / Panchayath</th><th>Company</th><th>GEM Number</th><th>Product Name</th><th>Buying Mode</th><th>Order Date</th><th>Amount</th><th>Qty</th><th>Status</th><th>Remark</th><th>Contact</th><th></th></tr></thead><tbody>
+      ${list.length ? `<table><thead><tr><th style="width:34px;"><input type="checkbox" class="row-check" onchange="GemCrac.toggleAll(this.checked, ${JSON.stringify(list.map(g=>g.id))})" ${list.length && list.every(g=>this.selected[g.id])?'checked':''}></th><th>Party / Panchayath</th><th>Area / Panchayath (Contact)</th><th>Company</th><th>GEM Number</th><th>Product Name</th><th>Buying Mode</th><th>Order Date</th><th>Amount</th><th>Qty</th><th>Status</th><th>Contact Name</th><th>Contacted Date</th><th>Remark</th><th></th></tr></thead><tbody>
         ${list.map(g=>`<tr>
+          <td><input type="checkbox" class="row-check" ${this.selected[g.id]?'checked':''} onchange="GemCrac.toggleOne('${g.id}', this.checked)"></td>
           <td class="cell-main">${Util.escapeHtml(g.party||'')}</td>
+          <td class="cell-mute">${custArea(g.customerId)}</td>
           <td>${g.companyName? `<span class="badge badge-blue">${Util.escapeHtml(g.companyName)}</span>`:'—'}</td>
           <td class="mono cell-mute">${Util.escapeHtml(g.gemcNumber||'')}</td>
           <td class="cell-mute">${Util.escapeHtml(g.productName||'')}</td>
@@ -2090,15 +2266,16 @@ const GemCrac = {
           <td class="mono">${Util.fmtMoney(g.amount||0)}</td>
           <td class="mono">${g.qty||0}</td>
           <td>${g.status==='Needs Update'? '<span class="badge badge-red">Needs Update</span>' : '<span class="badge badge-green">Updated</span>'}</td>
+          <td class="cell-mute">${Util.escapeHtml(g.contact||'—')}<br><span class="mono" style="font-size:11px;">${Util.escapeHtml(g.phone||'')}</span></td>
+          <td class="cell-mute">${g.contactedDate? Util.fmtDate(g.contactedDate) : '<span class="badge badge-amber" style="font-size:10px;">Not contacted</span>'}</td>
           <td class="cell-mute">${Util.escapeHtml(g.remark||'—')}</td>
-          <td class="cell-mute">${Util.escapeHtml(g.phone||'')}</td>
           <td style="display:flex;gap:5px;">
             ${g.phone? `<a class="icon-btn" style="color:#25D366;text-decoration:none;" title="WhatsApp" href="${Util.waLink(g.phone,'')}" target="_blank">&#128172;</a>` : ''}
             <button class="icon-btn" onclick="GemCrac.openForm('${g.id}')">&#9998;</button>
             <button class="icon-btn" onclick="GemCrac.remove('${g.id}')">&#128465;</button>
           </td>
         </tr>`).join('')}
-      </tbody></table>` : `<div class="empty-state"><div class="ic">&#128257;</div><div class="t">${(q||fStatus||fCompany)?'No matching records':'No GEM CRAC records yet'}</div><div class="d">${(q||fStatus||fCompany)?'Try clearing filters.':'Add a record, or import a batch from Excel.'}</div>
+      </tbody></table>` : `<div class="empty-state"><div class="ic">&#128257;</div><div class="t">${(q||fStatus||fCompany||fContacted)?'No matching records':'No GEM CRAC records yet'}</div><div class="d">${(q||fStatus||fCompany||fContacted)?'Try clearing filters.':'Add a record, or import a batch from Excel.'}</div>
       <button class="btn btn-primary btn-sm" onclick="GemCrac.openForm(null)">&#65291; Add Record</button></div>`}
       </div></div>
     `;
@@ -2107,18 +2284,27 @@ const GemCrac = {
       if(el){ el.focus(); el.setSelectionRange(caretPos, caretPos); }
     }
   },
+  toggleOne(id, checked){
+    if(checked) this.selected[id] = true; else delete this.selected[id];
+    this.render();
+  },
+  toggleAll(checked, ids){
+    ids.forEach(id=>{ if(checked) this.selected[id] = true; else delete this.selected[id]; });
+    this.render();
+  },
+  clearSelection(){ this.selected = {}; this.render(); },
   clearFilters(){
     const s = document.getElementById('gcSearch'); if(s) s.value='';
     const st = document.getElementById('gcStatusFilter'); if(st) st.value='';
     const c = document.getElementById('gcCompanyFilter'); if(c) c.value='';
+    const ct = document.getElementById('gcContactedFilter'); if(ct) ct.value='';
     this.render();
   },
   openForm(id){
     const rec = id ? Store.data.gemcrac.find(x=>x.id===id) : null;
-    const v = rec || {companyName:'JAYS', customerId:'', party:'', contact:'', phone:'', buyingMode:'DIRECT', productName:'', orderDate:Util.todayISO(), amount:'', qty:'', gemcNumber:'', status:'Needs Update', remark:''};
-    const custOptions = Store.data.customers.map(c=>`<option value="${c.id}" ${c.id===v.customerId?'selected':''}>${Util.escapeHtml(c.name)} — ${Util.escapeHtml(c.panchayath||'')}</option>`).join('');
+    const v = rec || {companyName:'JAYS', customerId:'', party:'', contact:'', phone:'', buyingMode:'DIRECT', productName:'', orderDate:Util.todayISO(), amount:'', qty:'', gemcNumber:'', status:'Needs Update', contactedDate:'', remark:''};
     UI.openModal(rec?'Edit GEM CRAC Record':'Add GEM CRAC Record', `
-      <div class="field"><label>Fetch Contact (from Customers)</label><select id="g_cust" onchange="GemCrac.autofill()"><option value="">— manual entry —</option>${custOptions}</select></div>
+      <div class="field"><label>Fetch Contact (from Customers)</label>${CustPicker.html('g', v.customerId, 'gemcracCustSelected')}</div>
       <div class="form-row">
         <div class="field"><label>Party / Panchayath Name *</label><input id="g_party" value="${Util.escapeHtml(v.party)}"></div>
         <div class="field"><label>Company Name</label><select id="g_companyName">${DROPDOWNS.companyName.map(c=>`<option ${c===v.companyName?'selected':''}>${c}</option>`).join('')}</select></div>
@@ -2137,22 +2323,12 @@ const GemCrac = {
         <div class="field"><label>Status</label><select id="g_status">${DROPDOWNS.gemcracStatus.map(s=>`<option ${s===v.status?'selected':''}>${s}</option>`).join('')}</select></div>
       </div>
       <div class="form-row">
-        <div class="field"><label>Contact Person</label><input id="g_contact" value="${Util.escapeHtml(v.contact||'')}"></div>
+        <div class="field"><label>Contact Name</label><input id="g_contact" value="${Util.escapeHtml(v.contact||'')}"></div>
         <div class="field"><label>Phone Number</label><input id="g_phone" value="${Util.escapeHtml(v.phone)}"></div>
       </div>
+      <div class="field"><label>Contacted Date</label><input type="date" id="g_contactedDate" value="${v.contactedDate||''}"></div>
       <div class="field"><label>Remark</label><textarea id="g_remark">${Util.escapeHtml(v.remark)}</textarea></div>
-      <input type="hidden" id="g_customerId" value="${v.customerId||''}">
     `, `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="GemCrac.save('${id||''}')">Save</button>`);
-  },
-  autofill(){
-    const id = document.getElementById('g_cust').value;
-    document.getElementById('g_customerId').value = id;
-    const c = Store.data.customers.find(x=>x.id===id);
-    if(c){
-      document.getElementById('g_party').value = c.panchayath || c.name;
-      document.getElementById('g_contact').value = c.name;
-      document.getElementById('g_phone').value = c.phone;
-    }
   },
   async save(id){
     const party = document.getElementById('g_party').value.trim();
@@ -2172,6 +2348,7 @@ const GemCrac = {
       status: document.getElementById('g_status').value,
       contact: document.getElementById('g_contact').value.trim(),
       phone: document.getElementById('g_phone').value.trim(),
+      contactedDate: document.getElementById('g_contactedDate').value,
       remark: document.getElementById('g_remark').value.trim()
     };
     if(id){ const i=Store.data.gemcrac.findIndex(x=>x.id===id); Store.data.gemcrac[i]=rec; }
@@ -2183,7 +2360,43 @@ const GemCrac = {
   async remove(id){
     if(!confirm('Delete this GEM CRAC record?')) return;
     Store.data.gemcrac = Store.data.gemcrac.filter(x=>x.id!==id);
+    delete this.selected[id];
     await Store.save('gemcrac'); UI.toast('Deleted'); Router.render('gemcrac');
+  },
+  async deleteAll(){
+    if(!Store.data.gemcrac.length){ UI.toast('There is nothing to delete'); return; }
+    if(!confirm('This will permanently delete ALL '+Store.data.gemcrac.length+' GEM CRAC records for everyone on the team. This cannot be undone. Continue?')) return;
+    if(!confirm('Are you absolutely sure? This is your last chance to cancel.')) return;
+    Store.data.gemcrac = [];
+    this.selected = {};
+    await Store.save('gemcrac');
+    await Activity.log('Deleted ALL GEM CRAC records', '');
+    UI.toast('All GEM CRAC records deleted');
+    Router.render('gemcrac');
+  },
+  openBulkAssign(){
+    const ids = Object.keys(this.selected).filter(k=>this.selected[k]);
+    if(!ids.length){ UI.toast('Select at least one record first'); return; }
+    const parties = [...new Set(ids.map(id=>{ const g=Store.data.gemcrac.find(x=>x.id===id); return g?g.party:''; }).filter(Boolean))];
+    UI.openModal('Assign Contact to '+ids.length+' Selected Record(s)', `
+      <div class="cell-mute" style="font-size:12.5px;margin-bottom:12px;">Party / Panchayath: ${parties.map(p=>Util.escapeHtml(p)).join(', ')}</div>
+      <div class="field"><label>Search Leads &amp; Customers</label>${CustPicker.html('bg', '', '')}</div>
+      <div class="cell-mute" style="font-size:11.5px;">This only sets the Contact Name / Phone on the selected records. Party / Panchayath names are never changed.</div>
+    `, `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="GemCrac.saveBulkAssign()">Assign to Selected</button>`);
+  },
+  async saveBulkAssign(){
+    const custId = document.getElementById('bg_customerId').value;
+    const c = Store.data.customers.find(x=>x.id===custId);
+    if(!c){ UI.toast('Search and pick a customer first'); return; }
+    const ids = Object.keys(this.selected).filter(k=>this.selected[k]);
+    ids.forEach(id=>{
+      const g = Store.data.gemcrac.find(x=>x.id===id);
+      if(g){ g.customerId = c.id; g.contact = c.name; g.phone = c.phone; }
+    });
+    await Store.save('gemcrac');
+    await Activity.log('Bulk-assigned contact', c.name+' — '+ids.length+' GEM CRAC record(s)');
+    this.selected = {};
+    UI.closeModal(); UI.toast('Contact assigned to '+ids.length+' record(s)'); Router.render('gemcrac');
   },
   downloadSampleTemplate(){
     try{
@@ -2236,7 +2449,7 @@ const GemCrac = {
             amount: Number(r['Order Value(Rs.)']||r['Order Value']||0)||0,
             qty: Number(r['Product Quantity']||0)||0,
             status,
-            contact: '', phone: '',
+            contact: '', phone: '', contactedDate: '',
             remark: String(r['REMARK']||'').trim()
           });
           count++;
@@ -2255,9 +2468,8 @@ const GemCrac = {
   _msgEdited: false,
   openGenerator(){
     this._msgEdited = false;
-    const custOptions = Store.data.customers.map(c=>`<option value="${c.id}">${Util.escapeHtml(c.name)} — ${Util.escapeHtml(c.panchayath||'')} — ${Util.escapeHtml(c.phone)}</option>`).join('');
     UI.openModal('WhatsApp GEM CRAC Update Request', `
-      <div class="field"><label>Select Party (from Customers)</label><select id="wg_cust" onchange="GemCrac.buildMessage()"><option value="">— select party —</option>${custOptions}</select></div>
+      <div class="field"><label>Select Party (from Customers)</label>${CustPicker.html('wg', '', 'gemcracGeneratorCustSelected', 'Search name, phone, or Area / Panchayath...')}</div>
       <div class="field" id="wg_ordersField" style="display:none;"><label>Include Orders</label><div id="wg_orders" style="max-height:160px;overflow-y:auto;border:1.5px solid var(--border);border-radius:9px;padding:8px;"></div></div>
       <div class="field"><label>Message Preview</label><textarea id="wg_message" rows="10" style="font-family:inherit;"></textarea></div>
     `, `<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>
@@ -2265,7 +2477,7 @@ const GemCrac = {
         <button class="btn btn-wa" id="wg_sendBtn" onclick="GemCrac.sendWhatsApp()" disabled>&#128172; Open WhatsApp</button>`, true);
   },
   buildMessage(){
-    const custId = document.getElementById('wg_cust').value;
+    const custId = document.getElementById('wg_customerId').value;
     const ordersField = document.getElementById('wg_ordersField');
     const ordersBox = document.getElementById('wg_orders');
     const sendBtn = document.getElementById('wg_sendBtn');
@@ -2300,7 +2512,7 @@ const GemCrac = {
     sendBtn.disabled = !cust.phone;
   },
   regenerateMessage(){
-    const custId = document.getElementById('wg_cust').value;
+    const custId = document.getElementById('wg_customerId').value;
     const cust = Store.data.customers.find(c=>c.id===custId);
     if(!cust) return;
     const checked = Array.from(document.querySelectorAll('.wg_ord:checked')).map(el=>el.value);
@@ -2322,7 +2534,7 @@ const GemCrac = {
     } else { el.select(); document.execCommand('copy'); done(); }
   },
   sendWhatsApp(){
-    const custId = document.getElementById('wg_cust').value;
+    const custId = document.getElementById('wg_customerId').value;
     const cust = Store.data.customers.find(c=>c.id===custId);
     if(!cust || !cust.phone){ UI.toast('This customer has no phone number on file'); return; }
     const msg = document.getElementById('wg_message').value;
@@ -2334,6 +2546,16 @@ Views.gemcrac = ()=>GemCrac.render();
 /* =====================================================================
    NEW ORDER
 ===================================================================== */
+/* Called by CustPicker in the New Order form. For Orders, the Party
+   Name field IS the customer's own name (unlike Payments/GEM CRAC
+   where Party is an office/institution), so selecting a contact here
+   fills Party Name + Phone directly. */
+function ordersCustSelected(c){
+  const partyEl = document.getElementById('o_party');
+  const phoneEl = document.getElementById('o_phone');
+  if(partyEl) partyEl.value = c ? c.name : '';
+  if(phoneEl) phoneEl.value = c ? c.phone : '';
+}
 const OrdersMgmt = {
   render(){
     const searchEl = document.getElementById('ordSearch');
@@ -2361,13 +2583,14 @@ const OrdersMgmt = {
         ${(q||fStatus) ? `<button class="btn btn-outline btn-sm" onclick="OrdersMgmt.clearFilters()">Clear</button>` : ''}
       </div>
       <div class="card"><div class="table-wrap">
-      ${list.length ? `<table><thead><tr><th>Order Date</th><th>GEM Order Number</th><th>Order From</th><th>Product Name</th><th>Party Name</th><th>Party Phone</th><th>Assigned To</th><th>Status</th><th></th></tr></thead><tbody>
+      ${list.length ? `<table><thead><tr><th>Order Date</th><th>GEM Order Number</th><th>Order From</th><th>Product Name</th><th>Party Name</th><th>Area / Panchayath</th><th>Party Phone</th><th>Assigned To</th><th>Status</th><th></th></tr></thead><tbody>
         ${list.map(o=>`<tr>
           <td class="cell-mute">${Util.fmtDate(o.orderDate)}</td>
           <td class="mono cell-mute">${Util.escapeHtml(o.gemcNumber||'')}</td>
           <td class="cell-mute">${Util.escapeHtml(o.orderFrom||'')}</td>
           <td class="cell-main">${Util.escapeHtml(o.productName||'')}</td>
           <td class="cell-mute">${Util.escapeHtml(o.party||'')}</td>
+          <td class="cell-mute">${custArea(o.customerId)}</td>
           <td class="mono cell-mute">${Util.escapeHtml(o.phone||'')}</td>
           <td class="cell-mute">${Util.escapeHtml(o.assignedTo||'')}</td>
           <td>${orderStatusBadge(o.status)}</td>
@@ -2394,7 +2617,6 @@ const OrdersMgmt = {
   openForm(id){
     const rec = id ? Store.data.orders.find(x=>x.id===id) : null;
     const v = rec || {orderDate:Util.todayISO(), gemcNumber:'', orderFrom:'', productName:'', customerId:'', party:'', phone:'', assignedTo:'', status:'In Progress'};
-    const custOptions = Store.data.customers.map(c=>`<option value="${c.id}" ${c.id===v.customerId?'selected':''}>${Util.escapeHtml(c.name)} — ${Util.escapeHtml(c.phone)}</option>`).join('');
     UI.openModal(rec?'Edit Order':'Add New Order', `
       <div class="form-row">
         <div class="field"><label>Order Date</label><input type="date" id="o_orderDate" value="${v.orderDate}"></div>
@@ -2402,7 +2624,7 @@ const OrdersMgmt = {
       </div>
       <div class="field"><label>Order From</label><input id="o_orderFrom" placeholder="e.g. GEM Portal, Direct, Tender" value="${Util.escapeHtml(v.orderFrom)}"></div>
       <div class="field"><label>Product Name</label><select id="o_productName"><option value="">— select product —</option>${Store.data.products.map(p=>`<option value="${Util.escapeHtml(p.name)}" ${p.name===v.productName?'selected':''}>${Util.escapeHtml(p.name)}</option>`).join('')}</select></div>
-      <div class="field"><label>Party Name (from Customers)</label><select id="o_cust" onchange="OrdersMgmt.autofill()"><option value="">— manual entry —</option>${custOptions}</select></div>
+      <div class="field"><label>Party Name (from Customers)</label>${CustPicker.html('o', v.customerId, 'ordersCustSelected')}</div>
       <div class="form-row">
         <div class="field"><label>Party Name *</label><input id="o_party" value="${Util.escapeHtml(v.party)}"></div>
         <div class="field"><label>Party Phone Number</label><input id="o_phone" value="${Util.escapeHtml(v.phone)}"></div>
@@ -2411,17 +2633,7 @@ const OrdersMgmt = {
         <div class="field"><label>Order Assigned To</label><select id="o_assignedTo"><option value="">— unassigned —</option>${DROPDOWNS.assignedTo.map(a=>`<option ${a===v.assignedTo?'selected':''}>${a}</option>`).join('')}</select></div>
         <div class="field"><label>Order Status</label><select id="o_status">${DROPDOWNS.orderStatus.map(s=>`<option ${s===v.status?'selected':''}>${s}</option>`).join('')}</select></div>
       </div>
-      <input type="hidden" id="o_customerId" value="${v.customerId||''}">
     `, `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="OrdersMgmt.save('${id||''}')">Save</button>`);
-  },
-  autofill(){
-    const id = document.getElementById('o_cust').value;
-    document.getElementById('o_customerId').value = id;
-    const c = Store.data.customers.find(x=>x.id===id);
-    if(c){
-      document.getElementById('o_party').value = c.name;
-      document.getElementById('o_phone').value = c.phone;
-    }
   },
   async save(id){
     const party = document.getElementById('o_party').value.trim();
@@ -2487,10 +2699,11 @@ const Complaints = {
         ${(q||fStatus) ? `<button class="btn btn-outline btn-sm" onclick="Complaints.clearFilters()">Clear</button>` : ''}
       </div>
       <div class="card"><div class="table-wrap">
-      ${list.length ? `<table><thead><tr><th>Complaint Date</th><th>Complaint From</th><th>Product Name</th><th>Complaint Note</th><th>Assigned To</th><th>Status</th><th>Updated Date</th><th></th></tr></thead><tbody>
+      ${list.length ? `<table><thead><tr><th>Complaint Date</th><th>Complaint From</th><th>Area / Panchayath</th><th>Product Name</th><th>Complaint Note</th><th>Assigned To</th><th>Status</th><th>Updated Date</th><th></th></tr></thead><tbody>
         ${list.map(c=>`<tr>
           <td class="cell-mute">${Util.fmtDate(c.complaintDate)}</td>
           <td class="cell-main">${Util.escapeHtml(c.complaintFrom||'')}</td>
+          <td class="cell-mute">${custArea(c.customerId)}</td>
           <td class="cell-mute">${Util.escapeHtml(c.productName||'')}</td>
           <td class="cell-mute">${Util.escapeHtml(c.note||'')}</td>
           <td class="cell-mute">${Util.escapeHtml(c.assignedTo||'')}</td>
