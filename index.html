@@ -574,29 +574,39 @@ const Store = {
       lastBackupAt: ''
     };
   },
+  /* loadFailed[key]=true means the LAST load of that key hit an error
+     (network blip, RLS/auth problem, wrong Supabase URL/key after a
+     redeploy, etc) — NOT that the key is genuinely empty. This
+     distinction is critical: save() below refuses to write a key
+     that failed to load, so a temporary read failure can never
+     silently overwrite real cloud data with blank/default data. */
+  loadFailed: {},
   async loadKey(key, fallback){
     try{
       const { data, error } = await sb.from('jays_crm_store').select('value').eq('key', key).maybeSingle();
       if(error) throw error;
+      this.loadFailed[key] = false;
       if(data && data.value !== null && data.value !== undefined) return data.value;
       return fallback;
-    }catch(e){ console.error('storage load failed', key, e); return fallback; }
+    }catch(e){ console.error('storage load failed', key, e); this.loadFailed[key] = true; return fallback; }
   },
   async saveKey(key, value){
     try{
       const { error } = await sb.from('jays_crm_store').upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: 'key' });
       if(error) throw error;
-    }catch(e){ console.error('storage save failed', key, e); }
-    return value;
+      return true;
+    }catch(e){ console.error('storage save failed', key, e); return false; }
   },
   async loadAll(){
+    this.loadFailed = {};
     this.data.customers = await this.loadKey('jays_customers', null);
-    if(this.data.customers === null){ this.data.customers = SEED_CUSTOMERS.slice(); await this.saveKey('jays_customers', this.data.customers); }
-    this.data.users = await this.loadKey('jays_users', null);
-    if(this.data.users === null){ this.data.users = SEED_USERS.slice(); await this.saveKey('jays_users', this.data.users); }
+    if(this.data.customers === null && !this.loadFailed['jays_customers']){ this.data.customers = SEED_CUSTOMERS.slice(); await this.saveKey('jays_customers', this.data.customers); }
+    else if(this.data.customers === null){ this.data.customers = []; }
+    await this.loadUsers();
 
     this.data.products = await this.loadKey('jays_products', null);
-    if(this.data.products === null){ this.data.products = SEED_PRODUCTS.slice(); await this.saveKey('jays_products', this.data.products); }
+    if(this.data.products === null && !this.loadFailed['jays_products']){ this.data.products = SEED_PRODUCTS.slice(); await this.saveKey('jays_products', this.data.products); }
+    else if(this.data.products === null){ this.data.products = []; }
 
     this.data.quotations = await this.loadKey('jays_quotations', []);
     this.data.payments = await this.loadKey('jays_payments', []);
@@ -608,11 +618,48 @@ const Store = {
     this.data.orders = await this.loadKey('jays_orders', []);
     this.data.complaints = await this.loadKey('jays_complaints', []);
 
+    const settingsFailedBefore = false;
     const settings = await this.loadKey('jays_settings', null);
-    this.data.settings = settings || this.defaults();
-    if(!settings) await this.saveKey('jays_settings', this.data.settings);
+    if(settings === null && !this.loadFailed['jays_settings']){ this.data.settings = this.defaults(); await this.saveKey('jays_settings', this.data.settings); }
+    else{ this.data.settings = settings || this.defaults(); }
+
+    const anyFailed = Object.values(this.loadFailed).some(Boolean);
+    if(anyFailed){
+      UI.toast('⚠ Some data failed to load from the server — editing is paused until it reconnects. Refresh the page.');
+      console.warn('Store.loadAll: some keys failed to load, saves for those keys are blocked:', Object.keys(this.loadFailed).filter(k=>this.loadFailed[k]));
+    }
+    return !anyFailed;
   },
-  async save(collection){ await this.saveKey('jays_'+collection, this.data[collection]); }
+  /* Team accounts now live in Supabase Auth (auth.users) + a linked
+     public.profiles row (username / name / role / permissions) —
+     NOT in the jays_crm_store blob. Passwords are never loaded here;
+     Supabase Auth owns them entirely. */
+  async loadUsers(){
+    try{
+      const { data, error } = await sb.from('profiles').select('id, username, name, role, permissions').order('username');
+      if(error) throw error;
+      this.data.users = data || [];
+    }catch(e){ console.error('loadUsers failed', e); this.data.users = []; }
+  },
+  /* Guards against the exact failure mode that causes "my data
+     disappeared" complaints: if this collection's most recent load
+     from Supabase failed (network hiccup, session not ready yet,
+     wrong keys after a redeploy...), this.data[collection] holds a
+     blank fallback, NOT what's really in the cloud. Saving it here
+     would overwrite the real data with that blank value. So: refuse,
+     warn, and leave the cloud row untouched until a fresh, successful
+     load confirms it's safe to write again. */
+  async save(collection){
+    const key = 'jays_' + collection.toLowerCase();
+    if(this.loadFailed[key]){
+      UI.toast('⚠ Not saved — your data failed to load from the server. Refresh the page and sign in again before editing.');
+      console.error('Store.save blocked: '+key+' had a failed load, refusing to overwrite cloud data.');
+      return false;
+    }
+    const ok = await this.saveKey(key, this.data[collection]);
+    if(!ok) UI.toast('⚠ Save failed — check your connection and try again.');
+    return ok;
+  },
 };
 
 /* =====================================================================
@@ -754,34 +801,63 @@ document.addEventListener('click', (e)=>{
 /* =====================================================================
    AUTH
 ===================================================================== */
+/* =====================================================================
+   AUTH — fully backed by Supabase Auth (email/password) + Row Level
+   Security. The login box still takes a "username"; it's mapped to a
+   synthetic email (username@jaystrading.crm) that Supabase Auth uses
+   as the account identifier. Auth.session holds the signed-in user's
+   public.profiles row (username, name, role, permissions) — never a
+   password, which Supabase Auth owns exclusively from here on.
+===================================================================== */
 const Auth = {
   session: null,
   async login(){
-    const u = document.getElementById('loginUser').value.trim();
+    const uRaw = document.getElementById('loginUser').value.trim();
     const p = document.getElementById('loginPass').value;
-    const match = Store.data.users.find(x=>x.username.toLowerCase()===u.toLowerCase() && x.password===p);
     const err = document.getElementById('loginError');
-    if(!match){ err.style.display='block'; return; }
+    if(!uRaw || !p){ err.textContent='Enter username and password.'; err.style.display='block'; return; }
+    const email = uRaw.includes('@') ? uRaw.toLowerCase() : (uRaw.toLowerCase()+'@jaystrading.crm');
+    const { data, error } = await sb.auth.signInWithPassword({ email, password: p });
+    if(error || !data.session){
+      err.textContent = 'Incorrect username or password.';
+      err.style.display='block';
+      return;
+    }
+    const ok = await this.loadProfile(data.session.user.id);
+    if(!ok){
+      err.textContent = 'Your account has no CRM profile yet. Contact an admin.';
+      err.style.display='block';
+      await sb.auth.signOut();
+      return;
+    }
     err.style.display='none';
-    this.session = match;
-    try{ localStorage.setItem('jays_session_local', match.username); }catch(e){}
-    await Activity.log('Login', match.username+' signed in');
+    await Store.loadAll();
+    await Activity.log('Login', this.session.username+' signed in');
     App.boot();
+  },
+  async loadProfile(userId){
+    try{
+      const { data, error } = await sb.from('profiles').select('*').eq('id', userId).maybeSingle();
+      if(error || !data) return false;
+      this.session = data;
+      return true;
+    }catch(e){ console.error('loadProfile failed', e); return false; }
   },
   async tryRestore(){
     try{
-      const uname = localStorage.getItem('jays_session_local');
-      if(uname){
-        const match = Store.data.users.find(x=>x.username===uname);
-        if(match){ this.session = match; return true; }
-      }
-    }catch(e){}
-    return false;
+      const { data } = await sb.auth.getSession();
+      const session = data && data.session;
+      if(!session) return false;
+      const ok = await this.loadProfile(session.user.id);
+      if(!ok){ await sb.auth.signOut(); return false; }
+      await Store.loadAll();
+      return true;
+    }catch(e){ console.error('tryRestore failed', e); return false; }
   },
   async logout(){
     await Activity.log('Logout', (this.session&&this.session.username)+' signed out');
+    await sb.auth.signOut();
     this.session = null;
-    try{ localStorage.removeItem('jays_session_local'); }catch(e){}
     document.getElementById('appScreen').style.display='none';
     document.getElementById('loginScreen').style.display='flex';
     document.getElementById('loginUser').value='';
@@ -949,7 +1025,6 @@ function go(view){
 ===================================================================== */
 const App = {
   async init(){
-    await Store.loadAll();
     const restored = await Auth.tryRestore();
     if(restored){ this.boot(); }
   },
@@ -2246,8 +2321,20 @@ const GemCrac = {
 
     const needsUpdate = Store.data.gemcrac.filter(g=>g.status==='Needs Update').length;
     const selectedCount = Object.keys(this.selected).filter(k=>this.selected[k]).length;
+    const stats = this.dashboardStats();
 
     document.getElementById('content').innerHTML = `
+      <div class="card card-pad" style="margin-bottom:16px;">
+        <h3 style="margin:0 0 12px;font-size:14px;">GEM Dashboard</h3>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;">
+          <div class="card card-pad" style="text-align:center;"><div style="font-size:22px;font-weight:700;">${stats.total}</div><div class="cell-mute" style="font-size:11.5px;">Total Orders</div></div>
+          <div class="card card-pad" style="text-align:center;"><div style="font-size:22px;font-weight:700;color:var(--red,#dc2626);">${stats.needUpdate}</div><div class="cell-mute" style="font-size:11.5px;">Need Update</div></div>
+          <div class="card card-pad" style="text-align:center;"><div style="font-size:22px;font-weight:700;color:var(--green,#16a34a);">${stats.updated}</div><div class="cell-mute" style="font-size:11.5px;">Updated</div></div>
+          <div class="card card-pad" style="text-align:center;"><div style="font-size:22px;font-weight:700;color:var(--amber,#d97706);">${stats.deliveryPending}</div><div class="cell-mute" style="font-size:11.5px;">Delivery Pending</div></div>
+          <div class="card card-pad" style="text-align:center;"><div style="font-size:22px;font-weight:700;color:var(--violet,#7c3aed);">${stats.extensionRequired}</div><div class="cell-mute" style="font-size:11.5px;">Extension Required</div></div>
+          <div class="card card-pad" style="text-align:center;"><div style="font-size:22px;font-weight:700;color:var(--green,#16a34a);">${stats.completed}</div><div class="cell-mute" style="font-size:11.5px;">Completed</div></div>
+        </div>
+      </div>
       <div class="toolbar">
         <span class="badge badge-red" style="font-size:12px;padding:6px 12px;">Needs Update: ${needsUpdate}</span>
         ${selectedCount? `<span class="badge badge-blue" style="font-size:12px;padding:6px 12px;">${selectedCount} selected</span>
@@ -2279,7 +2366,7 @@ const GemCrac = {
         ${(q||fStatus||fCompany||fContacted) ? `<button class="btn btn-outline btn-sm" onclick="GemCrac.clearFilters()">Clear</button>` : ''}
       </div>
       <div class="card"><div class="table-wrap">
-      ${list.length ? `<table><thead><tr><th style="width:34px;"><input type="checkbox" class="row-check" onchange="GemCrac.toggleAll(this.checked, ${JSON.stringify(list.map(g=>g.id))})" ${list.length && list.every(g=>this.selected[g.id])?'checked':''}></th><th>Party / Panchayath</th><th>Area / Panchayath (Contact)</th><th>Company</th><th>GEM Number</th><th>Product Name</th><th>Buying Mode</th><th>Order Date</th><th>Amount</th><th>Qty</th><th>Status</th><th>Contact Name</th><th>Contacted Date</th><th>Remark</th><th></th></tr></thead><tbody>
+      ${list.length ? `<table><thead><tr><th style="width:34px;"><input type="checkbox" class="row-check" onchange="GemCrac.toggleAll(this.checked, ${JSON.stringify(list.map(g=>g.id))})" ${list.length && list.every(g=>this.selected[g.id])?'checked':''}></th><th>Party / Panchayath</th><th>Area / Panchayath (Contact)</th><th>Company</th><th>GEM Number</th><th>Product Name</th><th>Buying Mode</th><th>Order Date</th><th>Amount</th><th>Qty</th><th>Status</th><th>Delivery Date</th><th>Extension</th><th>Completed</th><th>Contact Name</th><th>Contacted Date</th><th>Remark</th><th></th></tr></thead><tbody>
         ${list.map(g=>`<tr>
           <td><input type="checkbox" class="row-check" ${this.selected[g.id]?'checked':''} onchange="GemCrac.toggleOne('${g.id}', this.checked)"></td>
           <td class="cell-main">${Util.escapeHtml(g.party||'')}</td>
@@ -2292,10 +2379,14 @@ const GemCrac = {
           <td class="mono">${Util.fmtMoney(g.amount||0)}</td>
           <td class="mono">${g.qty||0}</td>
           <td>${g.status==='Needs Update'? '<span class="badge badge-red">Needs Update</span>' : '<span class="badge badge-green">Updated</span>'}</td>
+          <td class="cell-mute">${g.deliveryDate? Util.fmtDate(g.deliveryDate) : '—'}</td>
+          <td>${g.extensionRequested? '<span class="badge badge-violet">Requested</span>' : '—'}</td>
+          <td>${g.completed? '<span class="badge badge-green">Completed</span>' : '—'}</td>
           <td class="cell-mute">${Util.escapeHtml(g.contact||'—')}<br><span class="mono" style="font-size:11px;">${Util.escapeHtml(g.phone||'')}</span></td>
           <td class="cell-mute">${g.contactedDate? Util.fmtDate(g.contactedDate) : '<span class="badge badge-amber" style="font-size:10px;">Not contacted</span>'}</td>
           <td class="cell-mute">${Util.escapeHtml(g.remark||'—')}</td>
           <td style="display:flex;gap:5px;">
+            <button class="icon-btn" title="View Pipeline" onclick="GemCrac.viewPipeline('${g.id}')">&#128203;</button>
             ${g.phone? `<a class="icon-btn" style="color:#25D366;text-decoration:none;" title="WhatsApp" href="${Util.waLink(g.phone,'')}" target="_blank">&#128172;</a>` : ''}
             <button class="icon-btn" onclick="GemCrac.openForm('${g.id}')">&#9998;</button>
             <button class="icon-btn" onclick="GemCrac.remove('${g.id}')">&#128465;</button>
@@ -2309,6 +2400,44 @@ const GemCrac = {
       const el = document.getElementById('gcSearch');
       if(el){ el.focus(); el.setSelectionRange(caretPos, caretPos); }
     }
+  },
+  dashboardStats(){
+    const list = Store.data.gemcrac;
+    const today = Util.todayISO();
+    return {
+      total: list.length,
+      needUpdate: list.filter(g=>g.status==='Needs Update' && !g.completed).length,
+      updated: list.filter(g=>g.status==='Updated' && !g.completed).length,
+      deliveryPending: list.filter(g=>g.deliveryDate && g.deliveryDate < today && !g.completed).length,
+      extensionRequired: list.filter(g=>g.extensionRequested && !g.completed).length,
+      completed: list.filter(g=>g.completed).length
+    };
+  },
+  viewPipeline(id){
+    const g = Store.data.gemcrac.find(x=>x.id===id);
+    if(!g) return;
+    const rows = [
+      ['GEM Order', g.gemcNumber||'—'],
+      ['Buyer', g.party||'—'],
+      ['Product', g.productName||'—'],
+      ['Order Value', Util.fmtMoney(g.amount||0)],
+      ['Order Date', Util.fmtDate(g.orderDate)],
+      ['Delivery Date', g.deliveryDate? Util.fmtDate(g.deliveryDate) : 'Not set'],
+      ['CRAC Status', g.status||'—'],
+      ['Extension', g.extensionRequested? 'Requested' : 'Not requested'],
+      ['Completed', g.completed? 'Yes' : 'No']
+    ];
+    UI.openModal('GEM Order Pipeline', `
+      <div style="display:flex;flex-direction:column;">
+        ${rows.map((r,i)=>`
+          <div style="display:flex;align-items:center;gap:12px;padding:10px 4px;">
+            <div style="min-width:110px;font-size:11.5px;text-transform:uppercase;letter-spacing:.03em;color:var(--text-mute);">${r[0]}</div>
+            <div style="font-size:14px;font-weight:600;">${Util.escapeHtml(String(r[1]))}</div>
+          </div>
+          ${i<rows.length-1? `<div style="margin-left:8px;color:var(--text-mute);font-size:12px;">&#8595;</div>` : ''}
+        `).join('')}
+      </div>
+    `, `<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>`);
   },
   toggleOne(id, checked){
     if(checked) this.selected[id] = true; else delete this.selected[id];
@@ -2328,7 +2457,7 @@ const GemCrac = {
   },
   openForm(id){
     const rec = id ? Store.data.gemcrac.find(x=>x.id===id) : null;
-    const v = rec || {companyName:'JAYS', customerId:'', party:'', contact:'', phone:'', buyingMode:'DIRECT', productName:'', orderDate:Util.todayISO(), amount:'', qty:'', gemcNumber:'', status:'Needs Update', contactedDate:'', remark:''};
+    const v = rec || {companyName:'JAYS', customerId:'', party:'', contact:'', phone:'', buyingMode:'DIRECT', productName:'', orderDate:Util.todayISO(), amount:'', qty:'', gemcNumber:'', status:'Needs Update', contactedDate:'', remark:'', deliveryDate:'', extensionRequested:false, completed:false};
     UI.openModal(rec?'Edit GEM CRAC Record':'Add GEM CRAC Record', `
       <div class="field"><label>Fetch Contact (from Customers)</label>${CustPicker.html('g', v.customerId, 'gemcracCustSelected')}</div>
       <div class="form-row">
@@ -2353,6 +2482,11 @@ const GemCrac = {
         <div class="field"><label>Phone Number</label><input id="g_phone" value="${Util.escapeHtml(v.phone)}"></div>
       </div>
       <div class="field"><label>Contacted Date</label><input type="date" id="g_contactedDate" value="${v.contactedDate||''}"></div>
+      <div class="field"><label>Delivery Date</label><input type="date" id="g_deliveryDate" value="${v.deliveryDate||''}"></div>
+      <div class="form-row">
+        <div class="field" style="display:flex;align-items:center;gap:8px;padding-top:22px;"><label style="margin:0;"><input type="checkbox" id="g_extensionRequested" ${v.extensionRequested?'checked':''}> Extension Requested</label></div>
+        <div class="field" style="display:flex;align-items:center;gap:8px;padding-top:22px;"><label style="margin:0;"><input type="checkbox" id="g_completed" ${v.completed?'checked':''}> Completed</label></div>
+      </div>
       <div class="field"><label>Remark</label><textarea id="g_remark">${Util.escapeHtml(v.remark)}</textarea></div>
     `, `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="GemCrac.save('${id||''}')">Save</button>`);
   },
@@ -2375,6 +2509,9 @@ const GemCrac = {
       contact: document.getElementById('g_contact').value.trim(),
       phone: document.getElementById('g_phone').value.trim(),
       contactedDate: document.getElementById('g_contactedDate').value,
+      deliveryDate: document.getElementById('g_deliveryDate').value,
+      extensionRequested: document.getElementById('g_extensionRequested').checked,
+      completed: document.getElementById('g_completed').checked,
       remark: document.getElementById('g_remark').value.trim()
     };
     if(id){ const i=Store.data.gemcrac.findIndex(x=>x.id===id); Store.data.gemcrac[i]=rec; }
@@ -2649,13 +2786,13 @@ const OrdersMgmt = {
         <div class="field"><label>GEM Order Number</label><input id="o_gemcNumber" value="${Util.escapeHtml(v.gemcNumber)}"></div>
       </div>
       <div class="field"><label>Order From</label><input id="o_orderFrom" placeholder="e.g. GEM Portal, Direct, Tender" value="${Util.escapeHtml(v.orderFrom)}"></div>
-      <div class="field"><label>Product Name</label><select id="o_productName" onchange="OrdersMgmt.toggleCustomProduct()">
+      <div class="field"><label>Product Name (select from catalog)</label><select id="o_productName" onchange="OrdersMgmt.productSelectChanged()">
         <option value="">— select product —</option>
         ${Store.data.products.map(p=>`<option value="${Util.escapeHtml(p.name)}" ${p.name===v.productName?'selected':''}>${Util.escapeHtml(p.name)}</option>`).join('')}
-        <option value="__custom__" ${v.productName && !Store.data.products.some(p=>p.name===v.productName) ? 'selected':''}>&#9998; Enter custom product name...</option>
       </select></div>
-      <div class="field" id="o_productCustomWrap" style="display:${v.productName && !Store.data.products.some(p=>p.name===v.productName) ? 'block':'none'};">
-        <label>Custom Product Name</label><input id="o_productCustom" placeholder="Type product name..." value="${v.productName && !Store.data.products.some(p=>p.name===v.productName) ? Util.escapeHtml(v.productName) : ''}">
+      <div class="field">
+        <label>Or Type Product Name Manually</label>
+        <input id="o_productCustom" placeholder="Type a product name not in the catalog..." value="${v.productName && !Store.data.products.some(p=>p.name===v.productName) ? Util.escapeHtml(v.productName) : ''}">
       </div>
       <div class="field"><label>Party Name (from Customers)</label>${CustPicker.html('o', v.customerId, 'ordersCustSelected')}</div>
       <div class="form-row">
@@ -2668,20 +2805,17 @@ const OrdersMgmt = {
       </div>
     `, `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="OrdersMgmt.save('${id||''}')">Save</button>`);
   },
-  toggleCustomProduct(){
+  productSelectChanged(){
     const sel = document.getElementById('o_productName');
-    const wrap = document.getElementById('o_productCustomWrap');
-    if(!sel || !wrap) return;
-    wrap.style.display = sel.value==='__custom__' ? 'block' : 'none';
+    const manual = document.getElementById('o_productCustom');
+    if(sel && manual && sel.value) manual.value = '';
   },
   async save(id){
     const party = document.getElementById('o_party').value.trim();
     if(!party){ UI.toast('Party name is required'); return; }
-    let productName = document.getElementById('o_productName').value;
-    if(productName==='__custom__'){
-      productName = document.getElementById('o_productCustom').value.trim();
-      if(!productName){ UI.toast('Enter the custom product name'); return; }
-    }
+    const manualProduct = document.getElementById('o_productCustom').value.trim();
+    const productName = manualProduct || document.getElementById('o_productName').value;
+    if(!productName){ UI.toast('Enter or select a product name'); return; }
     const rec = {
       id: id || (Store.data.settings.ordPrefix||'ORD-')+String(Store.data.settings.ordNext||1).padStart(4,'0'),
       customerId: document.getElementById('o_customerId').value,
@@ -3186,14 +3320,14 @@ const Backup = {
   },
   async restoreFromFile(file){
     if(!file) return;
-    if(!confirm('Restoring will replace ALL current data with the contents of this backup file. Continue?')) return;
+    if(!confirm('Restoring will replace ALL current data with the contents of this backup file. Team accounts (Users & Roles) are not affected — those are managed via Supabase Auth. Continue?')) return;
     try{
       const text = await file.text();
       const data = JSON.parse(text);
-      ['customers','products','quotations','payments','followups','tasks','notes','users','settings','gemcrac','orders','complaints'].forEach(k=>{
+      ['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints'].forEach(k=>{
         if(data[k]!==undefined) Store.data[k] = data[k];
       });
-      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','users','settings','gemcrac','orders','complaints'].map(k=>Store.save(k)));
+      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints'].map(k=>Store.save(k)));
       await Activity.log('Data restored', 'Restored from backup file '+file.name);
       UI.toast('Data restored successfully');
       Router.render('backup');
@@ -3298,6 +3432,22 @@ Views.backup = ()=>Backup.render();
 /* =====================================================================
    USERS & ROLES (admin only)
 ===================================================================== */
+const TEAM_USER_FN_URL = SUPABASE_URL + '/functions/v1/manage-team-user';
+async function callTeamUserFn(payload){
+  const { data } = await sb.auth.getSession();
+  const token = data && data.session && data.session.access_token;
+  if(!token){ UI.toast('Your session expired — please log in again.'); return {error:'Not authenticated'}; }
+  try{
+    const res = await fetch(TEAM_USER_FN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer '+token, 'apikey': SUPABASE_ANON_KEY },
+      body: JSON.stringify(payload)
+    });
+    const out = await res.json();
+    if(!res.ok || out.error) return { error: (out && out.error) || ('Request failed ('+res.status+')') };
+    return out;
+  }catch(e){ console.error('manage-team-user call failed', e); return { error: 'Network error contacting the server' }; }
+}
 const UsersMgmt = {
   render(){
     if(!Auth.isAdmin()){ document.getElementById('content').innerHTML = `<div class="empty-state"><div class="ic">&#128274;</div><div class="t">Admins only</div></div>`; return; }
@@ -3306,6 +3456,7 @@ const UsersMgmt = {
       <div class="toolbar"><div class="toolbar-spacer"></div>
         <button class="btn btn-primary btn-sm" onclick="UsersMgmt.openForm(null)">&#65291; Add User</button>
       </div>
+      <p class="cell-mute" style="margin:0 0 10px;font-size:12.5px;">Team accounts are secured by Supabase Auth — sign-in is via email/password with Row Level Security, not the app's own password list.</p>
       <div class="card"><div class="table-wrap">
       <table><thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Menu Access</th><th></th></tr></thead><tbody>
       ${list.map(u=>`<tr>
@@ -3314,22 +3465,22 @@ const UsersMgmt = {
         <td>${u.role==='Admin'?'<span class="badge badge-green">Admin</span>':'<span class="badge badge-blue">Sales</span>'}</td>
         <td class="cell-mute">${u.role==='Admin' ? 'All menus' : (u.permissions ? (u.permissions.length ? u.permissions.length+' of '+assignableMenus().length : 'None') : 'All menus')}</td>
         <td style="display:flex;gap:5px;">
-          <button class="icon-btn" onclick="UsersMgmt.openForm('${u.username}')">&#9998;</button>
-          ${u.username!=='admin' ? `<button class="icon-btn" onclick="UsersMgmt.remove('${u.username}')">&#128465;</button>` : ''}
+          <button class="icon-btn" onclick="UsersMgmt.openForm('${u.id}')">&#9998;</button>
+          ${u.username!=='admin' ? `<button class="icon-btn" onclick="UsersMgmt.remove('${u.id}','${Util.escapeHtml(u.username)}')">&#128465;</button>` : ''}
         </td>
       </tr>`).join('')}
       </tbody></table></div></div>
     `;
   },
-  openForm(username){
-    const rec = username ? Store.data.users.find(u=>u.username===username) : null;
-    const v = rec || {username:'',password:'',role:'Sales',name:'',permissions:null};
+  openForm(id){
+    const rec = id ? Store.data.users.find(u=>u.id===id) : null;
+    const v = rec || {id:'',username:'',role:'Sales',name:'',permissions:null};
     const menus = assignableMenus();
     const checkedIds = v.permissions ? v.permissions : menus.map(m=>m.id);
     UI.openModal(rec?'Edit User':'Add User', `
       <div class="field"><label>Username *</label><input id="u_username" value="${Util.escapeHtml(v.username)}" ${rec?'disabled':''}></div>
-      <div class="field"><label>Full Name</label><input id="u_name" value="${Util.escapeHtml(v.name)}"></div>
-      <div class="field"><label>Password *</label><input id="u_password" value="${Util.escapeHtml(v.password)}"></div>
+      <div class="field"><label>Full Name</label><input id="u_name" value="${Util.escapeHtml(v.name||'')}"></div>
+      <div class="field"><label>${rec?'New Password (leave blank to keep current)':'Password *'}</label><input id="u_password" type="password" placeholder="${rec?'Leave blank to keep current password':''}"></div>
       <div class="field"><label>Role</label><select id="u_role" onchange="UsersMgmt.toggleRoleUI()"><option ${v.role==='Sales'?'selected':''}>Sales</option><option ${v.role==='Admin'?'selected':''}>Admin</option></select></div>
       <div class="field" id="u_permsWrap" style="display:${v.role==='Admin'?'none':'block'};">
         <label>Menu Access</label>
@@ -3342,7 +3493,7 @@ const UsersMgmt = {
         </div>
         <div class="hint" style="margin-top:6px;">Admins always have access to every menu.</div>
       </div>
-    `, `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="UsersMgmt.save('${username||''}')">Save</button>`);
+    `, `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="UsersMgmt.save('${id||''}')">Save</button>`);
   },
   toggleRoleUI(){
     const role = document.getElementById('u_role').value;
@@ -3352,25 +3503,34 @@ const UsersMgmt = {
   setAllPerms(state){
     document.querySelectorAll('.u_perm').forEach(cb=>{ cb.checked = state; });
   },
-  async save(oldUsername){
+  async save(id){
     const username = document.getElementById('u_username').value.trim();
     const password = document.getElementById('u_password').value;
-    if(!username || !password){ UI.toast('Username and password are required'); return; }
-    if(!oldUsername && Store.data.users.some(u=>u.username.toLowerCase()===username.toLowerCase())){ UI.toast('Username already exists'); return; }
+    if(!username){ UI.toast('Username is required'); return; }
+    if(!id && !password){ UI.toast('Password is required for a new user'); return; }
+    if(!id && Store.data.users.some(u=>u.username.toLowerCase()===username.toLowerCase())){ UI.toast('Username already exists'); return; }
     const role = document.getElementById('u_role').value;
     const permissions = role==='Admin' ? null : Array.from(document.querySelectorAll('.u_perm:checked')).map(cb=>cb.value);
-    const rec = { username, password, name: document.getElementById('u_name').value.trim(), role, permissions };
-    if(oldUsername){ const i=Store.data.users.findIndex(u=>u.username===oldUsername); Store.data.users[i]=rec; }
-    else Store.data.users.push(rec);
-    await Store.save('users');
-    await Activity.log(oldUsername?'Updated user':'Added user', username);
+    const name = document.getElementById('u_name').value.trim();
+
+    const payload = id
+      ? { action:'update', id, password: password||undefined, name, role, permissions }
+      : { action:'create', username, password, name, role, permissions };
+    const out = await callTeamUserFn(payload);
+    if(out.error){ UI.toast(out.error); return; }
+
+    await Store.loadUsers();
+    await Activity.log(id?'Updated user':'Added user', username);
     UI.closeModal(); UI.toast('Saved'); Router.render('users');
-    if(Auth.session && Auth.session.username===username){ Auth.session = rec; renderNav(); }
+    if(id && Auth.session && Auth.session.id===id){ await Auth.loadProfile(id); renderNav(); }
   },
-  async remove(username){
-    if(!confirm('Remove this user?')) return;
-    Store.data.users = Store.data.users.filter(u=>u.username!==username);
-    await Store.save('users'); await Activity.log('Removed user', username); UI.toast('Removed'); Router.render('users');
+  async remove(id, username){
+    if(!confirm('Remove '+username+'? This deletes their login entirely.')) return;
+    const out = await callTeamUserFn({ action:'delete', id });
+    if(out.error){ UI.toast(out.error); return; }
+    await Store.loadUsers();
+    await Activity.log('Removed user', username);
+    UI.toast('Removed'); Router.render('users');
   }
 };
 Views.users = ()=>UsersMgmt.render();
