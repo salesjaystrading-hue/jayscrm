@@ -547,6 +547,17 @@ const DROPDOWNS = {
 
 const STAGE_FLOW = ['First Contact','WhatsApp Sent','Quotation Sent','Follow-up','Payment Status'];
 
+/* Reusable "GEM CRAC style" stat-card dashboard strip, used at the top
+   of every list module. cards: [{label, value, color}] */
+function dashboardCardsHTML(title, cards){
+  return `<div class="card card-pad" style="margin-bottom:16px;">
+    <h3 style="margin:0 0 12px;font-size:14px;">${title}</h3>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;">
+      ${cards.map(c=>`<div class="card card-pad" style="text-align:center;"><div style="font-size:22px;font-weight:700;${c.color?`color:${c.color};`:''}">${c.value}</div><div class="cell-mute" style="font-size:11.5px;">${Util.escapeHtml(c.label)}</div></div>`).join('')}
+    </div>
+  </div>`;
+}
+
 /* =====================================================================
    STORE  (persisted to Supabase, shared across the team)
 ===================================================================== */
@@ -905,19 +916,27 @@ const UI = {
 ===================================================================== */
 const NAV = [
   {sec:'Overview', items:[
-    {id:'dashboard', ic:'&#128202;', label:'Dashboard'},
+    {id:'dashboard', ic:'&#127968;', label:'Dashboard'},
   ]},
-  {sec:'Sales Pipeline', items:[
-    {id:'customers', ic:'&#128101;', label:'Leads &amp; Customers'},
-    {id:'followupcentre', ic:'&#9200;', label:'Follow-up Centre'},
+  {sec:'Sales', items:[
+    {id:'leads', ic:'&#128101;', label:'Leads'},
+    {id:'customers', ic:'&#128100;', label:'Customers'},
+    {id:'pipeline', ic:'&#128202;', label:'Sales Pipeline'},
     {id:'quotations', ic:'&#128196;', label:'Quotations'},
+    {id:'orders', ic:'&#128230;', label:'Orders'},
+  ]},
+  {sec:'Finance', items:[
+    {id:'payments', ic:'&#128179;', label:'Payments Followup'},
+    {id:'outstanding', ic:'&#128176;', label:'Outstanding'},
   ]},
   {sec:'Operations', items:[
     {id:'products', ic:'&#128230;', label:'Products'},
-    {id:'orders', ic:'&#128230;', label:'New Order'},
-    {id:'payments', ic:'&#128179;', label:'Payment Followup'},
-    {id:'gemcrac', ic:'&#128257;', label:'GEM CRAC'},
-    {id:'complaints', ic:'&#9888;', label:'Complaint Management'},
+    {id:'inventory', ic:'&#128202;', label:'Inventory'},
+    {id:'gemcrac', ic:'&#127963;', label:'GEM CRAC'},
+    {id:'complaints', ic:'&#9888;', label:'Complaints'},
+  ]},
+  {sec:'Activity', items:[
+    {id:'followupcentre', ic:'&#9200;', label:'Follow-ups'},
     {id:'tasks', ic:'&#9989;', label:'Tasks &amp; To-Do'},
     {id:'notes', ic:'&#128221;', label:'Notes'},
   ]},
@@ -925,6 +944,7 @@ const NAV = [
     {id:'reports', ic:'&#128200;', label:'Reports'},
   ]},
   {sec:'System', items:[
+    {id:'notifications', ic:'&#128276;', label:'Notifications'},
     {id:'backup', ic:'&#9729;', label:'Backup &amp; Restore'},
   ]},
   {sec:'Admin', adminOnly:true, items:[
@@ -934,14 +954,19 @@ const NAV = [
 ];
 const PAGE_META = {
   dashboard:['Dashboard','Overview of your business'],
-  customers:['Leads & Customers','Every enquiry, tracked from first contact to close'],
-  followupcentre:['Follow-up Centre','Today, tomorrow, overdue &amp; upcoming — one click away'],
+  leads:['Leads','Fresh enquiries not yet in active pipeline'],
+  customers:['Customers','Every enquiry, tracked from first contact to close'],
+  pipeline:['Sales Pipeline','Leads, quotations and orders — one funnel'],
+  followupcentre:['Follow-ups','Today, tomorrow, overdue &amp; upcoming — one click away'],
   quotations:['Quotations','Create and track quotes'],
+  outstanding:['Outstanding','Unpaid balances by party'],
+  inventory:['Inventory','Stock levels across the product catalog'],
+  notifications:['Notifications','Everything that needs your attention, in one place'],
   products:['Product Master','Catalog & pricing'],
-  orders:['New Order','Track orders from placement to payment'],
-  payments:['Payment Followup','Pending invoices & reminders'],
+  orders:['Orders','Track orders from placement to payment'],
+  payments:['Payments Followup','Pending invoices & reminders'],
   gemcrac:['GEM CRAC','GEM order CRAC tracking & delivery-extension requests'],
-  complaints:['Complaint Management','Log and track customer complaints'],
+  complaints:['Complaints','Log and track customer complaints'],
   tasks:['Tasks & To-Do','Team to-do list &amp; task tracking'],
   notes:['Notes','Quick notes & reminders'],
   reports:['Reports','Business performance'],
@@ -974,8 +999,8 @@ function navBadgeCount(id){
   if(id==='followupcentre'){
     return Store.data.followups.filter(f=>f.status!=='Done').length;
   }
-  if(id==='customers'){
-    return Store.data.customers.filter(c=>c.status==='New Lead').length;
+  if(id==='leads'){
+    return Store.data.customers.filter(c=>['New Lead','First Contact','Call Not Taken'].includes(c.status)).length;
   }
   if(id==='payments'){
     return Store.data.payments.filter(p=>p.status==='Pending').length;
@@ -988,6 +1013,9 @@ function navBadgeCount(id){
   }
   if(id==='tasks'){
     return Store.data.tasks.filter(t=>t.status && t.status!=='Completed').length;
+  }
+  if(id==='inventory'){
+    return Store.data.products.filter(p=>!p.stock||Number(p.stock)<=0).length;
   }
   return 0;
 }
@@ -1594,7 +1622,8 @@ const Customers = {
     `);
   }
 };
-Views.customers = ()=>Customers.render();
+Views.customers = ()=>{ Customers.filterMode='all'; Customers.render(); };
+Views.leads = ()=>{ Customers.filterMode='leads'; Customers.render(); };
 
 /* =====================================================================
    FOLLOW-UP CENTRE
@@ -1747,6 +1776,12 @@ const Products = {
     Store.data.products.forEach(p=>{ catCounts[p.category]=(catCounts[p.category]||0)+1; });
 
     document.getElementById('content').innerHTML = `
+      ${dashboardCardsHTML('Products Dashboard', [
+        {label:'Total Products', value:Store.data.products.length},
+        {label:'Categories', value:Object.keys(catCounts).length},
+        {label:'Low Stock (<5)', value:Store.data.products.filter(p=>Number(p.stock||0)>0 && Number(p.stock||0)<5).length, color:'var(--amber,#d97706)'},
+        {label:'Out of Stock', value:Store.data.products.filter(p=>!p.stock||Number(p.stock)<=0).length, color:'var(--red,#dc2626)'}
+      ])}
       <div class="toolbar">
         <div class="search"><span class="ic">&#128269;</span><input id="prodSearch" placeholder="Search products..." oninput="Products.render()" value="${Util.escapeHtml(q)}"></div>
         <select id="prodCatFilter" onchange="Products.catFilter=this.value;Products.render()">
@@ -1833,7 +1868,16 @@ const Quotations = {
   draftItems: [],
   render(){
     const list = Store.data.quotations.slice().sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+    const s = {total:list.length, draft:0, sent:0, accepted:0, rejected:0};
+    list.forEach(q=>{ if(q.status==='Draft')s.draft++; else if(q.status==='Sent')s.sent++; else if(q.status==='Accepted')s.accepted++; else if(q.status==='Rejected')s.rejected++; });
     document.getElementById('content').innerHTML = `
+      ${dashboardCardsHTML('Quotations Dashboard', [
+        {label:'Total Quotations', value:s.total},
+        {label:'Draft', value:s.draft, color:'var(--text-mute,#6b7280)'},
+        {label:'Sent', value:s.sent, color:'var(--amber,#d97706)'},
+        {label:'Accepted', value:s.accepted, color:'var(--green,#16a34a)'},
+        {label:'Rejected', value:s.rejected, color:'var(--red,#dc2626)'}
+      ])}
       <div class="toolbar"><div class="toolbar-spacer"></div>
         <button class="btn btn-primary btn-sm" onclick="Quotations.openForm(null)">&#65291; New Quotation</button>
       </div>
@@ -2732,7 +2776,12 @@ const OrdersMgmt = {
     if(q) list = list.filter(o=>(o.party||'').toLowerCase().includes(q) || (o.gemcNumber||'').toLowerCase().includes(q) || (o.productName||'').toLowerCase().includes(q) || (o.phone||'').includes(q));
     if(fStatus) list = list.filter(o=>o.status===fStatus);
 
+    const allOrders = Store.data.orders;
     document.getElementById('content').innerHTML = `
+      ${dashboardCardsHTML('Orders Dashboard', [
+        {label:'Total Orders', value:allOrders.length},
+        ...DROPDOWNS.orderStatus.map(s=>({label:s, value:allOrders.filter(o=>o.status===s).length}))
+      ])}
       <div class="toolbar">
         <div class="toolbar-spacer"></div>
         <button class="btn btn-primary btn-sm" onclick="OrdersMgmt.openForm(null)">&#65291; Add Order</button>
@@ -2870,7 +2919,14 @@ const Complaints = {
     if(q) list = list.filter(c=>(c.complaintFrom||'').toLowerCase().includes(q) || (c.productName||'').toLowerCase().includes(q) || (c.note||'').toLowerCase().includes(q));
     if(fStatus) list = list.filter(c=>c.status===fStatus);
 
+    const allC = Store.data.complaints;
     document.getElementById('content').innerHTML = `
+      ${dashboardCardsHTML('Complaints Dashboard', [
+        {label:'Total Complaints', value:allC.length},
+        {label:'Initiated', value:allC.filter(c=>c.status==='Initiated').length, color:'var(--amber,#d97706)'},
+        {label:'Pending', value:allC.filter(c=>c.status==='Pending').length, color:'var(--red,#dc2626)'},
+        {label:'Solved', value:allC.filter(c=>c.status==='Solved').length, color:'var(--green,#16a34a)'}
+      ])}
       <div class="toolbar">
         <div class="toolbar-spacer"></div>
         <button class="btn btn-primary btn-sm" onclick="Complaints.openForm(null)">&#65291; Log Complaint</button>
@@ -2993,7 +3049,14 @@ const Tasks = {
     const fStatus = document.getElementById('tskStatusFilter')?document.getElementById('tskStatusFilter').value:'';
     let list = Store.data.tasks.slice().sort((a,b)=>(a.date||'').localeCompare(b.date||''));
     if(fStatus) list = list.filter(t=>(t.status||'Not Started')===fStatus);
+    const allT = Store.data.tasks;
     document.getElementById('content').innerHTML = `
+      ${dashboardCardsHTML('Tasks & To-Do Dashboard', [
+        {label:'Total', value:allT.length},
+        {label:'Not Started', value:allT.filter(t=>(t.status||'Not Started')==='Not Started').length, color:'var(--text-mute,#6b7280)'},
+        {label:'In Progress', value:allT.filter(t=>t.status==='In Progress').length, color:'var(--amber,#d97706)'},
+        {label:'Completed', value:allT.filter(t=>t.status==='Completed').length, color:'var(--green,#16a34a)'}
+      ])}
       <div class="toolbar"><div class="toolbar-spacer"></div>
         <button class="btn btn-primary btn-sm" onclick="Tasks.openForm(null)">&#65291; Add To-Do / Task</button>
       </div>
@@ -3136,6 +3199,206 @@ Views.notes = ()=>Notes.render();
 /* =====================================================================
    REPORTS  (+ generic Excel export)
 ===================================================================== */
+/* =====================================================================
+   SALES PIPELINE  (cross-entity funnel dashboard: leads -> quotes -> orders)
+===================================================================== */
+const SalesPipeline = {
+  render(){
+    const custs = Store.data.customers;
+    const leads = custs.filter(x=>['New Lead','First Contact','Call Not Taken'].includes(x.status)).length;
+    const inPipeline = custs.filter(x=>['WhatsApp Sent','Quotation Sent','Follow-up Scheduled','Payment Pending'].includes(x.status)).length;
+    const won = custs.filter(x=>['Payment Received','Converted Customer'].includes(x.status)).length;
+    const lost = custs.filter(x=>['Not Interested','Closed Lost'].includes(x.status)).length;
+
+    const quos = Store.data.quotations;
+    const quoStats = {Draft:0, Sent:0, Accepted:0, Rejected:0};
+    quos.forEach(q=>{ if(quoStats[q.status]!==undefined) quoStats[q.status]++; });
+
+    const ords = Store.data.orders;
+    const ordStats = {};
+    DROPDOWNS.orderStatus.forEach(s=>ordStats[s]=0);
+    ords.forEach(o=>{ if(ordStats[o.status]!==undefined) ordStats[o.status]++; });
+
+    const funnelStage = (label, value, max, color)=>`
+      <div style="margin-bottom:10px;">
+        <div style="display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:4px;"><span>${Util.escapeHtml(label)}</span><span class="cell-mute">${value}</span></div>
+        <div style="background:var(--border,#e5e7eb);border-radius:6px;height:10px;overflow:hidden;"><div style="width:${max? Math.max(4,Math.round(value/max*100)) : 0}%;height:100%;background:${color};"></div></div>
+      </div>`;
+    const funnelMax = Math.max(leads, inPipeline, won, 1);
+
+    document.getElementById('content').innerHTML = `
+      ${dashboardCardsHTML('Sales Pipeline Overview', [
+        {label:'Fresh Leads', value:leads},
+        {label:'In Pipeline', value:inPipeline, color:'var(--amber,#d97706)'},
+        {label:'Won / Customers', value:won, color:'var(--green,#16a34a)'},
+        {label:'Lost', value:lost, color:'var(--red,#dc2626)'},
+        {label:'Total Quotations', value:quos.length},
+        {label:'Total Orders', value:ords.length}
+      ])}
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+        <div class="card card-pad">
+          <h3 style="margin:0 0 12px;font-size:14px;">Lead Funnel</h3>
+          ${funnelStage('Fresh Leads', leads, funnelMax, 'var(--blue,#2563eb)')}
+          ${funnelStage('In Pipeline', inPipeline, funnelMax, 'var(--amber,#d97706)')}
+          ${funnelStage('Won / Converted', won, funnelMax, 'var(--green,#16a34a)')}
+        </div>
+        <div class="card card-pad">
+          <h3 style="margin:0 0 12px;font-size:14px;">Quotation Status</h3>
+          ${Object.entries(quoStats).map(([k,v])=>funnelStage(k, v, Math.max(...Object.values(quoStats),1), 'var(--violet,#7c3aed)')).join('')}
+        </div>
+      </div>
+      <div class="card card-pad" style="margin-top:16px;">
+        <h3 style="margin:0 0 12px;font-size:14px;">Order Status</h3>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;">
+          ${Object.entries(ordStats).map(([k,v])=>`<div class="card card-pad" style="text-align:center;"><div style="font-size:20px;font-weight:700;">${v}</div><div class="cell-mute" style="font-size:11.5px;">${Util.escapeHtml(k)}</div></div>`).join('')}
+        </div>
+      </div>
+    `;
+  }
+};
+Views.pipeline = ()=>SalesPipeline.render();
+
+/* =====================================================================
+   OUTSTANDING  (finance rollup of unpaid balances, by party)
+===================================================================== */
+const Outstanding = {
+  render(){
+    const pays = Store.data.payments;
+    const byParty = {};
+    pays.forEach(p=>{
+      const due = Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0), 0);
+      if(due<=0) return;
+      const key = p.party || '—';
+      if(!byParty[key]) byParty[key] = {party:key, due:0, overdue:0, invoices:0, phone:p.phone||p.contact||''};
+      byParty[key].due += due;
+      byParty[key].invoices += 1;
+      if(p.followupDate && p.followupDate < Util.todayISO()) byParty[key].overdue += due;
+    });
+    const rows = Object.values(byParty).sort((a,b)=>b.due-a.due);
+    const totalOutstanding = rows.reduce((s,r)=>s+r.due,0);
+    const totalOverdue = rows.reduce((s,r)=>s+r.overdue,0);
+
+    document.getElementById('content').innerHTML = `
+      ${dashboardCardsHTML('Outstanding Overview', [
+        {label:'Total Outstanding', value:Util.fmtMoney(totalOutstanding), color:'var(--amber,#d97706)'},
+        {label:'Overdue', value:Util.fmtMoney(totalOverdue), color:'var(--red,#dc2626)'},
+        {label:'Parties with Dues', value:rows.length}
+      ])}
+      <div class="card"><div class="table-wrap">
+      ${rows.length ? `<table><thead><tr><th>Party</th><th>Phone</th><th>Open Invoices</th><th>Amount Due</th><th>Overdue</th><th></th></tr></thead><tbody>
+        ${rows.map(r=>`<tr>
+          <td class="cell-main">${Util.escapeHtml(r.party)}</td>
+          <td class="cell-mute">${Util.escapeHtml(r.phone)}</td>
+          <td class="cell-mute">${r.invoices}</td>
+          <td class="mono">${Util.fmtMoney(r.due)}</td>
+          <td class="mono" style="${r.overdue>0?'color:var(--red,#dc2626);':''}">${r.overdue>0?Util.fmtMoney(r.overdue):'—'}</td>
+          <td>${r.phone? `<a class="icon-btn" style="color:#25D366;text-decoration:none;" href="${Util.waLink(r.phone,'')}" target="_blank">&#128172;</a>`:''}</td>
+        </tr>`).join('')}
+      </tbody></table>` : `<div class="empty-state"><div class="ic">&#128176;</div><div class="t">No outstanding balances</div><div class="d">Everything is settled — nice work.</div></div>`}
+      </div></div>
+    `;
+  }
+};
+Views.outstanding = ()=>Outstanding.render();
+
+/* =====================================================================
+   INVENTORY  (stock view over the shared Products catalog)
+===================================================================== */
+const Inventory = {
+  render(){
+    const q = (document.getElementById('invSearch')?document.getElementById('invSearch').value:'').toLowerCase();
+    let list = Store.data.products.slice();
+    if(q) list = list.filter(p=>(p.name||'').toLowerCase().includes(q) || (p.category||'').toLowerCase().includes(q));
+    list.sort((a,b)=>Number(a.stock||0)-Number(b.stock||0));
+
+    const totalUnits = Store.data.products.reduce((s,p)=>s+(Number(p.stock)||0),0);
+    const lowStock = Store.data.products.filter(p=>Number(p.stock||0)>0 && Number(p.stock||0)<5).length;
+    const outOfStock = Store.data.products.filter(p=>!p.stock||Number(p.stock)<=0).length;
+
+    document.getElementById('content').innerHTML = `
+      ${dashboardCardsHTML('Inventory Dashboard', [
+        {label:'Total Products', value:Store.data.products.length},
+        {label:'Total Stock Units', value:totalUnits},
+        {label:'Low Stock (<5)', value:lowStock, color:'var(--amber,#d97706)'},
+        {label:'Out of Stock', value:outOfStock, color:'var(--red,#dc2626)'}
+      ])}
+      <div class="toolbar">
+        <div class="search"><span class="ic">&#128269;</span><input id="invSearch" placeholder="Search products..." oninput="Inventory.render()" value="${Util.escapeHtml(q)}"></div>
+        <div class="toolbar-spacer"></div>
+        <span class="hint">Go to Products to add or remove items — stock quantities can be adjusted here.</span>
+      </div>
+      <div class="card"><div class="table-wrap">
+      ${list.length ? `<table><thead><tr><th>Category</th><th>Product Name</th><th>Unit</th><th>Stock</th><th></th></tr></thead><tbody>
+        ${list.map(p=>`<tr style="${(!p.stock||Number(p.stock)<=0)?'background:rgba(220,38,38,.06);':(Number(p.stock)<5?'background:rgba(217,119,6,.06);':'')}">
+          <td><span class="badge badge-blue">${Util.escapeHtml(p.category)}</span></td>
+          <td class="cell-main">${Util.escapeHtml(p.name)}</td>
+          <td class="cell-mute">${Util.escapeHtml(p.unit)}</td>
+          <td class="mono">${p.stock||0}</td>
+          <td style="display:flex;gap:5px;">
+            <button class="icon-btn" title="Decrease" onclick="Inventory.adjust('${p.id}',-1)">&#8722;</button>
+            <button class="icon-btn" title="Increase" onclick="Inventory.adjust('${p.id}',1)">&#43;</button>
+          </td>
+        </tr>`).join('')}
+      </tbody></table>` : `<div class="empty-state"><div class="ic">&#128230;</div><div class="t">No products found</div></div>`}
+      </div></div>
+    `;
+  },
+  async adjust(id, delta){
+    const p = Store.data.products.find(x=>x.id===id);
+    if(!p) return;
+    p.stock = Math.max(0, (Number(p.stock)||0) + delta);
+    await Store.save('products');
+    Inventory.render();
+  }
+};
+Views.inventory = ()=>Inventory.render();
+
+/* =====================================================================
+   NOTIFICATIONS  (computed action-items across every module)
+===================================================================== */
+const Notifications = {
+  render(){
+    const today = Util.todayISO();
+    const items = [];
+    Store.data.payments.forEach(p=>{
+      const due = Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0);
+      if(due>0 && p.followupDate && p.followupDate < today) items.push({type:'Payment Overdue', text:`${p.party||'Party'} — ${Util.fmtMoney(due)} overdue since ${Util.fmtDate(p.followupDate)}`, color:'var(--red,#dc2626)', view:'payments'});
+    });
+    Store.data.complaints.forEach(c=>{
+      if(c.status!=='Solved') items.push({type:'Open Complaint', text:`${c.complaintFrom||'Customer'} — ${c.productName||'complaint'} (${c.status})`, color:'var(--amber,#d97706)', view:'complaints'});
+    });
+    Store.data.gemcrac.forEach(g=>{
+      if(g.status==='Needs Update') items.push({type:'GEM CRAC Needs Update', text:`${g.party||'Order'} — GEM# ${g.gemcNumber||''}`, color:'var(--violet,#7c3aed)', view:'gemcrac'});
+    });
+    Store.data.tasks.forEach(t=>{
+      if(t.status && t.status!=='Completed' && t.date && t.date < today) items.push({type:'Overdue Task', text:`${t.todo||'Task'} — due ${Util.fmtDate(t.date)}`, color:'var(--red,#dc2626)', view:'tasks'});
+    });
+    Store.data.products.forEach(p=>{
+      if(!p.stock || Number(p.stock)<=0) items.push({type:'Out of Stock', text:`${p.name}`, color:'var(--red,#dc2626)', view:'inventory'});
+      else if(Number(p.stock)<5) items.push({type:'Low Stock', text:`${p.name} — ${p.stock} left`, color:'var(--amber,#d97706)', view:'inventory'});
+    });
+
+    document.getElementById('content').innerHTML = `
+      ${dashboardCardsHTML('Notifications Overview', [
+        {label:'Total Alerts', value:items.length},
+        {label:'Payment Overdue', value:items.filter(i=>i.type==='Payment Overdue').length, color:'var(--red,#dc2626)'},
+        {label:'Open Complaints', value:items.filter(i=>i.type==='Open Complaint').length, color:'var(--amber,#d97706)'},
+        {label:'Stock Alerts', value:items.filter(i=>i.type==='Low Stock'||i.type==='Out of Stock').length, color:'var(--red,#dc2626)'}
+      ])}
+      <div class="card"><div class="table-wrap">
+      ${items.length ? `<table><thead><tr><th>Type</th><th>Details</th><th></th></tr></thead><tbody>
+        ${items.map(i=>`<tr>
+          <td><span class="badge" style="background:${i.color};color:#fff;">${Util.escapeHtml(i.type)}</span></td>
+          <td class="cell-mute">${Util.escapeHtml(i.text)}</td>
+          <td><button class="btn btn-outline btn-sm" onclick="go('${i.view}')">Open</button></td>
+        </tr>`).join('')}
+      </tbody></table>` : `<div class="empty-state"><div class="ic">&#128276;</div><div class="t">All clear</div><div class="d">Nothing needs your attention right now.</div></div>`}
+      </div></div>
+    `;
+  }
+};
+Views.notifications = ()=>Notifications.render();
+
 const Reports = {
   render(){
     const c = Store.data.customers;
