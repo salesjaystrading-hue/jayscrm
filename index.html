@@ -541,7 +541,8 @@ const DROPDOWNS = {
   gemcracStatus: ['Needs Update','Updated'],
   buyingMode: ['DIRECT','BIDDING','REVERSE AUCTION'],
   orderStatus: ['In Progress','Work Order Done','Product Reached','Dispatched','Payment Received'],
-  complaintStatus: ['Initiated','Pending','Solved']
+  complaintStatus: ['Initiated','Pending','Solved'],
+  taskStatus: ['Not Started','In Progress','Completed']
 };
 
 const STAGE_FLOW = ['First Contact','WhatsApp Sent','Quotation Sent','Follow-up','Payment Status'];
@@ -841,7 +842,7 @@ const NAV = [
     {id:'payments', ic:'&#128179;', label:'Payment Followup'},
     {id:'gemcrac', ic:'&#128257;', label:'GEM CRAC'},
     {id:'complaints', ic:'&#9888;', label:'Complaint Management'},
-    {id:'tasks', ic:'&#9989;', label:'Tasks'},
+    {id:'tasks', ic:'&#9989;', label:'Tasks &amp; To-Do'},
     {id:'notes', ic:'&#128221;', label:'Notes'},
   ]},
   {sec:'Insights', items:[
@@ -865,7 +866,7 @@ const PAGE_META = {
   payments:['Payment Followup','Pending invoices & reminders'],
   gemcrac:['GEM CRAC','GEM order CRAC tracking & delivery-extension requests'],
   complaints:['Complaint Management','Log and track customer complaints'],
-  tasks:['Tasks','Team to-do list'],
+  tasks:['Tasks & To-Do','Team to-do list &amp; task tracking'],
   notes:['Notes','Quick notes & reminders'],
   reports:['Reports','Business performance'],
   backup:['Backup & Restore','Keep your business data safe'],
@@ -873,6 +874,25 @@ const PAGE_META = {
   settings:['Settings','Company & app preferences']
 };
 
+/* Flat list of every non-admin-only menu id + label, used to build the
+   per-user "menu access" checkboxes in Users & Roles. Admin/Settings
+   stay tied purely to the Admin role and are never toggled here. */
+function assignableMenus(){
+  const out = [];
+  NAV.forEach(sec=>{ if(!sec.adminOnly) sec.items.forEach(it=>out.push({id:it.id, label:it.label})); });
+  return out;
+}
+/* True if the logged-in user may open this view. Admins always can.
+   Sales users with no `permissions` array saved yet (older accounts)
+   keep full access for backward compatibility; once a permissions
+   array exists, it's the source of truth. */
+function hasMenuAccess(viewId){
+  if(!Auth.session) return false;
+  if(Auth.session.role==='Admin') return true;
+  const perms = Auth.session.permissions;
+  if(!perms) return true;
+  return perms.includes(viewId);
+}
 function navBadgeCount(id){
   const today = Util.todayISO();
   if(id==='followupcentre'){
@@ -890,6 +910,9 @@ function navBadgeCount(id){
   if(id==='complaints'){
     return Store.data.complaints.filter(c=>c.status!=='Solved').length;
   }
+  if(id==='tasks'){
+    return Store.data.tasks.filter(t=>t.status && t.status!=='Completed').length;
+  }
   return 0;
 }
 
@@ -898,8 +921,10 @@ function renderNav(){
   let html = '';
   NAV.forEach(sec=>{
     if(sec.adminOnly && !Auth.isAdmin()) return;
+    const visibleItems = sec.items.filter(it=>hasMenuAccess(it.id));
+    if(!visibleItems.length) return;
     html += `<div class="nav-section-label">${sec.sec}</div>`;
-    sec.items.forEach(it=>{
+    visibleItems.forEach(it=>{
       const cnt = navBadgeCount(it.id);
       html += `<div class="nav-item ${UI.currentView===it.id?'active':''}" onclick="go('${it.id}')">
         <span class="ic">${it.ic}</span><span>${it.label}</span>${cnt?`<span class="cnt">${cnt}</span>`:''}
@@ -909,6 +934,7 @@ function renderNav(){
   box.innerHTML = html;
 }
 function go(view){
+  if(!hasMenuAccess(view)){ UI.toast("You don't have access to this menu"); return; }
   UI.currentView = view;
   document.getElementById('sidebar').classList.remove('open');
   const meta = PAGE_META[view] || [view,''];
@@ -2623,7 +2649,14 @@ const OrdersMgmt = {
         <div class="field"><label>GEM Order Number</label><input id="o_gemcNumber" value="${Util.escapeHtml(v.gemcNumber)}"></div>
       </div>
       <div class="field"><label>Order From</label><input id="o_orderFrom" placeholder="e.g. GEM Portal, Direct, Tender" value="${Util.escapeHtml(v.orderFrom)}"></div>
-      <div class="field"><label>Product Name</label><select id="o_productName"><option value="">— select product —</option>${Store.data.products.map(p=>`<option value="${Util.escapeHtml(p.name)}" ${p.name===v.productName?'selected':''}>${Util.escapeHtml(p.name)}</option>`).join('')}</select></div>
+      <div class="field"><label>Product Name</label><select id="o_productName" onchange="OrdersMgmt.toggleCustomProduct()">
+        <option value="">— select product —</option>
+        ${Store.data.products.map(p=>`<option value="${Util.escapeHtml(p.name)}" ${p.name===v.productName?'selected':''}>${Util.escapeHtml(p.name)}</option>`).join('')}
+        <option value="__custom__" ${v.productName && !Store.data.products.some(p=>p.name===v.productName) ? 'selected':''}>&#9998; Enter custom product name...</option>
+      </select></div>
+      <div class="field" id="o_productCustomWrap" style="display:${v.productName && !Store.data.products.some(p=>p.name===v.productName) ? 'block':'none'};">
+        <label>Custom Product Name</label><input id="o_productCustom" placeholder="Type product name..." value="${v.productName && !Store.data.products.some(p=>p.name===v.productName) ? Util.escapeHtml(v.productName) : ''}">
+      </div>
       <div class="field"><label>Party Name (from Customers)</label>${CustPicker.html('o', v.customerId, 'ordersCustSelected')}</div>
       <div class="form-row">
         <div class="field"><label>Party Name *</label><input id="o_party" value="${Util.escapeHtml(v.party)}"></div>
@@ -2635,16 +2668,27 @@ const OrdersMgmt = {
       </div>
     `, `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="OrdersMgmt.save('${id||''}')">Save</button>`);
   },
+  toggleCustomProduct(){
+    const sel = document.getElementById('o_productName');
+    const wrap = document.getElementById('o_productCustomWrap');
+    if(!sel || !wrap) return;
+    wrap.style.display = sel.value==='__custom__' ? 'block' : 'none';
+  },
   async save(id){
     const party = document.getElementById('o_party').value.trim();
     if(!party){ UI.toast('Party name is required'); return; }
+    let productName = document.getElementById('o_productName').value;
+    if(productName==='__custom__'){
+      productName = document.getElementById('o_productCustom').value.trim();
+      if(!productName){ UI.toast('Enter the custom product name'); return; }
+    }
     const rec = {
       id: id || (Store.data.settings.ordPrefix||'ORD-')+String(Store.data.settings.ordNext||1).padStart(4,'0'),
       customerId: document.getElementById('o_customerId').value,
       orderDate: document.getElementById('o_orderDate').value,
       gemcNumber: document.getElementById('o_gemcNumber').value.trim(),
       orderFrom: document.getElementById('o_orderFrom').value.trim(),
-      productName: document.getElementById('o_productName').value,
+      productName,
       party,
       phone: document.getElementById('o_phone').value.trim(),
       assignedTo: document.getElementById('o_assignedTo').value,
@@ -2669,6 +2713,13 @@ function orderStatusBadge(status){
 }
 Views.orders = ()=>OrdersMgmt.render();
 
+/* Called by CustPicker in the Log Complaint form — fills the Complaint
+   From field with the selected customer's name (Area/Panchayath is
+   picked up automatically via custArea(customerId) in the table). */
+function complaintsCustSelected(c){
+  const fromEl = document.getElementById('c_complaintFrom');
+  if(fromEl) fromEl.value = c ? c.name : '';
+}
 /* =====================================================================
    COMPLAINT MANAGEMENT
 ===================================================================== */
@@ -2731,9 +2782,8 @@ const Complaints = {
   openForm(id){
     const rec = id ? Store.data.complaints.find(x=>x.id===id) : null;
     const v = rec || {complaintDate:Util.todayISO(), customerId:'', complaintFrom:'', productName:'', note:'', assignedTo:'', status:'Initiated', updatedDate:Util.todayISO()};
-    const custOptions = Store.data.customers.map(c=>`<option value="${c.id}" ${c.id===v.customerId?'selected':''}>${Util.escapeHtml(c.name)} — ${Util.escapeHtml(c.phone)}</option>`).join('');
     UI.openModal(rec?'Edit Complaint':'Log Complaint', `
-      <div class="field"><label>Complaint From (from Customers)</label><select id="c_cust" onchange="Complaints.autofill()"><option value="">— manual entry —</option>${custOptions}</select></div>
+      <div class="field"><label>Complaint From (from Customers)</label>${CustPicker.html('c', v.customerId, 'complaintsCustSelected')}</div>
       <div class="form-row">
         <div class="field"><label>Complaint From *</label><input id="c_complaintFrom" value="${Util.escapeHtml(v.complaintFrom)}"></div>
         <div class="field"><label>Complaint Date</label><input type="date" id="c_complaintDate" value="${v.complaintDate}"></div>
@@ -2744,14 +2794,7 @@ const Complaints = {
         <div class="field"><label>Complaint Assigned To</label><select id="c_assignedTo"><option value="">— unassigned —</option>${DROPDOWNS.assignedTo.map(a=>`<option ${a===v.assignedTo?'selected':''}>${a}</option>`).join('')}</select></div>
         <div class="field"><label>Complaint Status</label><select id="c_status">${DROPDOWNS.complaintStatus.map(s=>`<option ${s===v.status?'selected':''}>${s}</option>`).join('')}</select></div>
       </div>
-      <input type="hidden" id="c_customerId" value="${v.customerId||''}">
     `, `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="Complaints.save('${id||''}')">Save</button>`);
-  },
-  autofill(){
-    const id = document.getElementById('c_cust').value;
-    document.getElementById('c_customerId').value = id;
-    const c = Store.data.customers.find(x=>x.id===id);
-    if(c) document.getElementById('c_complaintFrom').value = c.name;
   },
   async save(id){
     const complaintFrom = document.getElementById('c_complaintFrom').value.trim();
@@ -2788,78 +2831,116 @@ function complaintStatusBadge(status){
 }
 Views.complaints = ()=>Complaints.render();
 
+/* Called by CustPicker in the Tasks & To-Do form — fills the customer
+   name/phone captured on the task (Area/Panchayath is picked up
+   automatically via custArea(customerId) in the table). */
+function tasksCustSelected(c){
+  const nameEl = document.getElementById('t_customerName');
+  const phoneEl = document.getElementById('t_phone');
+  if(nameEl) nameEl.value = c ? c.name : '';
+  if(phoneEl) phoneEl.value = c ? c.phone : '';
+}
+/* Users & Roles drives the "Assigned To" list here, so tasks can be
+   handed to any team member that's been created, by name. */
+function userAssigneeOptions(current){
+  const names = Store.data.users.map(u=>u.name||u.username).filter(Boolean);
+  return `<option value="">— unassigned —</option>` + names.map(n=>`<option ${n===current?'selected':''}>${Util.escapeHtml(n)}</option>`).join('');
+}
+function taskStatusBadge(status){
+  const map = {'Not Started':'gray','In Progress':'amber','Completed':'green'};
+  const color = map[status]||'gray';
+  return `<span class="badge badge-${color}">${Util.escapeHtml(status||'Not Started')}</span>`;
+}
 /* =====================================================================
-   TASKS
+   TASKS & TO-DO  (combined to-do list + task tracker)
 ===================================================================== */
 const Tasks = {
   render(){
-    const list = Store.data.tasks.slice().sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+    const fStatus = document.getElementById('tskStatusFilter')?document.getElementById('tskStatusFilter').value:'';
+    let list = Store.data.tasks.slice().sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+    if(fStatus) list = list.filter(t=>(t.status||'Not Started')===fStatus);
     document.getElementById('content').innerHTML = `
       <div class="toolbar"><div class="toolbar-spacer"></div>
-        <button class="btn btn-primary btn-sm" onclick="Tasks.openForm(null)">&#65291; Add Task</button>
+        <button class="btn btn-primary btn-sm" onclick="Tasks.openForm(null)">&#65291; Add To-Do / Task</button>
+      </div>
+      <div class="toolbar">
+        <select id="tskStatusFilter" onchange="Tasks.render()">
+          <option value="">All Statuses</option>
+          ${DROPDOWNS.taskStatus.map(s=>`<option ${s===fStatus?'selected':''}>${s}</option>`).join('')}
+        </select>
+        ${fStatus ? `<button class="btn btn-outline btn-sm" onclick="document.getElementById('tskStatusFilter').value='';Tasks.render();">Clear</button>` : ''}
       </div>
       <div class="card"><div class="table-wrap">
-      ${list.length ? `<table><thead><tr><th></th><th>Date</th><th>Type</th><th>Assigned To</th><th>Customer</th><th>Notes</th><th></th></tr></thead><tbody>
-        ${list.map(t=>`<tr style="${t.done?'opacity:.55;':''}">
-          <td><input type="checkbox" ${t.done?'checked':''} onchange="Tasks.toggle('${t.id}')"></td>
+      ${list.length ? `<table><thead><tr><th>Date</th><th>To Do</th><th>Customer</th><th>Area / Panchayath</th><th>Task Entry</th><th>Remarks</th><th>Assigned To</th><th>Status</th><th></th></tr></thead><tbody>
+        ${list.map(t=>`<tr style="${t.status==='Completed'?'opacity:.55;':''}">
           <td class="cell-mute">${Util.fmtDate(t.date)}</td>
-          <td class="cell-mute">${Util.escapeHtml(t.type||'—')}</td>
-          <td class="cell-main">${Util.escapeHtml(t.assignedTo||'—')}</td>
-          <td class="cell-mute">${Util.escapeHtml(t.customer||'—')}${t.phone? ' &middot; '+Util.escapeHtml(t.phone):''}</td>
-          <td class="cell-mute" style="white-space:normal;max-width:280px;">${Util.escapeHtml(t.notes||'')}</td>
+          <td class="cell-main">${Util.escapeHtml(t.todo||'—')}</td>
+          <td class="cell-mute">${Util.escapeHtml(t.customerName||'—')}${t.phone? ' &middot; '+Util.escapeHtml(t.phone):''}</td>
+          <td class="cell-mute">${custArea(t.customerId)}</td>
+          <td class="cell-mute" style="white-space:normal;max-width:220px;">${Util.escapeHtml(t.taskEntry||'')}</td>
+          <td class="cell-mute" style="white-space:normal;max-width:200px;">${Util.escapeHtml(t.remarks||'')}</td>
+          <td class="cell-mute">${Util.escapeHtml(t.assignedTo||'—')}</td>
+          <td>
+            <select onchange="Tasks.quickStatus('${t.id}', this.value)" style="padding:3px 6px;font-size:12px;">
+              ${DROPDOWNS.taskStatus.map(s=>`<option ${s===(t.status||'Not Started')?'selected':''}>${s}</option>`).join('')}
+            </select>
+          </td>
           <td style="display:flex;gap:5px;">
             ${t.phone? `<a class="icon-btn" style="color:#25D366;text-decoration:none;" href="${Util.waLink(t.phone,'')}" target="_blank">&#128172;</a>`:''}
             <button class="icon-btn" onclick="Tasks.openForm('${t.id}')">&#9998;</button>
             <button class="icon-btn" onclick="Tasks.remove('${t.id}')">&#128465;</button>
           </td>
         </tr>`).join('')}
-      </tbody></table>` : `<div class="empty-state"><div class="ic">&#9989;</div><div class="t">No tasks yet</div><div class="d">Add tasks to keep the team's to-do list organized.</div>
-      <button class="btn btn-primary btn-sm" onclick="Tasks.openForm(null)">&#65291; Add Task</button></div>`}
+      </tbody></table>` : `<div class="empty-state"><div class="ic">&#9989;</div><div class="t">${fStatus?'No matching items':'No to-dos or tasks yet'}</div><div class="d">${fStatus?'Try clearing the status filter.':"Add a to-do or task to keep the team's list organized."}</div>
+      <button class="btn btn-primary btn-sm" onclick="Tasks.openForm(null)">&#65291; Add To-Do / Task</button></div>`}
       </div></div>
     `;
   },
   openForm(id){
     const rec = id ? Store.data.tasks.find(x=>x.id===id) : null;
-    const v = rec || {date:Util.todayISO(), type:'', assignedTo:'', customer:'', phone:'', interactionType:'', notes:'', done:false};
-    UI.openModal(rec?'Edit Task':'Add Task', `
+    const v = rec || {date:Util.todayISO(), todo:'', customerId:'', customerName:'', phone:'', taskEntry:'', remarks:'', assignedTo:'', status:'Not Started'};
+    UI.openModal(rec?'Edit To-Do / Task':'Add To-Do / Task', `
       <div class="form-row">
         <div class="field"><label>Date</label><input type="date" id="t_date" value="${v.date}"></div>
-        <div class="field"><label>Task Type</label><select id="t_type"><option value="">Select...</option>${DROPDOWNS.taskType.map(s=>`<option ${s===v.type?'selected':''}>${s}</option>`).join('')}</select></div>
+        <div class="field"><label>To Do *</label><input id="t_todo" placeholder="Short title, e.g. Call about quotation" value="${Util.escapeHtml(v.todo)}"></div>
       </div>
+      <div class="field"><label>Customer (from Customers)</label>${CustPicker.html('t', v.customerId, 'tasksCustSelected')}</div>
+      <input type="hidden" id="t_customerName" value="${Util.escapeHtml(v.customerName||'')}">
+      <div class="field"><label>Phone</label><input id="t_phone" value="${Util.escapeHtml(v.phone)}"></div>
+      <div class="field"><label>Task Entry</label><textarea id="t_taskEntry" placeholder="Details of the task...">${Util.escapeHtml(v.taskEntry)}</textarea></div>
+      <div class="field"><label>Remarks</label><textarea id="t_remarks">${Util.escapeHtml(v.remarks)}</textarea></div>
       <div class="form-row">
-        <div class="field"><label>Assigned To</label><select id="t_assignedTo">${selectOptions(DROPDOWNS.assignedTo, v.assignedTo)}</select></div>
-        <div class="field"><label>Interaction Type</label><select id="t_interactionType">${selectOptions(DROPDOWNS.interactionType, v.interactionType)}</select></div>
+        <div class="field"><label>Assigned To</label><select id="t_assignedTo">${userAssigneeOptions(v.assignedTo)}</select></div>
+        <div class="field"><label>Status</label><select id="t_status">${DROPDOWNS.taskStatus.map(s=>`<option ${s===v.status?'selected':''}>${s}</option>`).join('')}</select></div>
       </div>
-      <div class="form-row">
-        <div class="field"><label>Customer Name</label><input id="t_customer" value="${Util.escapeHtml(v.customer)}"></div>
-        <div class="field"><label>Phone</label><input id="t_phone" value="${Util.escapeHtml(v.phone)}"></div>
-      </div>
-      <div class="field"><label>Notes</label><textarea id="t_notes">${Util.escapeHtml(v.notes)}</textarea></div>
     `, `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="Tasks.save('${id||''}')">Save</button>`);
   },
   async save(id){
+    const todo = document.getElementById('t_todo').value.trim();
+    if(!todo){ UI.toast('To Do is required'); return; }
     const rec = {
       id: id || Util.uid('T', Store.data.tasks),
       date: document.getElementById('t_date').value,
-      type: document.getElementById('t_type').value,
-      assignedTo: document.getElementById('t_assignedTo').value,
-      customer: document.getElementById('t_customer').value.trim(),
+      todo,
+      customerId: document.getElementById('t_customerId').value,
+      customerName: document.getElementById('t_customerName').value.trim(),
       phone: document.getElementById('t_phone').value.trim(),
-      interactionType: document.getElementById('t_interactionType').value,
-      notes: document.getElementById('t_notes').value.trim(),
-      done: (id && Store.data.tasks.find(x=>x.id===id).done) || false
+      taskEntry: document.getElementById('t_taskEntry').value.trim(),
+      remarks: document.getElementById('t_remarks').value.trim(),
+      assignedTo: document.getElementById('t_assignedTo').value,
+      status: document.getElementById('t_status').value || 'Not Started'
     };
     if(id){ const i=Store.data.tasks.findIndex(x=>x.id===id); Store.data.tasks[i]=rec; }
     else Store.data.tasks.unshift(rec);
     await Store.save('tasks');
     UI.closeModal(); UI.toast('Saved'); Router.render('tasks');
   },
-  async toggle(id){
-    const t = Store.data.tasks.find(x=>x.id===id); t.done=!t.done;
+  async quickStatus(id, status){
+    const t = Store.data.tasks.find(x=>x.id===id); if(t) t.status = status;
     await Store.save('tasks'); Router.render('tasks');
   },
   async remove(id){
-    if(!confirm('Delete this task?')) return;
+    if(!confirm('Delete this item?')) return;
     Store.data.tasks = Store.data.tasks.filter(x=>x.id!==id);
     await Store.save('tasks'); UI.toast('Deleted'); Router.render('tasks');
   }
@@ -2977,7 +3058,7 @@ const Reports = {
     } else if(view==='followupcentre'){
       rows = Store.data.followups.map(f=>({ID:f.id, Date:f.date, Customer:f.customerName, Phone:f.phone, Purpose:f.purpose, Status:f.status, Notes:f.notes}));
     } else if(view==='tasks'){
-      rows = Store.data.tasks.map(t=>({ID:t.id, Date:t.date, Type:t.type, AssignedTo:t.assignedTo, Customer:t.customer, Phone:t.phone, Notes:t.notes, Done:t.done}));
+      rows = Store.data.tasks.map(t=>({ID:t.id, Date:t.date, 'To Do':t.todo, AssignedTo:t.assignedTo, Customer:t.customerName, 'Area/Panchayath':custArea(t.customerId), Phone:t.phone, 'Task Entry':t.taskEntry, Remarks:t.remarks, Status:t.status}));
     } else if(view==='notes'){
       rows = Store.data.notes.map(n=>({ID:n.id, Date:n.date, Note:n.text, Remark:n.remark}));
     } else if(view==='gemcrac'){
@@ -3127,7 +3208,7 @@ const Backup = {
         Quotations: Store.data.quotations.map(q=>({ID:q.id,Date:q.date,Customer:q.customerName,Phone:q.phone,Subtotal:q.subtotal,GST:q.gst,Total:q.total,Status:q.status})),
         Payments: Store.data.payments.map(p=>({'Party Name':p.party,'Company Name':p.companyName||'','Product':p.product||'','Invoice Number':p.invoiceNumber||p.id,'Invoice Date':p.invoiceDate,'Taxable Value':p.taxableValue||0,'CGST':p.cgst||0,'SGST':p.sgst||0,'IGST':p.igst||0,'Round Off':p.roundOff||0,'Invoice Amount':p.amount,'Due Amount':p.dueAmount!==undefined?p.dueAmount:Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0),'Payment Status':p.status==='Paid'?'Paid':'Unpaid',Contact:p.contact,Phone:p.phone,FollowupDate:p.followupDate})),
         Followups: Store.data.followups.map(f=>({ID:f.id,Date:f.date,Customer:f.customerName,Phone:f.phone,Purpose:f.purpose,Status:f.status})),
-        Tasks: Store.data.tasks.map(t=>({ID:t.id,Date:t.date,Type:t.type,AssignedTo:t.assignedTo,Customer:t.customer,Notes:t.notes,Done:t.done})),
+        Tasks: Store.data.tasks.map(t=>({ID:t.id,Date:t.date,ToDo:t.todo,AssignedTo:t.assignedTo,Customer:t.customerName,'Area/Panchayath':custArea(t.customerId),TaskEntry:t.taskEntry,Remarks:t.remarks,Status:t.status})),
         Notes: Store.data.notes.map(n=>({ID:n.id,Date:n.date,Note:n.text,Remark:n.remark})),
         GemCrac: Store.data.gemcrac.map(g=>({'Party/Panchayath':g.party,'Company Name':g.companyName||'','GEM Order Number':g.gemcNumber,'Product Name':g.productName||'','Buying Mode':g.buyingMode||'','Order Date':g.orderDate,'Order Value':g.amount||0,'Quantity':g.qty||0,'Status':g.status,Contact:g.contact||'',Phone:g.phone||'',Remark:g.remark||''})),
         Orders: Store.data.orders.map(o=>({ID:o.id,'Order Date':o.orderDate,'GEM Order Number':o.gemcNumber||'','Order From':o.orderFrom||'','Product Name':o.productName||'','Party Name':o.party,'Party Phone':o.phone||'','Assigned To':o.assignedTo||'','Status':o.status})),
@@ -3226,11 +3307,12 @@ const UsersMgmt = {
         <button class="btn btn-primary btn-sm" onclick="UsersMgmt.openForm(null)">&#65291; Add User</button>
       </div>
       <div class="card"><div class="table-wrap">
-      <table><thead><tr><th>Username</th><th>Name</th><th>Role</th><th></th></tr></thead><tbody>
+      <table><thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Menu Access</th><th></th></tr></thead><tbody>
       ${list.map(u=>`<tr>
         <td class="mono cell-main">${Util.escapeHtml(u.username)}</td>
         <td>${Util.escapeHtml(u.name||'—')}</td>
         <td>${u.role==='Admin'?'<span class="badge badge-green">Admin</span>':'<span class="badge badge-blue">Sales</span>'}</td>
+        <td class="cell-mute">${u.role==='Admin' ? 'All menus' : (u.permissions ? (u.permissions.length ? u.permissions.length+' of '+assignableMenus().length : 'None') : 'All menus')}</td>
         <td style="display:flex;gap:5px;">
           <button class="icon-btn" onclick="UsersMgmt.openForm('${u.username}')">&#9998;</button>
           ${u.username!=='admin' ? `<button class="icon-btn" onclick="UsersMgmt.remove('${u.username}')">&#128465;</button>` : ''}
@@ -3241,25 +3323,49 @@ const UsersMgmt = {
   },
   openForm(username){
     const rec = username ? Store.data.users.find(u=>u.username===username) : null;
-    const v = rec || {username:'',password:'',role:'Sales',name:''};
+    const v = rec || {username:'',password:'',role:'Sales',name:'',permissions:null};
+    const menus = assignableMenus();
+    const checkedIds = v.permissions ? v.permissions : menus.map(m=>m.id);
     UI.openModal(rec?'Edit User':'Add User', `
       <div class="field"><label>Username *</label><input id="u_username" value="${Util.escapeHtml(v.username)}" ${rec?'disabled':''}></div>
       <div class="field"><label>Full Name</label><input id="u_name" value="${Util.escapeHtml(v.name)}"></div>
       <div class="field"><label>Password *</label><input id="u_password" value="${Util.escapeHtml(v.password)}"></div>
-      <div class="field"><label>Role</label><select id="u_role"><option ${v.role==='Sales'?'selected':''}>Sales</option><option ${v.role==='Admin'?'selected':''}>Admin</option></select></div>
+      <div class="field"><label>Role</label><select id="u_role" onchange="UsersMgmt.toggleRoleUI()"><option ${v.role==='Sales'?'selected':''}>Sales</option><option ${v.role==='Admin'?'selected':''}>Admin</option></select></div>
+      <div class="field" id="u_permsWrap" style="display:${v.role==='Admin'?'none':'block'};">
+        <label>Menu Access</label>
+        <div style="display:flex;gap:6px;margin-bottom:6px;">
+          <button type="button" class="btn btn-outline btn-sm" onclick="UsersMgmt.setAllPerms(true)">Select all</button>
+          <button type="button" class="btn btn-outline btn-sm" onclick="UsersMgmt.setAllPerms(false)">Clear all</button>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;max-height:220px;overflow:auto;border:1px solid var(--border,#e5e7eb);border-radius:8px;padding:10px;">
+          ${menus.map(m=>`<label style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:400;"><input type="checkbox" class="u_perm" value="${m.id}" ${checkedIds.includes(m.id)?'checked':''}> ${m.label.replace(/&amp;/g,'&')}</label>`).join('')}
+        </div>
+        <div class="hint" style="margin-top:6px;">Admins always have access to every menu.</div>
+      </div>
     `, `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="UsersMgmt.save('${username||''}')">Save</button>`);
+  },
+  toggleRoleUI(){
+    const role = document.getElementById('u_role').value;
+    const wrap = document.getElementById('u_permsWrap');
+    if(wrap) wrap.style.display = role==='Admin' ? 'none' : 'block';
+  },
+  setAllPerms(state){
+    document.querySelectorAll('.u_perm').forEach(cb=>{ cb.checked = state; });
   },
   async save(oldUsername){
     const username = document.getElementById('u_username').value.trim();
     const password = document.getElementById('u_password').value;
     if(!username || !password){ UI.toast('Username and password are required'); return; }
     if(!oldUsername && Store.data.users.some(u=>u.username.toLowerCase()===username.toLowerCase())){ UI.toast('Username already exists'); return; }
-    const rec = { username, password, name: document.getElementById('u_name').value.trim(), role: document.getElementById('u_role').value };
+    const role = document.getElementById('u_role').value;
+    const permissions = role==='Admin' ? null : Array.from(document.querySelectorAll('.u_perm:checked')).map(cb=>cb.value);
+    const rec = { username, password, name: document.getElementById('u_name').value.trim(), role, permissions };
     if(oldUsername){ const i=Store.data.users.findIndex(u=>u.username===oldUsername); Store.data.users[i]=rec; }
     else Store.data.users.push(rec);
     await Store.save('users');
     await Activity.log(oldUsername?'Updated user':'Added user', username);
     UI.closeModal(); UI.toast('Saved'); Router.render('users');
+    if(Auth.session && Auth.session.username===username){ Auth.session = rec; renderNav(); }
   },
   async remove(username){
     if(!confirm('Remove this user?')) return;
