@@ -358,6 +358,47 @@
 
   textarea{resize:vertical;min-height:70px;}
   label.chk{display:flex;align-items:center;gap:7px;font-size:13px;cursor:pointer;}
+
+  /* ---------- Universal table system (sticky actions, pagination, sort) ---------- */
+  table th.col-actions, table td.col-actions{
+    position:sticky;left:0;z-index:3;background:#fff;
+    box-shadow:2px 0 4px rgba(15,35,60,0.06);
+    white-space:nowrap;padding:8px 10px !important;
+  }
+  table thead th.col-actions{z-index:4;background:var(--bg);}
+  table tr:hover td.col-actions{background:#FAFBFD;}
+  .table-wrap table thead th{position:sticky;top:0;background:var(--bg);z-index:2;cursor:default;}
+  .table-wrap{max-height:70vh;}
+  th.sortable{cursor:pointer;user-select:none;white-space:nowrap;}
+  th.sortable:hover{color:var(--orange);}
+  th.sortable .arrow{font-size:10px;opacity:.55;margin-left:3px;}
+  th.sortable.active .arrow{opacity:1;color:var(--orange);}
+  .row-action-btns{display:flex;gap:4px;align-items:center;}
+  .row-action-btns .icon-btn{width:26px;height:26px;font-size:13px;}
+  .table-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px;}
+  .pager{display:flex;align-items:center;gap:6px;justify-content:flex-end;padding:10px 14px;font-size:12.5px;color:var(--text-mute);flex-wrap:wrap;}
+  .pager select{padding:4px 8px;font-size:12.5px;border-radius:7px;}
+  .pager .pg-btn{border:1.5px solid var(--border);background:#fff;border-radius:7px;padding:4px 10px;font-size:12.5px;cursor:pointer;}
+  .pager .pg-btn:disabled{opacity:.4;cursor:default;}
+  .pager .pg-btn.active{background:var(--orange);border-color:var(--orange);color:#fff;}
+  .match-badge{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:20px;font-size:11px;font-weight:800;}
+  .match-high{background:var(--accent-light);color:var(--accent-dark);}
+  .match-medium{background:var(--amber-light);color:#95610F;}
+  .match-low{background:var(--border);color:var(--text-mute);}
+  .deadline-badge{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:20px;font-size:11px;font-weight:800;white-space:nowrap;}
+  .dl-critical{background:var(--red-light);color:var(--red);}
+  .dl-soon{background:var(--amber-light);color:#95610F;}
+  .dl-ok{background:var(--accent-light);color:var(--accent-dark);}
+  .dl-over{background:var(--border);color:var(--text-mute);}
+  .kpi-mini{background:#fff;border:1px solid var(--border);border-radius:12px;padding:14px 16px;box-shadow:var(--shadow);transition:transform .12s, box-shadow .12s;}
+  .kpi-mini:hover{transform:translateY(-2px);box-shadow:var(--shadow-lg);}
+  .doc-progress{background:var(--border);border-radius:6px;height:8px;overflow:hidden;}
+  .doc-progress > div{height:100%;background:var(--accent);}
+  .bid-stage-flow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;}
+  .bid-stage-flow .stg{padding:5px 11px;border-radius:20px;font-size:11px;font-weight:700;background:var(--border);color:var(--text-mute);white-space:nowrap;}
+  .bid-stage-flow .stg.active{background:var(--orange);color:#fff;}
+  .bid-stage-flow .stg.done{background:var(--accent-light);color:var(--accent-dark);}
+  .bid-stage-flow .arrow-sep{color:var(--text-mute);font-size:11px;}
 </style>
 </head>
 <body>
@@ -542,10 +583,78 @@ const DROPDOWNS = {
   buyingMode: ['DIRECT','BIDDING','REVERSE AUCTION'],
   orderStatus: ['In Progress','Work Order Done','Product Reached','Dispatched','Payment Received'],
   complaintStatus: ['Initiated','Pending','Solved'],
-  taskStatus: ['Not Started','In Progress','Completed']
+  taskStatus: ['Not Started','In Progress','Completed'],
+  bidType: ['Bid','RA (Reverse Auction)'],
+  bidStatus: ['New','Saved','Under Review','Go / No-Go Decision','Documents Pending','Under Preparation','Ready for Submission','Submitted','Technical Evaluation','Financial Evaluation','Won','Lost','Cancelled','Not Participating']
 };
+const DEFAULT_BID_CHECKLIST = ['PAN','GST Certificate','UDYAM Certificate','Experience Certificate','Turnover Certificate','Financial Statement','Product Catalogue','Technical Specification','OEM Authorization','MAF','EMD Document'];
+const BID_TERMINAL_STATUSES = ['Won','Lost','Cancelled','Not Participating'];
 
 const STAGE_FLOW = ['First Contact','WhatsApp Sent','Quotation Sent','Follow-up','Payment Status'];
+
+/* =====================================================================
+   UNIVERSAL TABLE SYSTEM — reusable pagination + sorting for every
+   module's list view. Modules keep their own search/filter state (as
+   before); this layer only slices/orders the already-filtered list.
+===================================================================== */
+const Paginate = {
+  state: {},
+  get(module){
+    if(!this.state[module]) this.state[module] = {page:1, perPage:25};
+    return this.state[module];
+  },
+  slice(module, list){
+    const st = this.get(module);
+    const total = list.length;
+    const totalPages = Math.max(1, Math.ceil(total/st.perPage));
+    if(st.page>totalPages) st.page = totalPages;
+    if(st.page<1) st.page = 1;
+    const start = (st.page-1)*st.perPage;
+    return { pageItems: list.slice(start, start+st.perPage), page: st.page, perPage: st.perPage, total, totalPages, start: total?start+1:0, end: Math.min(start+st.perPage, total) };
+  },
+  setPage(module, p, rerender){ this.get(module).page = Number(p); rerender(); },
+  setPerPage(module, n, rerender){ const st=this.get(module); st.perPage=Number(n); st.page=1; rerender(); },
+  controlsHTML(module, info, rerenderCall){
+    if(info.total===0) return '';
+    const maxBtns = 5;
+    let startP = Math.max(1, info.page-2), endP = Math.min(info.totalPages, startP+maxBtns-1);
+    startP = Math.max(1, endP-maxBtns+1);
+    const pages = []; for(let p=startP;p<=endP;p++) pages.push(p);
+    return `<div class="pager">
+      <span>Showing ${info.start}&ndash;${info.end} of ${info.total}</span>
+      <select onchange="Paginate.setPerPage('${module}', this.value, ()=>${rerenderCall})">
+        ${[25,50,100].map(n=>`<option value="${n}" ${n===info.perPage?'selected':''}>${n} / page</option>`).join('')}
+      </select>
+      <button class="pg-btn" ${info.page<=1?'disabled':''} onclick="Paginate.setPage('${module}', ${info.page-1}, ()=>${rerenderCall})">&lsaquo; Prev</button>
+      ${pages.map(p=>`<button class="pg-btn ${p===info.page?'active':''}" onclick="Paginate.setPage('${module}', ${p}, ()=>${rerenderCall})">${p}</button>`).join('')}
+      <button class="pg-btn" ${info.page>=info.totalPages?'disabled':''} onclick="Paginate.setPage('${module}', ${info.page+1}, ()=>${rerenderCall})">Next &rsaquo;</button>
+    </div>`;
+  }
+};
+const SortState = {};
+function toggleSort(module, key, rerenderCall){
+  if(!SortState[module]) SortState[module] = {key:null, dir:1};
+  const st = SortState[module];
+  if(st.key===key) st.dir = -st.dir; else { st.key = key; st.dir = 1; }
+  (new Function(rerenderCall))();
+}
+function sortArrow(module, key){
+  const st = SortState[module];
+  if(!st || st.key!==key) return '<span class="arrow">&#8645;</span>';
+  return `<span class="arrow">${st.dir===1?'&#9650;':'&#9660;'}</span>`;
+}
+function applySort(module, list, accessor){
+  const st = SortState[module];
+  if(!st || !st.key) return list;
+  const dir = st.dir;
+  return list.slice().sort((a,b)=>{
+    let av = accessor(a, st.key), bv = accessor(b, st.key);
+    if(av===null||av===undefined) av='';
+    if(bv===null||bv===undefined) bv='';
+    if(typeof av === 'number' && typeof bv === 'number') return (av-bv)*dir;
+    return String(av).localeCompare(String(bv))*dir;
+  });
+}
 
 /* Reusable "GEM CRAC style" stat-card dashboard strip, used at the top
    of every list module. cards: [{label, value, color}] */
@@ -569,7 +678,7 @@ const Store = {
   data: {
     customers: [], products: [], quotations: [], payments: [],
     followups: [], tasks: [], notes: [], users: [], settings: {}, activityLog: [],
-    gemcrac: [], orders: [], complaints: []
+    gemcrac: [], orders: [], complaints: [], bids: []
   },
   defaults(){
     return {
@@ -582,6 +691,9 @@ const Store = {
       payPrefix: 'INV-', payNext: 1,
       ordPrefix: 'ORD-', ordNext: 1,
       cmpPrefix: 'CMP-', cmpNext: 1,
+      bidPrefix: 'BID-', bidNext: 1,
+      preferredBidKeywords: 'Waste Bin, Twin Bin, Outdoor Gym, Furniture, School Furniture, Water ATM, Incinerator, Raincoat, Safety Equipment',
+      preferredBidStates: '', preferredBidDepartments: '', minBidValue: '', maxBidValue: '',
       lastBackupAt: ''
     };
   },
@@ -628,6 +740,7 @@ const Store = {
     this.data.gemcrac = await this.loadKey('jays_gemcrac', []);
     this.data.orders = await this.loadKey('jays_orders', []);
     this.data.complaints = await this.loadKey('jays_complaints', []);
+    this.data.bids = await this.loadKey('jays_bids', []);
 
     const settingsFailedBefore = false;
     const settings = await this.loadKey('jays_settings', null);
@@ -932,6 +1045,7 @@ const NAV = [
   {sec:'Operations', items:[
     {id:'products', ic:'&#128230;', label:'Products'},
     {id:'inventory', ic:'&#128202;', label:'Inventory'},
+    {id:'bidsearch', ic:'&#128269;', label:'GeM Bid Search'},
     {id:'gemcrac', ic:'&#127963;', label:'GEM CRAC'},
     {id:'complaints', ic:'&#9888;', label:'Complaints'},
   ]},
@@ -961,6 +1075,7 @@ const PAGE_META = {
   quotations:['Quotations','Create and track quotes'],
   outstanding:['Outstanding','Unpaid balances by party'],
   inventory:['Inventory','Stock levels across the product catalog'],
+  bidsearch:['GeM Bid Search','Find, score and track government procurement opportunities'],
   notifications:['Notifications','Everything that needs your attention, in one place'],
   products:['Product Master','Catalog & pricing'],
   orders:['Orders','Track orders from placement to payment'],
@@ -1016,6 +1131,9 @@ function navBadgeCount(id){
   }
   if(id==='inventory'){
     return Store.data.products.filter(p=>!p.stock||Number(p.stock)<=0).length;
+  }
+  if(id==='bidsearch'){
+    return Store.data.bids.filter(b=>{ const d=bidDeadlineInfo(b.endDate).days; return d!==null && d>=0 && d<=1 && !BID_TERMINAL_STATUSES.includes(b.status); }).length;
   }
   return 0;
 }
@@ -1327,6 +1445,7 @@ const Customers = {
     if(fAssigned) list = list.filter(x=>x.assignedTo===fAssigned);
 
     list.sort((a,b)=>(b.createdDate||'').localeCompare(a.createdDate||''));
+    list = applySort('customers', list, (x,k)=>k==='name'?x.name:k==='lastContact'?x.lastContact:k==='status'?x.status:x[k]);
 
     const counts = {
       all: Store.data.customers.length,
@@ -1335,6 +1454,7 @@ const Customers = {
       customers: Store.data.customers.filter(x=>['Payment Received','Converted Customer'].includes(x.status)).length,
       lost: Store.data.customers.filter(x=>['Not Interested','Closed Lost'].includes(x.status)).length
     };
+    const pg = Paginate.slice('customers', list);
 
     document.getElementById('content').innerHTML = `
       <div class="tabs">
@@ -1361,11 +1481,19 @@ const Customers = {
           <option value="">Everyone</option>
           ${DROPDOWNS.assignedTo.map(s=>`<option value="${s}" ${s===fAssigned?'selected':''}>${s}</option>`).join('')}
         </select>
+        ${(q||fStatus||fAssigned) ? `<button class="btn btn-outline btn-sm" onclick="document.getElementById('custSearch').value='';document.getElementById('custStatusFilter').value='';document.getElementById('custAssignedFilter').value='';Customers.render();">&#8635; Reset</button>` : ''}
       </div>
       <div class="card">
         <div class="table-wrap">
-        ${list.length ? `<table><thead><tr><th>Name</th><th>Phone</th><th>District</th><th>Area / Panchayath</th><th>Assigned To</th><th>Status</th><th>Notes</th><th>Last Contact</th><th></th></tr></thead><tbody>
-          ${list.map(x=>`<tr>
+        ${list.length ? `<table><thead><tr><th class="col-actions">Actions</th><th class="sortable ${SortState.customers&&SortState.customers.key==='name'?'active':''}" onclick="toggleSort('customers','name','Customers.render()')">Name ${sortArrow('customers','name')}</th><th>Phone</th><th>District</th><th>Area / Panchayath</th><th>Assigned To</th><th class="sortable ${SortState.customers&&SortState.customers.key==='status'?'active':''}" onclick="toggleSort('customers','status','Customers.render()')">Status ${sortArrow('customers','status')}</th><th>Notes</th><th class="sortable ${SortState.customers&&SortState.customers.key==='lastContact'?'active':''}" onclick="toggleSort('customers','lastContact','Customers.render()')">Last Contact ${sortArrow('customers','lastContact')}</th></tr></thead><tbody>
+          ${pg.pageItems.map(x=>`<tr>
+            <td class="col-actions"><div class="row-action-btns">
+              <a class="icon-btn" style="color:#3B82C4;" title="Call" href="tel:${Util.escapeHtml(x.phone)}">&#128222;</a>
+              <button class="icon-btn" style="color:#25D366;" title="WhatsApp" onclick="Customers.sendWhatsApp('${x.id}')">&#128172;</button>
+              <button class="icon-btn" title="Timeline" onclick="Customers.openDetail('${x.id}')">&#128337;</button>
+              <button class="icon-btn" title="Edit" onclick="Customers.openForm('${x.id}')">&#9998;</button>
+              <button class="icon-btn" title="Delete" onclick="Customers.remove('${x.id}')">&#128465;</button>
+            </div></td>
             <td class="cell-main" onclick="Customers.openDetail('${x.id}')">${Util.escapeHtml(x.name)}</td>
             <td class="mono cell-mute">${Util.escapeHtml(x.phone)}</td>
             <td class="cell-mute">${Util.escapeHtml(x.district||'—')}</td>
@@ -1374,15 +1502,9 @@ const Customers = {
             <td>${statusBadge(x.status)}</td>
             <td class="cell-mute" style="white-space:normal;max-width:220px;">${x.notes? Util.escapeHtml(x.notes.length>80? x.notes.slice(0,80)+'…' : x.notes) : '—'}</td>
             <td class="cell-mute">${Util.fmtDate(x.lastContact)}</td>
-            <td style="display:flex;gap:5px;">
-              <a class="icon-btn" style="color:#3B82C4;" title="Call" href="tel:${Util.escapeHtml(x.phone)}">&#128222;</a>
-              <button class="icon-btn" style="color:#25D366;" title="WhatsApp" onclick="Customers.sendWhatsApp('${x.id}')">&#128172;</button>
-              <button class="icon-btn" title="Timeline" onclick="Customers.openDetail('${x.id}')">&#128337;</button>
-              <button class="icon-btn" title="Edit" onclick="Customers.openForm('${x.id}')">&#9998;</button>
-              <button class="icon-btn" title="Delete" onclick="Customers.remove('${x.id}')">&#128465;</button>
-            </td>
           </tr>`).join('')}
-          </tbody></table>` : `<div class="empty-state"><div class="ic">&#128101;</div><div class="t">No records found</div><div class="d">Try clearing filters, or add a new lead / customer to get started.</div>
+          </tbody></table>
+          ${Paginate.controlsHTML('customers', pg, "Customers.render()")}` : `<div class="empty-state"><div class="ic">&#128101;</div><div class="t">No records found</div><div class="d">Try clearing filters, or add a new lead / customer to get started.</div>
           <button class="btn btn-primary btn-sm" onclick="Customers.openForm(null)">&#65291; Add Lead / Customer</button></div>`}
         </div>
       </div>
@@ -1392,7 +1514,7 @@ const Customers = {
       if(el){ el.focus(); el.setSelectionRange(caretPos, caretPos); }
     }
   },
-  setFilter(mode){ this.filterMode = mode; this.render(); },
+  setFilter(mode){ this.filterMode = mode; Paginate.get('customers').page=1; this.render(); },
   downloadSampleTemplate(){
     try{
       const sample = [
@@ -1793,20 +1915,21 @@ const Products = {
         <button class="btn btn-primary btn-sm" onclick="Products.openForm(null)">&#65291; Add Product</button>
       </div>
       <div class="card"><div class="table-wrap">
-      ${list.length ? `<table><thead><tr><th>Code</th><th>Category</th><th>Product Name</th><th>Unit</th><th>Price</th><th>Stock</th><th></th></tr></thead><tbody>
-        ${list.map(p=>`<tr>
+      ${list.length ? `<table><thead><tr><th class="col-actions">Actions</th><th>Code</th><th>Category</th><th>Product Name</th><th>Unit</th><th>Price</th><th>Stock</th></tr></thead><tbody>
+        ${Paginate.slice('products', list).pageItems.map(p=>`<tr>
+          <td class="col-actions"><div class="row-action-btns">
+            <button class="icon-btn" title="Edit" onclick="Products.openForm('${p.id}')">&#9998;</button>
+            <button class="icon-btn" title="Delete" onclick="Products.remove('${p.id}')">&#128465;</button>
+          </div></td>
           <td class="mono cell-mute">${String(p.code).padStart(2,'0')}</td>
           <td><span class="badge badge-blue">${Util.escapeHtml(p.category)}</span></td>
           <td class="cell-main">${Util.escapeHtml(p.name)}</td>
           <td class="cell-mute">${Util.escapeHtml(p.unit)}</td>
           <td>${p.price? Util.fmtMoney(p.price) : '<span class="cell-mute">—</span>'}</td>
           <td class="cell-mute">${p.stock||0}</td>
-          <td style="display:flex;gap:5px;">
-            <button class="icon-btn" title="Edit" onclick="Products.openForm('${p.id}')">&#9998;</button>
-            <button class="icon-btn" title="Delete" onclick="Products.remove('${p.id}')">&#128465;</button>
-          </td>
         </tr>`).join('')}
-        </tbody></table>` : `<div class="empty-state"><div class="ic">&#128230;</div><div class="t">No products found</div><div class="d">Try clearing filters, or add a new product.</div></div>`}
+        </tbody></table>
+        ${Paginate.controlsHTML('products', Paginate.slice('products', list), "Products.render()")}` : `<div class="empty-state"><div class="ic">&#128230;</div><div class="t">No products found</div><div class="d">Try clearing filters, or add a new product.</div></div>`}
       </div></div>
     `;
   },
@@ -1882,21 +2005,22 @@ const Quotations = {
         <button class="btn btn-primary btn-sm" onclick="Quotations.openForm(null)">&#65291; New Quotation</button>
       </div>
       <div class="card"><div class="table-wrap">
-      ${list.length ? `<table><thead><tr><th>Quote #</th><th>Date</th><th>Customer</th><th>Total</th><th>Status</th><th></th></tr></thead><tbody>
-        ${list.map(q=>`<tr>
+      ${list.length ? `<table><thead><tr><th class="col-actions">Actions</th><th>Quote #</th><th>Date</th><th>Customer</th><th>Total</th><th>Status</th></tr></thead><tbody>
+        ${Paginate.slice('quotations', list).pageItems.map(q=>`<tr>
+          <td class="col-actions"><div class="row-action-btns">
+            <button class="icon-btn" title="Print" onclick="Quotations.print('${q.id}')">&#128424;</button>
+            <a class="icon-btn" style="color:#25D366;text-decoration:none;" title="WhatsApp" href="${Util.waLink(q.phone, Quotations.waSummary(q))}" target="_blank">&#128172;</a>
+            <button class="icon-btn" onclick="Quotations.openForm('${q.id}')">&#9998;</button>
+            <button class="icon-btn" onclick="Quotations.remove('${q.id}')">&#128465;</button>
+          </div></td>
           <td class="mono cell-main">${q.id}</td>
           <td class="cell-mute">${Util.fmtDate(q.date)}</td>
           <td class="cell-main" onclick="Customers.openDetail('${q.customerId}')">${Util.escapeHtml(q.customerName)}</td>
           <td class="mono">${Util.fmtMoney(q.total)}</td>
           <td>${statusBadge(q.status)}</td>
-          <td style="display:flex;gap:5px;">
-            <button class="icon-btn" title="Print" onclick="Quotations.print('${q.id}')">&#128424;</button>
-            <a class="icon-btn" style="color:#25D366;text-decoration:none;" title="WhatsApp" href="${Util.waLink(q.phone, Quotations.waSummary(q))}" target="_blank">&#128172;</a>
-            <button class="icon-btn" onclick="Quotations.openForm('${q.id}')">&#9998;</button>
-            <button class="icon-btn" onclick="Quotations.remove('${q.id}')">&#128465;</button>
-          </td>
         </tr>`).join('')}
-      </tbody></table>` : `<div class="empty-state"><div class="ic">&#128196;</div><div class="t">No quotations yet</div><div class="d">Create a quotation for a customer, print it, or send it straight to WhatsApp.</div>
+      </tbody></table>
+      ${Paginate.controlsHTML('quotations', Paginate.slice('quotations', list), "Quotations.render()")}` : `<div class="empty-state"><div class="ic">&#128196;</div><div class="t">No quotations yet</div><div class="d">Create a quotation for a customer, print it, or send it straight to WhatsApp.</div>
       <button class="btn btn-primary btn-sm" onclick="Quotations.openForm(null)">&#65291; New Quotation</button></div>`}
       </div></div>
     `;
@@ -2088,12 +2212,18 @@ const Payments = {
         ${(q||fStatus||fCompany||fParty||fOverdue) ? `<button class="btn btn-outline btn-sm" onclick="Payments.clearFilters()">Clear</button>` : ''}
       </div>
       <div class="card"><div class="table-wrap">
-      ${list.length ? `<table><thead><tr><th>Party Name</th><th>Company Name</th><th>Product</th><th>Invoice Number</th><th>Invoice Date</th><th>Invoice Amount</th><th>Due Amount</th><th>Payment Status</th><th>Contact Name</th><th>Area / Panchayath</th><th>Phone</th><th>Follow-up Date</th><th>Response</th><th></th></tr></thead><tbody>
-        ${list.map(p=>{
+      ${list.length ? `<table><thead><tr><th class="col-actions">Actions</th><th>Party Name</th><th>Company Name</th><th>Product</th><th>Invoice Number</th><th>Invoice Date</th><th>Invoice Amount</th><th>Due Amount</th><th>Payment Status</th><th>Contact Name</th><th>Area / Panchayath</th><th>Phone</th><th>Follow-up Date</th><th>Response</th></tr></thead><tbody>
+        ${Paginate.slice('payments', list).pageItems.map(p=>{
           const overdue = p.status!=='Paid' && p.followupDate && p.followupDate < Util.todayISO();
           const paidAmt = Number(p.amountPaid)||0;
           const pendingAmt = p.dueAmount!==undefined ? Math.max(Number(p.dueAmount)||0,0) : Math.max((Number(p.amount)||0)-paidAmt,0);
           return `<tr>
+          <td class="col-actions"><div class="row-action-btns">
+            <a class="icon-btn" style="color:#25D366;text-decoration:none;" title="WhatsApp reminder" href="${Util.waLink(p.phone,'Hi '+p.contact+', this is a reminder that invoice '+(p.invoiceNumber||p.id)+' for '+Util.fmtMoney(pendingAmt).replace('&#8377;','Rs.')+' is pending. Kindly clear at the earliest. - Jays Trading and Business Solution')}" target="_blank">&#128172;</a>
+            <button class="icon-btn" onclick="Payments.markPaid('${p.id}')" title="Mark paid">&#10003;</button>
+            <button class="icon-btn" onclick="Payments.openForm('${p.id}')">&#9998;</button>
+            <button class="icon-btn" onclick="Payments.remove('${p.id}')">&#128465;</button>
+          </div></td>
           <td class="cell-main" style="cursor:pointer;" onclick="Payments.filterByParty('${Util.escapeHtml(p.party).replace(/'/g,"\\'")}')" title="View all pending for this party">${Util.escapeHtml(p.party)}</td>
           <td>${p.companyName? `<span class="badge badge-blue">${Util.escapeHtml(p.companyName)}</span>` : '—'}</td>
           <td class="cell-mute">${Util.escapeHtml(p.product||'—')}</td>
@@ -2107,14 +2237,9 @@ const Payments = {
           <td class="mono cell-mute">${Util.escapeHtml(p.phone||'')}</td>
           <td>${overdue?'<span class="badge badge-red">Overdue</span> ':''}${Util.fmtDate(p.followupDate)}</td>
           <td class="cell-mute">${Util.escapeHtml(p.response||'—')}</td>
-          <td style="display:flex;gap:5px;">
-            <a class="icon-btn" style="color:#25D366;text-decoration:none;" title="WhatsApp reminder" href="${Util.waLink(p.phone,'Hi '+p.contact+', this is a reminder that invoice '+(p.invoiceNumber||p.id)+' for '+Util.fmtMoney(pendingAmt).replace('&#8377;','Rs.')+' is pending. Kindly clear at the earliest. - Jays Trading and Business Solution')}" target="_blank">&#128172;</a>
-            <button class="icon-btn" onclick="Payments.markPaid('${p.id}')" title="Mark paid">&#10003;</button>
-            <button class="icon-btn" onclick="Payments.openForm('${p.id}')">&#9998;</button>
-            <button class="icon-btn" onclick="Payments.remove('${p.id}')">&#128465;</button>
-          </td>
         </tr>`;}).join('')}
-      </tbody></table>` : `<div class="empty-state"><div class="ic">&#128179;</div><div class="t">${(q||fStatus||fCompany||fParty||fOverdue)?'No matching invoices':'No pending payments'}</div><div class="d">${(q||fStatus||fCompany||fParty||fOverdue)?'Try clearing filters or adjusting your search.':'Log an invoice to start tracking payment follow-ups, or import a batch from Excel.'}</div>
+      </tbody></table>
+      ${Paginate.controlsHTML('payments', Paginate.slice('payments', list), "Payments.render()")}` : `<div class="empty-state"><div class="ic">&#128179;</div><div class="t">${(q||fStatus||fCompany||fParty||fOverdue)?'No matching invoices':'No pending payments'}</div><div class="d">${(q||fStatus||fCompany||fParty||fOverdue)?'Try clearing filters or adjusting your search.':'Log an invoice to start tracking payment follow-ups, or import a batch from Excel.'}</div>
       <button class="btn btn-primary btn-sm" onclick="Payments.openForm(null)">&#65291; Add Invoice</button></div>`}
       </div></div>
     `;
@@ -2410,8 +2535,14 @@ const GemCrac = {
         ${(q||fStatus||fCompany||fContacted) ? `<button class="btn btn-outline btn-sm" onclick="GemCrac.clearFilters()">Clear</button>` : ''}
       </div>
       <div class="card"><div class="table-wrap">
-      ${list.length ? `<table><thead><tr><th style="width:34px;"><input type="checkbox" class="row-check" onchange="GemCrac.toggleAll(this.checked, ${JSON.stringify(list.map(g=>g.id))})" ${list.length && list.every(g=>this.selected[g.id])?'checked':''}></th><th>Party / Panchayath</th><th>Area / Panchayath (Contact)</th><th>Company</th><th>GEM Number</th><th>Product Name</th><th>Buying Mode</th><th>Order Date</th><th>Amount</th><th>Qty</th><th>Status</th><th>Delivery Date</th><th>Extension</th><th>Completed</th><th>Contact Name</th><th>Contacted Date</th><th>Remark</th><th></th></tr></thead><tbody>
-        ${list.map(g=>`<tr>
+      ${list.length ? `<table><thead><tr><th class="col-actions">Actions</th><th style="width:34px;"><input type="checkbox" class="row-check" onchange="GemCrac.toggleAll(this.checked, ${JSON.stringify(list.map(g=>g.id))})" ${list.length && list.every(g=>this.selected[g.id])?'checked':''}></th><th>Party / Panchayath</th><th>Area / Panchayath (Contact)</th><th>Company</th><th>GEM Number</th><th>Product Name</th><th>Buying Mode</th><th>Order Date</th><th>Amount</th><th>Qty</th><th>Status</th><th>Delivery Date</th><th>Extension</th><th>Completed</th><th>Contact Name</th><th>Contacted Date</th><th>Remark</th></tr></thead><tbody>
+        ${Paginate.slice('gemcrac', list).pageItems.map(g=>`<tr>
+          <td class="col-actions"><div class="row-action-btns">
+            <button class="icon-btn" title="View Pipeline" onclick="GemCrac.viewPipeline('${g.id}')">&#128203;</button>
+            ${g.phone? `<a class="icon-btn" style="color:#25D366;text-decoration:none;" title="WhatsApp" href="${Util.waLink(g.phone,'')}" target="_blank">&#128172;</a>` : ''}
+            <button class="icon-btn" onclick="GemCrac.openForm('${g.id}')">&#9998;</button>
+            <button class="icon-btn" onclick="GemCrac.remove('${g.id}')">&#128465;</button>
+          </div></td>
           <td><input type="checkbox" class="row-check" ${this.selected[g.id]?'checked':''} onchange="GemCrac.toggleOne('${g.id}', this.checked)"></td>
           <td class="cell-main">${Util.escapeHtml(g.party||'')}</td>
           <td class="cell-mute">${custArea(g.customerId)}</td>
@@ -2429,14 +2560,9 @@ const GemCrac = {
           <td class="cell-mute">${Util.escapeHtml(g.contact||'—')}<br><span class="mono" style="font-size:11px;">${Util.escapeHtml(g.phone||'')}</span></td>
           <td class="cell-mute">${g.contactedDate? Util.fmtDate(g.contactedDate) : '<span class="badge badge-amber" style="font-size:10px;">Not contacted</span>'}</td>
           <td class="cell-mute">${Util.escapeHtml(g.remark||'—')}</td>
-          <td style="display:flex;gap:5px;">
-            <button class="icon-btn" title="View Pipeline" onclick="GemCrac.viewPipeline('${g.id}')">&#128203;</button>
-            ${g.phone? `<a class="icon-btn" style="color:#25D366;text-decoration:none;" title="WhatsApp" href="${Util.waLink(g.phone,'')}" target="_blank">&#128172;</a>` : ''}
-            <button class="icon-btn" onclick="GemCrac.openForm('${g.id}')">&#9998;</button>
-            <button class="icon-btn" onclick="GemCrac.remove('${g.id}')">&#128465;</button>
-          </td>
         </tr>`).join('')}
-      </tbody></table>` : `<div class="empty-state"><div class="ic">&#128257;</div><div class="t">${(q||fStatus||fCompany||fContacted)?'No matching records':'No GEM CRAC records yet'}</div><div class="d">${(q||fStatus||fCompany||fContacted)?'Try clearing filters.':'Add a record, or import a batch from Excel.'}</div>
+      </tbody></table>
+      ${Paginate.controlsHTML('gemcrac', Paginate.slice('gemcrac', list), "GemCrac.render()")}` : `<div class="empty-state"><div class="ic">&#128257;</div><div class="t">${(q||fStatus||fCompany||fContacted)?'No matching records':'No GEM CRAC records yet'}</div><div class="d">${(q||fStatus||fCompany||fContacted)?'Try clearing filters.':'Add a record, or import a batch from Excel.'}</div>
       <button class="btn btn-primary btn-sm" onclick="GemCrac.openForm(null)">&#65291; Add Record</button></div>`}
       </div></div>
     `;
@@ -2795,8 +2921,13 @@ const OrdersMgmt = {
         ${(q||fStatus) ? `<button class="btn btn-outline btn-sm" onclick="OrdersMgmt.clearFilters()">Clear</button>` : ''}
       </div>
       <div class="card"><div class="table-wrap">
-      ${list.length ? `<table><thead><tr><th>Order Date</th><th>GEM Order Number</th><th>Order From</th><th>Product Name</th><th>Party Name</th><th>Area / Panchayath</th><th>Party Phone</th><th>Assigned To</th><th>Status</th><th></th></tr></thead><tbody>
-        ${list.map(o=>`<tr>
+      ${list.length ? `<table><thead><tr><th class="col-actions">Actions</th><th>Order Date</th><th>GEM Order Number</th><th>Order From</th><th>Product Name</th><th>Party Name</th><th>Area / Panchayath</th><th>Party Phone</th><th>Assigned To</th><th>Status</th></tr></thead><tbody>
+        ${Paginate.slice('orders', list).pageItems.map(o=>`<tr>
+          <td class="col-actions"><div class="row-action-btns">
+            ${o.phone? `<a class="icon-btn" style="color:#25D366;text-decoration:none;" title="WhatsApp" href="${Util.waLink(o.phone,'')}" target="_blank">&#128172;</a>` : ''}
+            <button class="icon-btn" onclick="OrdersMgmt.openForm('${o.id}')">&#9998;</button>
+            <button class="icon-btn" onclick="OrdersMgmt.remove('${o.id}')">&#128465;</button>
+          </div></td>
           <td class="cell-mute">${Util.fmtDate(o.orderDate)}</td>
           <td class="mono cell-mute">${Util.escapeHtml(o.gemcNumber||'')}</td>
           <td class="cell-mute">${Util.escapeHtml(o.orderFrom||'')}</td>
@@ -2806,13 +2937,9 @@ const OrdersMgmt = {
           <td class="mono cell-mute">${Util.escapeHtml(o.phone||'')}</td>
           <td class="cell-mute">${Util.escapeHtml(o.assignedTo||'')}</td>
           <td>${orderStatusBadge(o.status)}</td>
-          <td style="display:flex;gap:5px;">
-            ${o.phone? `<a class="icon-btn" style="color:#25D366;text-decoration:none;" title="WhatsApp" href="${Util.waLink(o.phone,'')}" target="_blank">&#128172;</a>` : ''}
-            <button class="icon-btn" onclick="OrdersMgmt.openForm('${o.id}')">&#9998;</button>
-            <button class="icon-btn" onclick="OrdersMgmt.remove('${o.id}')">&#128465;</button>
-          </td>
         </tr>`).join('')}
-      </tbody></table>` : `<div class="empty-state"><div class="ic">&#128230;</div><div class="t">${(q||fStatus)?'No matching orders':'No orders yet'}</div><div class="d">${(q||fStatus)?'Try clearing filters.':'Add a new order to start tracking it end to end.'}</div>
+      </tbody></table>
+      ${Paginate.controlsHTML('orders', Paginate.slice('orders', list), "OrdersMgmt.render()")}` : `<div class="empty-state"><div class="ic">&#128230;</div><div class="t">${(q||fStatus)?'No matching orders':'No orders yet'}</div><div class="d">${(q||fStatus)?'Try clearing filters.':'Add a new order to start tracking it end to end.'}</div>
       <button class="btn btn-primary btn-sm" onclick="OrdersMgmt.openForm(null)">&#65291; Add Order</button></div>`}
       </div></div>
     `;
@@ -2940,8 +3067,12 @@ const Complaints = {
         ${(q||fStatus) ? `<button class="btn btn-outline btn-sm" onclick="Complaints.clearFilters()">Clear</button>` : ''}
       </div>
       <div class="card"><div class="table-wrap">
-      ${list.length ? `<table><thead><tr><th>Complaint Date</th><th>Complaint From</th><th>Area / Panchayath</th><th>Product Name</th><th>Complaint Note</th><th>Assigned To</th><th>Status</th><th>Updated Date</th><th></th></tr></thead><tbody>
-        ${list.map(c=>`<tr>
+      ${list.length ? `<table><thead><tr><th class="col-actions">Actions</th><th>Complaint Date</th><th>Complaint From</th><th>Area / Panchayath</th><th>Product Name</th><th>Complaint Note</th><th>Assigned To</th><th>Status</th><th>Updated Date</th></tr></thead><tbody>
+        ${Paginate.slice('complaints', list).pageItems.map(c=>`<tr>
+          <td class="col-actions"><div class="row-action-btns">
+            <button class="icon-btn" onclick="Complaints.openForm('${c.id}')">&#9998;</button>
+            <button class="icon-btn" onclick="Complaints.remove('${c.id}')">&#128465;</button>
+          </div></td>
           <td class="cell-mute">${Util.fmtDate(c.complaintDate)}</td>
           <td class="cell-main">${Util.escapeHtml(c.complaintFrom||'')}</td>
           <td class="cell-mute">${custArea(c.customerId)}</td>
@@ -2950,12 +3081,9 @@ const Complaints = {
           <td class="cell-mute">${Util.escapeHtml(c.assignedTo||'')}</td>
           <td>${complaintStatusBadge(c.status)}</td>
           <td class="cell-mute">${Util.fmtDate(c.updatedDate)}</td>
-          <td style="display:flex;gap:5px;">
-            <button class="icon-btn" onclick="Complaints.openForm('${c.id}')">&#9998;</button>
-            <button class="icon-btn" onclick="Complaints.remove('${c.id}')">&#128465;</button>
-          </td>
         </tr>`).join('')}
-      </tbody></table>` : `<div class="empty-state"><div class="ic">&#9888;</div><div class="t">${(q||fStatus)?'No matching complaints':'No complaints logged'}</div><div class="d">${(q||fStatus)?'Try clearing filters.':'Log a complaint to start tracking resolution.'}</div>
+      </tbody></table>
+      ${Paginate.controlsHTML('complaints', Paginate.slice('complaints', list), "Complaints.render()")}` : `<div class="empty-state"><div class="ic">&#9888;</div><div class="t">${(q||fStatus)?'No matching complaints':'No complaints logged'}</div><div class="d">${(q||fStatus)?'Try clearing filters.':'Log a complaint to start tracking resolution.'}</div>
       <button class="btn btn-primary btn-sm" onclick="Complaints.openForm(null)">&#65291; Log Complaint</button></div>`}
       </div></div>
     `;
@@ -3068,8 +3196,13 @@ const Tasks = {
         ${fStatus ? `<button class="btn btn-outline btn-sm" onclick="document.getElementById('tskStatusFilter').value='';Tasks.render();">Clear</button>` : ''}
       </div>
       <div class="card"><div class="table-wrap">
-      ${list.length ? `<table><thead><tr><th>Date</th><th>To Do</th><th>Customer</th><th>Area / Panchayath</th><th>Task Entry</th><th>Remarks</th><th>Assigned To</th><th>Status</th><th></th></tr></thead><tbody>
-        ${list.map(t=>`<tr style="${t.status==='Completed'?'opacity:.55;':''}">
+      ${list.length ? `<table><thead><tr><th class="col-actions">Actions</th><th>Date</th><th>To Do</th><th>Customer</th><th>Area / Panchayath</th><th>Task Entry</th><th>Remarks</th><th>Assigned To</th><th>Status</th></tr></thead><tbody>
+        ${Paginate.slice('tasks', list).pageItems.map(t=>`<tr style="${t.status==='Completed'?'opacity:.55;':''}">
+          <td class="col-actions"><div class="row-action-btns">
+            ${t.phone? `<a class="icon-btn" style="color:#25D366;text-decoration:none;" href="${Util.waLink(t.phone,'')}" target="_blank">&#128172;</a>`:''}
+            <button class="icon-btn" onclick="Tasks.openForm('${t.id}')">&#9998;</button>
+            <button class="icon-btn" onclick="Tasks.remove('${t.id}')">&#128465;</button>
+          </div></td>
           <td class="cell-mute">${Util.fmtDate(t.date)}</td>
           <td class="cell-main">${Util.escapeHtml(t.todo||'—')}</td>
           <td class="cell-mute">${Util.escapeHtml(t.customerName||'—')}${t.phone? ' &middot; '+Util.escapeHtml(t.phone):''}</td>
@@ -3082,13 +3215,9 @@ const Tasks = {
               ${DROPDOWNS.taskStatus.map(s=>`<option ${s===(t.status||'Not Started')?'selected':''}>${s}</option>`).join('')}
             </select>
           </td>
-          <td style="display:flex;gap:5px;">
-            ${t.phone? `<a class="icon-btn" style="color:#25D366;text-decoration:none;" href="${Util.waLink(t.phone,'')}" target="_blank">&#128172;</a>`:''}
-            <button class="icon-btn" onclick="Tasks.openForm('${t.id}')">&#9998;</button>
-            <button class="icon-btn" onclick="Tasks.remove('${t.id}')">&#128465;</button>
-          </td>
         </tr>`).join('')}
-      </tbody></table>` : `<div class="empty-state"><div class="ic">&#9989;</div><div class="t">${fStatus?'No matching items':'No to-dos or tasks yet'}</div><div class="d">${fStatus?'Try clearing the status filter.':"Add a to-do or task to keep the team's list organized."}</div>
+      </tbody></table>
+      ${Paginate.controlsHTML('tasks', Paginate.slice('tasks', list), "Tasks.render()")}` : `<div class="empty-state"><div class="ic">&#9989;</div><div class="t">${fStatus?'No matching items':'No to-dos or tasks yet'}</div><div class="d">${fStatus?'Try clearing the status filter.':"Add a to-do or task to keep the team's list organized."}</div>
       <button class="btn btn-primary btn-sm" onclick="Tasks.openForm(null)">&#65291; Add To-Do / Task</button></div>`}
       </div></div>
     `;
@@ -3399,6 +3528,400 @@ const Notifications = {
 };
 Views.notifications = ()=>Notifications.render();
 
+/* =====================================================================
+   GEM BID SEARCH & PARTICIPATION MANAGEMENT
+   A workspace for finding, evaluating and tracking government
+   procurement (GeM) bid opportunities through to Won/Lost. Bid data is
+   entered manually or imported (no scraping/auth-bypass of GeM); each
+   record supports a document checklist, notes/timeline, linked tasks,
+   and — once Won — converting straight into an Order.
+===================================================================== */
+function bidMatch(bid){
+  const text = ((bid.title||'')+' '+(bid.description||'')+' '+(bid.category||'')+' '+(bid.boqTitle||'')).toLowerCase();
+  const excluded = (Store.data.settings.excludedBidKeywords||'').split(',').map(s=>s.trim().toLowerCase()).filter(Boolean);
+  if(excluded.some(x=>x && text.includes(x))) return {score:0, matched:[]};
+  const prodCats = [...new Set(Store.data.products.map(p=>p.category))].filter(Boolean).map(c=>c.toLowerCase());
+  const prefKeywords = (Store.data.settings.preferredBidKeywords||'').split(',').map(s=>s.trim().toLowerCase()).filter(Boolean);
+  const terms = [...new Set([...prodCats, ...prefKeywords])];
+  if(!terms.length || !text.trim()) return {score:0, matched:[]};
+  const matched = terms.filter(t=>t && text.includes(t));
+  const score = Math.min(100, Math.round((matched.length / Math.min(terms.length,6)) * 100));
+  return {score, matched};
+}
+function matchBadgeHTML(score){
+  const cls = score>=80?'match-high':score>=50?'match-medium':'match-low';
+  const label = score>=80?'High':score>=50?'Medium':'Low';
+  return `<span class="match-badge ${cls}">${score}% ${label}</span>`;
+}
+function bidDeadlineInfo(endDate){
+  if(!endDate) return {label:'No date', cls:'dl-ok', days:null};
+  const diffDays = Math.ceil((new Date(endDate) - new Date(Util.todayISO())) / 86400000);
+  if(diffDays < 0) return {label:'Closed', cls:'dl-over', days:diffDays};
+  if(diffDays === 0) return {label:'Closes Today', cls:'dl-critical', days:diffDays};
+  if(diffDays === 1) return {label:'Closes Tomorrow', cls:'dl-critical', days:diffDays};
+  if(diffDays <= 3) return {label:`Closes in ${diffDays}d`, cls:'dl-soon', days:diffDays};
+  return {label:`Closes in ${diffDays}d`, cls:'dl-ok', days:diffDays};
+}
+function bidDeadlineBadgeHTML(endDate){
+  const d = bidDeadlineInfo(endDate);
+  return `<span class="deadline-badge ${d.cls}">${d.label}</span>`;
+}
+function bidStatusColor(status){
+  if(status==='Won') return 'var(--green,#16a34a)';
+  if(status==='Lost'||status==='Cancelled') return 'var(--red,#dc2626)';
+  if(['Submitted','Technical Evaluation','Financial Evaluation'].includes(status)) return 'var(--blue,#2563eb)';
+  if(status==='Not Participating') return 'var(--text-mute,#6b7280)';
+  return 'var(--amber,#d97706)';
+}
+const BidSearch = {
+  render(){
+    const q = (document.getElementById('bidSearch')?document.getElementById('bidSearch').value:'').toLowerCase();
+    const fStatus = document.getElementById('bidStatusFilter')?document.getElementById('bidStatusFilter').value:'';
+    const fClosing = document.getElementById('bidClosingFilter')?document.getElementById('bidClosingFilter').value:'';
+    const fMatch = document.getElementById('bidMatchFilter')?document.getElementById('bidMatchFilter').value:'';
+
+    let list = Store.data.bids.map(b=>({...b, _match: bidMatch(b).score}));
+    if(q) list = list.filter(b=>[b.bidNumber,b.raNumber,b.title,b.boqTitle,b.category,b.organisation,b.department,b.ministry,b.location].some(v=>(v||'').toLowerCase().includes(q)));
+    if(fStatus) list = list.filter(b=>b.status===fStatus);
+    if(fMatch==='high') list = list.filter(b=>b._match>=80);
+    else if(fMatch==='medium') list = list.filter(b=>b._match>=50 && b._match<80);
+    else if(fMatch==='low') list = list.filter(b=>b._match<50);
+    if(fClosing==='today') list = list.filter(b=>bidDeadlineInfo(b.endDate).days===0);
+    else if(fClosing==='week') list = list.filter(b=>{const d=bidDeadlineInfo(b.endDate).days; return d!==null && d>=0 && d<=7;});
+    else if(fClosing==='saved') list = list.filter(b=>b.status==='Saved');
+    else if(fClosing==='participating') list = list.filter(b=>!BID_TERMINAL_STATUSES.includes(b.status) && b.status!=='New' && b.status!=='Saved');
+    else if(fClosing==='won') list = list.filter(b=>b.status==='Won');
+    else if(fClosing==='lost') list = list.filter(b=>b.status==='Lost');
+
+    list.sort((a,b)=>(a.endDate||'9999').localeCompare(b.endDate||'9999'));
+    list = applySort('bids', list, (x,k)=>k==='value'?Number(x.estimatedValue)||0:k==='match'?x._match:x[k]);
+
+    const all = Store.data.bids;
+    const active = all.filter(b=>!BID_TERMINAL_STATUSES.includes(b.status));
+    const closingToday = all.filter(b=>bidDeadlineInfo(b.endDate).days===0 && !BID_TERMINAL_STATUSES.includes(b.status)).length;
+    const closingWeek = all.filter(b=>{const d=bidDeadlineInfo(b.endDate).days; return d!==null && d>=0 && d<=7 && !BID_TERMINAL_STATUSES.includes(b.status);}).length;
+    const pg = Paginate.slice('bids', list);
+
+    document.getElementById('content').innerHTML = `
+      ${dashboardCardsHTML('GeM Bid Dashboard', [
+        {label:'Saved Bids', value:all.filter(b=>b.status==='Saved').length},
+        {label:'Active Opportunities', value:active.length},
+        {label:'Under Preparation', value:all.filter(b=>['Under Preparation','Documents Pending','Ready for Submission'].includes(b.status)).length, color:'var(--amber,#d97706)'},
+        {label:'Submitted', value:all.filter(b=>b.status==='Submitted').length, color:'var(--blue,#2563eb)'},
+        {label:'Won', value:all.filter(b=>b.status==='Won').length, color:'var(--green,#16a34a)'},
+        {label:'Lost', value:all.filter(b=>b.status==='Lost').length, color:'var(--red,#dc2626)'},
+        {label:'Closing Today', value:closingToday, color:'var(--red,#dc2626)'},
+        {label:'Closing This Week', value:closingWeek, color:'var(--amber,#d97706)'}
+      ])}
+      <div class="toolbar">
+        <div class="search"><span class="ic">&#128269;</span><input id="bidSearch" placeholder="Search bid number, title, category, organisation, department..." oninput="BidSearch.render()" value="${Util.escapeHtml(q)}"></div>
+        <div class="toolbar-spacer"></div>
+        <button class="btn btn-outline btn-sm" onclick="BidSearch.exportExcel()">&#128228; Export Bid Register</button>
+        <button class="btn btn-primary btn-sm" onclick="BidSearch.openForm(null)">&#65291; Add Bid</button>
+      </div>
+      <div class="toolbar">
+        <select id="bidStatusFilter" onchange="BidSearch.render()">
+          <option value="">All Statuses</option>
+          ${DROPDOWNS.bidStatus.map(s=>`<option ${s===fStatus?'selected':''}>${s}</option>`).join('')}
+        </select>
+        <select id="bidMatchFilter" onchange="BidSearch.render()">
+          <option value="">All Match Scores</option>
+          <option value="high" ${fMatch==='high'?'selected':''}>&#128293; High Match (80%+)</option>
+          <option value="medium" ${fMatch==='medium'?'selected':''}>Medium Match (50-79%)</option>
+          <option value="low" ${fMatch==='low'?'selected':''}>Low Match (&lt;50%)</option>
+        </select>
+        <select id="bidClosingFilter" onchange="BidSearch.render()">
+          <option value="">Quick Filter</option>
+          <option value="today" ${fClosing==='today'?'selected':''}>&#9200; Closing Today</option>
+          <option value="week" ${fClosing==='week'?'selected':''}>&#128197; Closing This Week</option>
+          <option value="saved" ${fClosing==='saved'?'selected':''}>&#11088; Saved Bids</option>
+          <option value="participating" ${fClosing==='participating'?'selected':''}>&#128221; Participating</option>
+          <option value="won" ${fClosing==='won'?'selected':''}>&#127942; Won</option>
+          <option value="lost" ${fClosing==='lost'?'selected':''}>&#10060; Lost</option>
+        </select>
+        ${(q||fStatus||fMatch||fClosing) ? `<button class="btn btn-outline btn-sm" onclick="document.getElementById('bidSearch').value='';document.getElementById('bidStatusFilter').value='';document.getElementById('bidMatchFilter').value='';document.getElementById('bidClosingFilter').value='';BidSearch.render();">&#8635; Reset</button>` : ''}
+      </div>
+      <div class="card"><div class="table-wrap">
+      ${list.length ? `<table><thead><tr>
+        <th class="col-actions">Actions</th>
+        <th>Match</th>
+        <th>Bid Number</th>
+        <th class="sortable ${SortState.bids&&SortState.bids.key==='title'?'active':''}" onclick="toggleSort('bids','title','BidSearch.render()')">Bid Title ${sortArrow('bids','title')}</th>
+        <th>Category</th>
+        <th>Organisation</th>
+        <th>Location</th>
+        <th class="sortable ${SortState.bids&&SortState.bids.key==='value'?'active':''}" onclick="toggleSort('bids','value','BidSearch.render()')">Value ${sortArrow('bids','value')}</th>
+        <th>End Date</th>
+        <th>Time Left</th>
+        <th>Status</th>
+      </tr></thead><tbody>
+        ${pg.pageItems.map(b=>`<tr>
+          <td class="col-actions"><div class="row-action-btns">
+            <button class="icon-btn" title="View / Manage" onclick="BidSearch.openDetail('${b.id}')">&#128065;</button>
+            <button class="icon-btn" title="Edit" onclick="BidSearch.openForm('${b.id}')">&#9998;</button>
+            ${b.sourceUrl? `<a class="icon-btn" title="Open Source" href="${Util.escapeHtml(b.sourceUrl)}" target="_blank">&#128279;</a>` : ''}
+            <button class="icon-btn" title="Delete" onclick="BidSearch.remove('${b.id}')">&#128465;</button>
+          </div></td>
+          <td>${matchBadgeHTML(b._match)}</td>
+          <td class="mono cell-mute">${Util.escapeHtml(b.bidNumber||'—')}</td>
+          <td class="cell-main" style="max-width:220px;white-space:normal;">${Util.escapeHtml(b.title||'—')}</td>
+          <td class="cell-mute">${Util.escapeHtml(b.category||'—')}</td>
+          <td class="cell-mute">${Util.escapeHtml(b.organisation||'—')}</td>
+          <td class="cell-mute">${Util.escapeHtml(b.location||b.district||'—')}</td>
+          <td class="mono">${b.estimatedValue?Util.fmtMoney(b.estimatedValue):'—'}</td>
+          <td class="cell-mute">${Util.fmtDate(b.endDate)}</td>
+          <td>${bidDeadlineBadgeHTML(b.endDate)}</td>
+          <td><span class="badge" style="background:${bidStatusColor(b.status)};color:#fff;">${Util.escapeHtml(b.status||'New')}</span></td>
+        </tr>`).join('')}
+      </tbody></table>
+      ${Paginate.controlsHTML('bids', pg, "BidSearch.render()")}` : `<div class="empty-state"><div class="ic">&#128203;</div><div class="t">No bids found</div><div class="d">Try changing your filters, or add a bid opportunity to start tracking it.</div>
+      <button class="btn btn-primary btn-sm" onclick="BidSearch.openForm(null)">&#65291; Add Bid</button></div>`}
+      </div></div>
+    `;
+  },
+  openForm(id){
+    const rec = id ? Store.data.bids.find(x=>x.id===id) : null;
+    const v = rec || {bidNumber:'',raNumber:'',title:'',bidType:'Bid',category:'',boqTitle:'',description:'',
+      ministry:'',department:'',organisation:'',buyerName:'',consignee:'',state:'',district:'',location:'',
+      estimatedValue:'',emdRequired:false,emdAmount:'',tenderFee:'',securityDeposit:'',expectedMargin:'',ourQuote:'',
+      publishedDate:'',startDate:'',endDate:'',openingDate:'',offerValidity:'',
+      status:'New', assignedTo:'', sourceUrl:''};
+    UI.openModal(rec?'Edit Bid':'Add Bid', `
+      <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:0 0 8px;">Basic Information</h4>
+      <div class="form-row">
+        <div class="field"><label>Bid Number</label><input id="b_bidNumber" placeholder="GEM/2026/B/XXXXXXX" value="${Util.escapeHtml(v.bidNumber)}"></div>
+        <div class="field"><label>RA Number</label><input id="b_raNumber" value="${Util.escapeHtml(v.raNumber)}"></div>
+      </div>
+      <div class="field"><label>Bid Title *</label><input id="b_title" value="${Util.escapeHtml(v.title)}"></div>
+      <div class="form-row">
+        <div class="field"><label>Bid Type</label><select id="b_bidType">${DROPDOWNS.bidType.map(s=>`<option ${s===v.bidType?'selected':''}>${s}</option>`).join('')}</select></div>
+        <div class="field"><label>Category</label><input id="b_category" list="dl_bidcats" value="${Util.escapeHtml(v.category)}"></div>
+      </div>
+      <datalist id="dl_bidcats">${[...new Set(Store.data.products.map(p=>p.category))].map(c=>`<option value="${Util.escapeHtml(c)}">`).join('')}</datalist>
+      <div class="field"><label>BOQ Title</label><input id="b_boqTitle" value="${Util.escapeHtml(v.boqTitle)}"></div>
+      <div class="field"><label>Description</label><textarea id="b_description">${Util.escapeHtml(v.description)}</textarea></div>
+
+      <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:16px 0 8px;">Buyer Information</h4>
+      <div class="form-row">
+        <div class="field"><label>Ministry</label><input id="b_ministry" value="${Util.escapeHtml(v.ministry)}"></div>
+        <div class="field"><label>Department</label><input id="b_department" value="${Util.escapeHtml(v.department)}"></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>Organisation</label><input id="b_organisation" value="${Util.escapeHtml(v.organisation)}"></div>
+        <div class="field"><label>Buyer Name</label><input id="b_buyerName" value="${Util.escapeHtml(v.buyerName)}"></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>Consignee</label><input id="b_consignee" value="${Util.escapeHtml(v.consignee)}"></div>
+        <div class="field"><label>State</label><select id="b_state"><option value="">—</option>${DROPDOWNS.district.map(s=>`<option ${s===v.state?'selected':''}>${s}</option>`).join('')}</select></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>District</label><input id="b_district" value="${Util.escapeHtml(v.district)}"></div>
+        <div class="field"><label>Location</label><input id="b_location" value="${Util.escapeHtml(v.location)}"></div>
+      </div>
+
+      <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:16px 0 8px;">Financial Information</h4>
+      <div class="form-row">
+        <div class="field"><label>Estimated Bid Value</label><input type="number" id="b_estimatedValue" value="${v.estimatedValue}"></div>
+        <div class="field"><label>EMD Amount</label><input type="number" id="b_emdAmount" value="${v.emdAmount}"></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>Tender Fee</label><input type="number" id="b_tenderFee" value="${v.tenderFee}"></div>
+        <div class="field"><label>Security Deposit</label><input type="number" id="b_securityDeposit" value="${v.securityDeposit}"></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>Expected Margin %</label><input type="number" id="b_expectedMargin" value="${v.expectedMargin}"></div>
+        <div class="field"><label>Our Estimated Quote</label><input type="number" id="b_ourQuote" value="${v.ourQuote}"></div>
+      </div>
+
+      <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:16px 0 8px;">Dates</h4>
+      <div class="form-row">
+        <div class="field"><label>Published Date</label><input type="date" id="b_publishedDate" value="${v.publishedDate}"></div>
+        <div class="field"><label>Start Date</label><input type="date" id="b_startDate" value="${v.startDate}"></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>End Date (Closing)</label><input type="date" id="b_endDate" value="${v.endDate}"></div>
+        <div class="field"><label>Opening Date</label><input type="date" id="b_openingDate" value="${v.openingDate}"></div>
+      </div>
+
+      <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:16px 0 8px;">Tracking</h4>
+      <div class="form-row">
+        <div class="field"><label>Status</label><select id="b_status">${DROPDOWNS.bidStatus.map(s=>`<option ${s===v.status?'selected':''}>${s}</option>`).join('')}</select></div>
+        <div class="field"><label>Assigned To</label><select id="b_assignedTo">${userAssigneeOptions(v.assignedTo)}</select></div>
+      </div>
+      <div class="field"><label>Source URL</label><input id="b_sourceUrl" placeholder="https://bidplus.gem.gov.in/..." value="${Util.escapeHtml(v.sourceUrl)}"></div>
+    `, `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="BidSearch.save('${id||''}')">Save Bid</button>`, true);
+  },
+  async save(id){
+    const title = document.getElementById('b_title').value.trim();
+    if(!title){ UI.toast('Bid Title is required'); return; }
+    const g = (elId)=>document.getElementById(elId).value;
+    const rec = id ? {...Store.data.bids.find(x=>x.id===id)} : {
+      id: (Store.data.settings.bidPrefix||'BID-')+String(Store.data.settings.bidNext||1).padStart(4,'0'),
+      checklist: DEFAULT_BID_CHECKLIST.map(name=>({name, done:false})),
+      timeline: [], createdDate: Util.todayISO()
+    };
+    Object.assign(rec, {
+      bidNumber:g('b_bidNumber').trim(), raNumber:g('b_raNumber').trim(), title, bidType:g('b_bidType'),
+      category:g('b_category').trim(), boqTitle:g('b_boqTitle').trim(), description:g('b_description').trim(),
+      ministry:g('b_ministry').trim(), department:g('b_department').trim(), organisation:g('b_organisation').trim(),
+      buyerName:g('b_buyerName').trim(), consignee:g('b_consignee').trim(), state:g('b_state'), district:g('b_district').trim(), location:g('b_location').trim(),
+      estimatedValue:Number(g('b_estimatedValue'))||0, emdAmount:Number(g('b_emdAmount'))||0, tenderFee:Number(g('b_tenderFee'))||0,
+      securityDeposit:Number(g('b_securityDeposit'))||0, expectedMargin:Number(g('b_expectedMargin'))||0, ourQuote:Number(g('b_ourQuote'))||0,
+      publishedDate:g('b_publishedDate'), startDate:g('b_startDate'), endDate:g('b_endDate'), openingDate:g('b_openingDate'),
+      status:g('b_status'), assignedTo:g('b_assignedTo'), sourceUrl:g('b_sourceUrl').trim()
+    });
+    const isNew = !id;
+    if(id){ const i=Store.data.bids.findIndex(x=>x.id===id); Store.data.bids[i]=rec; }
+    else{
+      rec.timeline.push({date:new Date().toISOString(), text:'Bid created', by:(Auth.session&&Auth.session.name)||'System'});
+      Store.data.bids.unshift(rec);
+      Store.data.settings.bidNext = (Store.data.settings.bidNext||1)+1;
+      await Store.save('settings');
+    }
+    await Store.save('bids');
+    await Activity.log(isNew?'Bid saved':'Bid updated', rec.bidNumber||rec.title);
+    UI.closeModal(); UI.toast('Saved'); Router.render('bidsearch');
+  },
+  async remove(id){
+    if(!confirm('Delete this bid record?')) return;
+    const b = Store.data.bids.find(x=>x.id===id);
+    Store.data.bids = Store.data.bids.filter(x=>x.id!==id);
+    await Store.save('bids');
+    await Activity.log('Bid deleted', b? (b.bidNumber||b.title) : id);
+    UI.toast('Deleted'); Router.render('bidsearch');
+  },
+  async setStatus(id, status){
+    const b = Store.data.bids.find(x=>x.id===id); if(!b) return;
+    b.status = status;
+    b.timeline = b.timeline||[];
+    b.timeline.push({date:new Date().toISOString(), text:'Status changed to '+status, by:(Auth.session&&Auth.session.name)||'System'});
+    await Store.save('bids');
+    await Activity.log('Bid status changed', (b.bidNumber||b.title)+' — '+status);
+    BidSearch.openDetail(id);
+  },
+  async toggleChecklist(id, idx){
+    const b = Store.data.bids.find(x=>x.id===id); if(!b) return;
+    b.checklist = b.checklist||[];
+    if(b.checklist[idx]) b.checklist[idx].done = !b.checklist[idx].done;
+    await Store.save('bids');
+    BidSearch.openDetail(id);
+  },
+  async addChecklistItem(id){
+    const name = (document.getElementById('bd_newChecklistItem').value||'').trim();
+    if(!name) return;
+    const b = Store.data.bids.find(x=>x.id===id); if(!b) return;
+    b.checklist = b.checklist||[];
+    b.checklist.push({name, done:false});
+    await Store.save('bids');
+    BidSearch.openDetail(id);
+  },
+  async addNote(id){
+    const text = (document.getElementById('bd_newNote').value||'').trim();
+    if(!text) return;
+    const b = Store.data.bids.find(x=>x.id===id); if(!b) return;
+    b.timeline = b.timeline||[];
+    b.timeline.push({date:new Date().toISOString(), text, by:(Auth.session&&Auth.session.name)||'System'});
+    await Store.save('bids');
+    await Activity.log('Bid note added', b.bidNumber||b.title);
+    BidSearch.openDetail(id);
+  },
+  async addTask(id){
+    const b = Store.data.bids.find(x=>x.id===id); if(!b) return;
+    const task = {
+      id: Util.uid('T', Store.data.tasks), date: Util.todayISO(), todo: 'Bid: '+(b.title||b.bidNumber),
+      customerId:'', customerName: b.organisation||'', phone:'', taskEntry: 'Follow up on bid '+(b.bidNumber||b.id),
+      remarks:'', assignedTo: b.assignedTo||'', status:'Not Started', bidId: b.id
+    };
+    Store.data.tasks.unshift(task);
+    await Store.save('tasks');
+    await Activity.log('Bid task created', b.bidNumber||b.title);
+    UI.toast('Task added — see Tasks & To-Do');
+    BidSearch.openDetail(id);
+  },
+  convertToOrder(id){
+    const b = Store.data.bids.find(x=>x.id===id); if(!b) return;
+    UI.closeModal();
+    go('orders');
+    setTimeout(()=>{
+      OrdersMgmt.openForm(null);
+      setTimeout(()=>{
+        const partyEl = document.getElementById('o_party'); if(partyEl) partyEl.value = b.organisation||b.buyerName||'';
+        const gemEl = document.getElementById('o_gemcNumber'); if(gemEl) gemEl.value = b.bidNumber||'';
+        const custom = document.getElementById('o_productCustom'); const sel = document.getElementById('o_productName');
+        if(sel && custom){ sel.value='__custom__'; custom.value = b.category||b.title||''; OrdersMgmt.toggleCustomProduct(); }
+      }, 80);
+    }, 80);
+  },
+  openDetail(id){
+    const b = Store.data.bids.find(x=>x.id===id); if(!b) return;
+    const m = bidMatch(b);
+    b.checklist = b.checklist||[]; b.timeline = b.timeline||[];
+    const doneCount = b.checklist.filter(c=>c.done).length;
+    const pct = b.checklist.length? Math.round(doneCount/b.checklist.length*100) : 0;
+    const linkedTasks = Store.data.tasks.filter(t=>t.bidId===id);
+    UI.openModal(`${b.bidNumber||b.id} — ${Util.escapeHtml(b.title||'')}`, `
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px;">
+        ${matchBadgeHTML(m.score)}
+        ${bidDeadlineBadgeHTML(b.endDate)}
+        <span class="badge" style="background:${bidStatusColor(b.status)};color:#fff;">${Util.escapeHtml(b.status||'New')}</span>
+        ${b.sourceUrl? `<a class="btn btn-outline btn-sm" href="${Util.escapeHtml(b.sourceUrl)}" target="_blank">&#128279; Open Source</a>` : ''}
+        ${b.status==='Won'? `<button class="btn btn-primary btn-sm" onclick="BidSearch.convertToOrder('${id}')">&#8594; Convert to Order</button>` : ''}
+      </div>
+      <div class="field"><label>Update Status</label><select onchange="BidSearch.setStatus('${id}', this.value)">${DROPDOWNS.bidStatus.map(s=>`<option ${s===b.status?'selected':''}>${s}</option>`).join('')}</select></div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:16px 0;">
+        <div>
+          <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:0 0 6px;">Organisation</h4>
+          <p style="margin:0;font-size:13px;">${Util.escapeHtml(b.organisation||'—')}${b.department?' · '+Util.escapeHtml(b.department):''}${b.location?' · '+Util.escapeHtml(b.location):''}</p>
+        </div>
+        <div>
+          <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:0 0 6px;">Financials</h4>
+          <p style="margin:0;font-size:13px;">Value: ${b.estimatedValue?Util.fmtMoney(b.estimatedValue):'—'} &middot; EMD: ${b.emdAmount?Util.fmtMoney(b.emdAmount):'—'}</p>
+        </div>
+      </div>
+
+      <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:16px 0 6px;">Document Checklist — ${doneCount}/${b.checklist.length}</h4>
+      <div class="doc-progress"><div style="width:${pct}%;"></div></div>
+      <div style="margin:10px 0;">
+        ${b.checklist.map((c,i)=>`<label class="chk" style="display:flex;align-items:center;gap:7px;margin-bottom:6px;"><input type="checkbox" ${c.done?'checked':''} onchange="BidSearch.toggleChecklist('${id}',${i})"> ${Util.escapeHtml(c.name)}</label>`).join('')}
+      </div>
+      <div style="display:flex;gap:8px;">
+        <input id="bd_newChecklistItem" placeholder="Add checklist item..." style="flex:1;">
+        <button class="btn btn-outline btn-sm" onclick="BidSearch.addChecklistItem('${id}')">&#65291; Add</button>
+      </div>
+
+      <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:20px 0 6px;">Tasks (${linkedTasks.length})</h4>
+      ${linkedTasks.length? linkedTasks.map(t=>`<div style="font-size:12.5px;padding:6px 0;border-bottom:1px solid var(--border);">${Util.escapeHtml(t.todo)} — <span class="cell-mute">${Util.escapeHtml(t.status)}</span></div>`).join('') : `<p class="cell-mute" style="font-size:12.5px;">No tasks linked yet.</p>`}
+      <button class="btn btn-outline btn-sm" style="margin-top:6px;" onclick="BidSearch.addTask('${id}')">&#65291; Add Task</button>
+
+      <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:20px 0 6px;">Notes &amp; Activity Timeline</h4>
+      <div style="max-height:180px;overflow:auto;margin-bottom:8px;">
+        ${b.timeline.slice().reverse().map(t=>`<div style="font-size:12.5px;padding:6px 0;border-bottom:1px solid var(--border);"><span class="cell-mute">${Util.fmtDateTime(t.date)} &middot; ${Util.escapeHtml(t.by||'')}</span><br>${Util.escapeHtml(t.text)}</div>`).join('') || `<p class="cell-mute" style="font-size:12.5px;">No activity yet.</p>`}
+      </div>
+      <div style="display:flex;gap:8px;">
+        <input id="bd_newNote" placeholder="Add a note..." style="flex:1;">
+        <button class="btn btn-outline btn-sm" onclick="BidSearch.addNote('${id}')">&#65291; Add</button>
+      </div>
+    `, `<button class="btn btn-outline" onclick="UI.closeModal()">Close</button><button class="btn btn-primary" onclick="BidSearch.openForm('${id}')">Edit Full Details</button>`, true);
+  },
+  exportExcel(){
+    try{
+      const rows = Store.data.bids.map(b=>({
+        'Bid Number':b.bidNumber||'', Title:b.title||'', Category:b.category||'', Organisation:b.organisation||'',
+        'Bid Value':b.estimatedValue||0, 'End Date':b.endDate||'', Status:b.status||'', 'Assigned To':b.assignedTo||'',
+        Decision: BID_TERMINAL_STATUSES.includes(b.status)?b.status:'Pending', Result: b.status==='Won'?'Won':b.status==='Lost'?'Lost':'', Notes: b.description||''
+      }));
+      const ws = XLSX.utils.json_to_sheet(rows.length?rows:[{Info:'No bids yet'}]);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Bid Register');
+      XLSX.writeFile(wb, 'jays-bid-register-'+Util.todayISO()+'.xlsx');
+      Activity.log('Bid register exported', rows.length+' bid(s)');
+      UI.toast('Bid register exported');
+    }catch(e){ console.error(e); UI.toast('Export failed'); }
+  }
+};
+Views.bidsearch = ()=>BidSearch.render();
+
 const Reports = {
   render(){
     const c = Store.data.customers;
@@ -3532,11 +4055,12 @@ const Backup = {
         <div class="backup-tile">
           <div class="bic" style="background:var(--amber-light);color:#9A6B12;">&#128229;</div>
           <h4>Import Excel</h4>
-          <p>Bulk-import Leads/Customers or Products from an .xlsx file. Column headers should match the exported format.</p>
+          <p>Bulk-import Leads/Customers, Products, or GeM Bids from an .xlsx file. Column headers should match the exported format.</p>
           <input type="file" id="importFile" accept=".xlsx,.xls,.csv" style="display:none;" onchange="Backup.importExcel(this.files[0])">
           <select id="importTarget" style="margin-bottom:2px;">
             <option value="customers">Leads &amp; Customers</option>
             <option value="products">Products</option>
+            <option value="bids">GeM Bids</option>
           </select>
           <button class="btn btn-outline btn-sm" onclick="document.getElementById('importFile').click()">&#128229; Choose Excel File</button>
           <p style="margin:6px 0 0;font-size:11.5px;color:var(--text-mute);">Tip: GEM CRAC has its own dedicated importer on the GEM CRAC page (handles the multi-sheet GEM order format).</p>
@@ -3560,7 +4084,8 @@ const Backup = {
       quotations: Store.data.quotations, payments: Store.data.payments,
       followups: Store.data.followups, tasks: Store.data.tasks, notes: Store.data.notes,
       users: Store.data.users, settings: Store.data.settings,
-      gemcrac: Store.data.gemcrac, orders: Store.data.orders, complaints: Store.data.complaints
+      gemcrac: Store.data.gemcrac, orders: Store.data.orders, complaints: Store.data.complaints,
+      bids: Store.data.bids
     };
   },
   downloadJSON(){
@@ -3587,10 +4112,10 @@ const Backup = {
     try{
       const text = await file.text();
       const data = JSON.parse(text);
-      ['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints'].forEach(k=>{
+      ['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids'].forEach(k=>{
         if(data[k]!==undefined) Store.data[k] = data[k];
       });
-      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints'].map(k=>Store.save(k)));
+      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids'].map(k=>Store.save(k)));
       await Activity.log('Data restored', 'Restored from backup file '+file.name);
       UI.toast('Data restored successfully');
       Router.render('backup');
@@ -3610,6 +4135,7 @@ const Backup = {
         GemCrac: Store.data.gemcrac.map(g=>({'Party/Panchayath':g.party,'Company Name':g.companyName||'','GEM Order Number':g.gemcNumber,'Product Name':g.productName||'','Buying Mode':g.buyingMode||'','Order Date':g.orderDate,'Order Value':g.amount||0,'Quantity':g.qty||0,'Status':g.status,Contact:g.contact||'',Phone:g.phone||'',Remark:g.remark||''})),
         Orders: Store.data.orders.map(o=>({ID:o.id,'Order Date':o.orderDate,'GEM Order Number':o.gemcNumber||'','Order From':o.orderFrom||'','Product Name':o.productName||'','Party Name':o.party,'Party Phone':o.phone||'','Assigned To':o.assignedTo||'','Status':o.status})),
         Complaints: Store.data.complaints.map(c=>({ID:c.id,'Complaint Date':c.complaintDate,'Complaint From':c.complaintFrom,'Product Name':c.productName||'','Complaint Note':c.note||'','Assigned To':c.assignedTo||'','Status':c.status,'Updated Date':c.updatedDate})),
+        Bids: Store.data.bids.map(b=>({ID:b.id,'Bid Number':b.bidNumber||'','Title':b.title||'','Category':b.category||'','Organisation':b.organisation||'','Bid Value':b.estimatedValue||0,'End Date':b.endDate||'','Status':b.status,'Assigned To':b.assignedTo||'','Decision':b.decision||'','Result':b.status==='Won'?'Won':b.status==='Lost'?'Lost':'','Notes':b.description||''})),
         ActivityLog: Store.data.activityLog.map(a=>({Time:a.ts,User:a.user,Action:a.action,Details:a.details}))
       };
       Object.keys(sheets).forEach(name=>{
@@ -3646,6 +4172,22 @@ const Backup = {
           count++;
         });
         await Store.save('customers');
+      } else if(target==='bids'){
+        rows.forEach(r=>{
+          const title = r.Title||r.title||r['Bid Title']; if(!title) return;
+          Store.data.bids.unshift({
+            id: Util.uid('BID', Store.data.bids),
+            bidNumber: r['Bid No']||r.BidNumber||r['Bid Number']||r.bidNumber||'',
+            title: String(title), category: r.Category||r.category||'',
+            organisation: r.Department||r.Organisation||r.organisation||'',
+            endDate: r['Closing Date']||r.EndDate||r['End Date']||'',
+            estimatedValue: Number(r['Bid Value']||r.Value||r.estimatedValue)||0,
+            status: 'New', decision:'', description:'', checklist: DEFAULT_BID_CHECKLIST.map(t=>({text:t, done:false})),
+            activity:[{ts:new Date().toISOString(), text:'Imported from Excel', by:(Auth.session&&Auth.session.name)||'System'}]
+          });
+          count++;
+        });
+        await Store.save('bids');
       } else {
         rows.forEach(r=>{
           const name = r.Name||r.name; if(!name) return;
@@ -3818,6 +4360,21 @@ Views.settings = function(){
       </div>
       <button class="btn btn-primary" onclick="SettingsView.save()">Save Settings</button>
     </div>
+    <div class="card card-pad" style="max-width:520px;margin-top:16px;">
+      <h3 style="margin:0 0 4px;font-size:14px;">Bid Search Preferences</h3>
+      <div class="hint" style="margin-bottom:12px;">Used to compute the match score on the GeM Bid Search dashboard — product categories from your Product Master are always included automatically.</div>
+      <div class="field"><label>Preferred Keywords (comma-separated)</label><textarea id="s_preferredBidKeywords" placeholder="Waste Bin, Twin Bin, Outdoor Gym, Furniture, School Furniture, Water ATM, Incinerator, Raincoat, Safety Equipment">${Util.escapeHtml(s.preferredBidKeywords||'')}</textarea></div>
+      <div class="field"><label>Excluded Keywords (comma-separated)</label><textarea id="s_excludedBidKeywords" placeholder="e.g. medical, pharma">${Util.escapeHtml(s.excludedBidKeywords||'')}</textarea></div>
+      <div class="form-row">
+        <div class="field"><label>Preferred States (comma-separated)</label><input id="s_preferredBidStates" value="${Util.escapeHtml(s.preferredBidStates||'')}"></div>
+        <div class="field"><label>Preferred Departments/Orgs (comma-separated)</label><input id="s_preferredBidDepts" value="${Util.escapeHtml(s.preferredBidDepts||'')}"></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>Minimum Bid Value</label><input id="s_minBidValue" type="number" value="${s.minBidValue||''}"></div>
+        <div class="field"><label>Maximum Bid Value</label><input id="s_maxBidValue" type="number" value="${s.maxBidValue||''}"></div>
+      </div>
+      <button class="btn btn-primary" onclick="SettingsView.saveBidPrefs()">Save Bid Preferences</button>
+    </div>
   `;
 };
 const SettingsView = {
@@ -3830,6 +4387,17 @@ const SettingsView = {
     await Store.save('settings');
     await Activity.log('Settings updated', 'Company details changed');
     UI.toast('Settings saved');
+  },
+  async saveBidPrefs(){
+    Store.data.settings.preferredBidKeywords = document.getElementById('s_preferredBidKeywords').value.trim();
+    Store.data.settings.excludedBidKeywords = document.getElementById('s_excludedBidKeywords').value.trim();
+    Store.data.settings.preferredBidStates = document.getElementById('s_preferredBidStates').value.trim();
+    Store.data.settings.preferredBidDepts = document.getElementById('s_preferredBidDepts').value.trim();
+    Store.data.settings.minBidValue = document.getElementById('s_minBidValue').value?Number(document.getElementById('s_minBidValue').value):null;
+    Store.data.settings.maxBidValue = document.getElementById('s_maxBidValue').value?Number(document.getElementById('s_maxBidValue').value):null;
+    await Store.save('settings');
+    await Activity.log('Settings updated', 'Bid search preferences changed');
+    UI.toast('Bid preferences saved');
   }
 };
 
