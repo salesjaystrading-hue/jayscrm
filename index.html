@@ -2481,7 +2481,7 @@ const GemCrac = {
     const fCompany = document.getElementById('gcCompanyFilter')?document.getElementById('gcCompanyFilter').value:'';
     const fContacted = document.getElementById('gcContactedFilter')?document.getElementById('gcContactedFilter').value:'';
     const fPanchayath = document.getElementById('gcPanchayathFilter')?document.getElementById('gcPanchayathFilter').value:'';
-    const panchayathOptions = [...new Set(Store.data.gemcrac.map(g=>{ const c=Store.data.customers.find(x=>x.id===g.customerId); return c?c.panchayath:''; }).filter(Boolean))].sort();
+    const panchayathOptions = [...new Set(Store.data.gemcrac.map(g=>(g.party||'').trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
 
     let list = Store.data.gemcrac.slice().sort((a,b)=>(b.orderDate||'').localeCompare(a.orderDate||''));
     if(q) list = list.filter(g=>(g.party||'').toLowerCase().includes(q) || (g.gemcNumber||'').toLowerCase().includes(q) || (g.productName||'').toLowerCase().includes(q));
@@ -2490,7 +2490,7 @@ const GemCrac = {
     if(fContacted==='yes') list = list.filter(g=>!!g.contactedDate);
     else if(fContacted==='no') list = list.filter(g=>!g.contactedDate);
     if(fPanchayath){
-      list = list.filter(g=>{ const c = Store.data.customers.find(x=>x.id===g.customerId); return c && c.panchayath===fPanchayath; });
+      list = list.filter(g=>(g.party||'').trim()===fPanchayath);
     }
 
     const needsUpdate = Store.data.gemcrac.filter(g=>g.status==='Needs Update').length;
@@ -2538,7 +2538,7 @@ const GemCrac = {
           <option value="no" ${fContacted==='no'?'selected':''}>Contacted: No</option>
         </select>
         <select id="gcPanchayathFilter" onchange="GemCrac.render()">
-          <option value="">All Panchayaths</option>
+          <option value="">All Party / Panchayath</option>
           ${panchayathOptions.map(p=>`<option ${p===fPanchayath?'selected':''}>${Util.escapeHtml(p)}</option>`).join('')}
         </select>
         ${(q||fStatus||fCompany||fContacted||fPanchayath) ? `<button class="btn btn-outline btn-sm" onclick="GemCrac.clearFilters()">Clear</button>` : ''}
