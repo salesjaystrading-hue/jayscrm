@@ -2480,6 +2480,8 @@ const GemCrac = {
     const fStatus = document.getElementById('gcStatusFilter')?document.getElementById('gcStatusFilter').value:'';
     const fCompany = document.getElementById('gcCompanyFilter')?document.getElementById('gcCompanyFilter').value:'';
     const fContacted = document.getElementById('gcContactedFilter')?document.getElementById('gcContactedFilter').value:'';
+    const fPanchayath = document.getElementById('gcPanchayathFilter')?document.getElementById('gcPanchayathFilter').value:'';
+    const panchayathOptions = [...new Set(Store.data.customers.map(c=>c.panchayath).filter(Boolean))].sort();
 
     let list = Store.data.gemcrac.slice().sort((a,b)=>(b.orderDate||'').localeCompare(a.orderDate||''));
     if(q) list = list.filter(g=>(g.party||'').toLowerCase().includes(q) || (g.gemcNumber||'').toLowerCase().includes(q) || (g.productName||'').toLowerCase().includes(q));
@@ -2487,6 +2489,9 @@ const GemCrac = {
     if(fCompany) list = list.filter(g=>g.companyName===fCompany);
     if(fContacted==='yes') list = list.filter(g=>!!g.contactedDate);
     else if(fContacted==='no') list = list.filter(g=>!g.contactedDate);
+    if(fPanchayath){
+      list = list.filter(g=>{ const c = Store.data.customers.find(x=>x.id===g.customerId); return c && c.panchayath===fPanchayath; });
+    }
 
     const needsUpdate = Store.data.gemcrac.filter(g=>g.status==='Needs Update').length;
     const selectedCount = Object.keys(this.selected).filter(k=>this.selected[k]).length;
@@ -2532,7 +2537,11 @@ const GemCrac = {
           <option value="yes" ${fContacted==='yes'?'selected':''}>Contacted: Yes</option>
           <option value="no" ${fContacted==='no'?'selected':''}>Contacted: No</option>
         </select>
-        ${(q||fStatus||fCompany||fContacted) ? `<button class="btn btn-outline btn-sm" onclick="GemCrac.clearFilters()">Clear</button>` : ''}
+        <select id="gcPanchayathFilter" onchange="GemCrac.render()">
+          <option value="">All Panchayaths</option>
+          ${panchayathOptions.map(p=>`<option ${p===fPanchayath?'selected':''}>${Util.escapeHtml(p)}</option>`).join('')}
+        </select>
+        ${(q||fStatus||fCompany||fContacted||fPanchayath) ? `<button class="btn btn-outline btn-sm" onclick="GemCrac.clearFilters()">Clear</button>` : ''}
       </div>
       <div class="card"><div class="table-wrap">
       ${list.length ? `<table><thead><tr><th class="col-actions">Actions</th><th style="width:34px;"><input type="checkbox" class="row-check" onchange="GemCrac.toggleAll(this.checked, ${JSON.stringify(list.map(g=>g.id))})" ${list.length && list.every(g=>this.selected[g.id])?'checked':''}></th><th>Party / Panchayath</th><th>Area / Panchayath (Contact)</th><th>Company</th><th>GEM Number</th><th>Product Name</th><th>Buying Mode</th><th>Order Date</th><th>Amount</th><th>Qty</th><th>Status</th><th>Delivery Date</th><th>Extension</th><th>Completed</th><th>Contact Name</th><th>Contacted Date</th><th>Remark</th></tr></thead><tbody>
@@ -2623,6 +2632,7 @@ const GemCrac = {
     const st = document.getElementById('gcStatusFilter'); if(st) st.value='';
     const c = document.getElementById('gcCompanyFilter'); if(c) c.value='';
     const ct = document.getElementById('gcContactedFilter'); if(ct) ct.value='';
+    const p = document.getElementById('gcPanchayathFilter'); if(p) p.value='';
     this.render();
   },
   openForm(id){
