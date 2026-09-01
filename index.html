@@ -2481,7 +2481,7 @@ const GemCrac = {
     const fCompany = document.getElementById('gcCompanyFilter')?document.getElementById('gcCompanyFilter').value:'';
     const fContacted = document.getElementById('gcContactedFilter')?document.getElementById('gcContactedFilter').value:'';
     const fPanchayath = document.getElementById('gcPanchayathFilter')?document.getElementById('gcPanchayathFilter').value:'';
-    const panchayathOptions = [...new Set(Store.data.customers.map(c=>c.panchayath).filter(Boolean))].sort();
+    const panchayathOptions = [...new Set(Store.data.gemcrac.map(g=>{ const c=Store.data.customers.find(x=>x.id===g.customerId); return c?c.panchayath:''; }).filter(Boolean))].sort();
 
     let list = Store.data.gemcrac.slice().sort((a,b)=>(b.orderDate||'').localeCompare(a.orderDate||''));
     if(q) list = list.filter(g=>(g.party||'').toLowerCase().includes(q) || (g.gemcNumber||'').toLowerCase().includes(q) || (g.productName||'').toLowerCase().includes(q));
