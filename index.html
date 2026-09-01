@@ -3623,6 +3623,15 @@ const BidSearch = {
         {label:'Closing Today', value:closingToday, color:'var(--red,#dc2626)'},
         {label:'Closing This Week', value:closingWeek, color:'var(--amber,#d97706)'}
       ])}
+      <div class="card card-pad" style="margin-bottom:16px;">
+        <h3 style="margin:0 0 4px;font-size:14px;">&#128269; Search Live on GeM BidPlus</h3>
+        <div class="hint" style="margin-bottom:10px;">GeM doesn't offer a public search API, so this opens their official site in a new tab with your term ready to paste — nothing is scraped or bypassed. Save anything relevant back here using "Add Bid" or the Excel importer.</div>
+        <div class="toolbar" style="margin:0;">
+          <div class="search"><span class="ic">&#128269;</span><input id="bidLiveSearch" placeholder="Keyword, category, bid number, department..." onkeydown="if(event.key==='Enter') BidSearch.openLiveSearch()"></div>
+          <button class="btn btn-primary btn-sm" onclick="BidSearch.openLiveSearch()">&#128279; Search on GeM BidPlus</button>
+          <button class="btn btn-outline btn-sm" onclick="window.open('https://bidplus.gem.gov.in/all-bids','_blank')">All Bids &#8599;</button>
+        </div>
+      </div>
       <div class="toolbar">
         <div class="search"><span class="ic">&#128269;</span><input id="bidSearch" placeholder="Search bid number, title, category, organisation, department..." oninput="BidSearch.render()" value="${Util.escapeHtml(q)}"></div>
         <div class="toolbar-spacer"></div>
@@ -3913,6 +3922,14 @@ const BidSearch = {
         <button class="btn btn-outline btn-sm" onclick="BidSearch.addNote('${id}')">&#65291; Add</button>
       </div>
     `, `<button class="btn btn-outline" onclick="UI.closeModal()">Close</button><button class="btn btn-primary" onclick="BidSearch.openForm('${id}')">Edit Full Details</button>`, true);
+  },
+  openLiveSearch(){
+    const term = (document.getElementById('bidLiveSearch').value||'').trim();
+    if(term && navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(term).catch(()=>{});
+      UI.toast('Search term copied — paste it into GeM\'s search box');
+    }
+    window.open('https://bidplus.gem.gov.in/advance-search', '_blank');
   },
   exportExcel(){
     try{
