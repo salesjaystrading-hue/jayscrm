@@ -696,7 +696,7 @@ const Store = {
     customers: [], products: [], quotations: [], payments: [],
     followups: [], tasks: [], notes: [], users: [], settings: {}, activityLog: [],
     gemcrac: [], orders: [], complaints: [], bids: [], waTemplates: [], waHistory: [],
-    rateTemplates: [], rateDocs: [], rateTerms: []
+    rateTemplates: [], rateDocs: [], rateTerms: [], rateDocTemplates: []
   },
   /* One-time, non-destructive lift of the old WhatsApp rate templates into
      the Rate Template Library. The source waTemplates rows are NEVER deleted
@@ -800,6 +800,7 @@ const Store = {
     this.data.rateTemplates = await this.loadKey('jays_ratetemplates', []);
     this.data.rateDocs = await this.loadKey('jays_ratedocs', []);
     this.data.rateTerms = await this.loadKey('jays_rateterms', []);
+    this.data.rateDocTemplates = await this.loadKey('jays_ratedoctemplates', []);
     await this.migrateWaTemplates();
 
     const settingsFailedBefore = false;
@@ -4349,12 +4350,20 @@ const RatePDF = {
     y = Math.max(hy + 3, y + 28);
     doc.setDrawColor(accent[0],accent[1],accent[2]); doc.setLineWidth(0.5);
     doc.line(M, y, PW-M, y);
-    y += 7;
+    y += 6;
 
-    /* --- document title --- */
-    doc.setFont('helvetica','bold'); doc.setFontSize(12.5); doc.setTextColor(30);
-    doc.text(String(d.docType||'Rate Offer').toUpperCase(), PW/2, y, {align:'center'});
-    y += 7;
+    /* --- document title, on a soft accent banner for a more premium look --- */
+    const titleH = 9;
+    if(!minimal){
+      doc.setFillColor(accent[0],accent[1],accent[2]);
+      doc.roundedRect(PW/2-46, y, 92, titleH, 1.5, 1.5, 'F');
+      doc.setTextColor(255);
+    } else {
+      doc.setTextColor(30);
+    }
+    doc.setFont('helvetica','bold'); doc.setFontSize(12);
+    doc.text(String(d.docType||'Rate Offer').toUpperCase(), PW/2, y + titleH/2 + 3.2, {align:'center'});
+    y += titleH + 6;
 
     /* --- meta + customer, side by side --- */
     doc.setFontSize(8.5);
@@ -4404,11 +4413,14 @@ const RatePDF = {
       y += 2;
     }
 
-    /* --- items table. GST columns exist ONLY when gstEnabled. --- */
+    /* --- items table. GST columns exist ONLY when gstEnabled.
+       A Photo column is always present; didDrawCell paints the actual
+       image (AutoTable cells can't hold image data as cell text). --- */
     const gst = d.gstEnabled;
+    const hasAnyImage = d.items.some(it=>it.imageUrl);
     const head = gst
-      ? [['#','Description','Qty','Unit','Rate','Disc','GST%','Amount']]
-      : [['#','Description','Qty','Unit','Rate','Disc','Amount']];
+      ? (hasAnyImage ? [['#','Photo','Description','Qty','Unit','Rate','Disc','GST%','Amount']] : [['#','Description','Qty','Unit','Rate','Disc','GST%','Amount']])
+      : (hasAnyImage ? [['#','Photo','Description','Qty','Unit','Rate','Disc','Amount']] : [['#','Description','Qty','Unit','Rate','Disc','Amount']]);
     const body = d.items.map((it,i)=>{
       let desc = it.itemName || '-';
       const sub = [it.brand, it.model].filter(Boolean).join(' ');
@@ -4416,31 +4428,50 @@ const RatePDF = {
       const specs = String(it.specs||'').split('\n').map(x=>x.trim()).filter(Boolean);
       if(specs.length) desc += '\n' + specs.map(x=>'\u2022 ' + x).join('\n');
       const base = this.itemBase(it);
-      const row = [String(i+1), desc, String(this.num(it.qty)), it.unit||'Nos',
-                   this.money(it.rate), this.num(it.discount) ? this.money(it.discount) : '-'];
+      const row = [String(i+1)];
+      if(hasAnyImage) row.push('');        // photo cell stays blank; image is painted on top of it
+      row.push(desc, String(this.num(it.qty)), it.unit||'Nos',
+                this.money(it.rate), this.num(it.discount) ? this.money(it.discount) : '-');
       if(gst) row.push(String(this.itemGstRate(it)) + '%');
       row.push(this.money(base));
       return row;
     });
 
-    const colStyles = gst
-      ? {0:{cellWidth:8,halign:'center'},2:{cellWidth:12,halign:'right'},3:{cellWidth:14},
-         4:{cellWidth:22,halign:'right'},5:{cellWidth:18,halign:'right'},
-         6:{cellWidth:14,halign:'right'},7:{cellWidth:24,halign:'right'}}
-      : {0:{cellWidth:8,halign:'center'},2:{cellWidth:14,halign:'right'},3:{cellWidth:16},
-         4:{cellWidth:26,halign:'right'},5:{cellWidth:20,halign:'right'},
-         6:{cellWidth:28,halign:'right'}};
+    const photoColIdx = hasAnyImage ? 1 : -1;
+    const colStyles = {0:{cellWidth:8,halign:'center'}};
+    if(hasAnyImage) colStyles[photoColIdx] = {cellWidth:18,minCellHeight:18};
+    let ci = hasAnyImage ? 2 : 1;
+    colStyles[ci++] = {}; // description - flexible width, no fixed value needed
+    colStyles[ci++] = {cellWidth: gst?12:14, halign:'right'};   // qty
+    colStyles[ci++] = {cellWidth: gst?14:16};                    // unit
+    colStyles[ci++] = {cellWidth: gst?22:26, halign:'right'};    // rate
+    colStyles[ci++] = {cellWidth: gst?18:20, halign:'right'};    // disc
+    if(gst) colStyles[ci++] = {cellWidth:14, halign:'right'};    // gst%
+    colStyles[ci] = {cellWidth: gst?24:28, halign:'right'};      // amount
 
     doc.autoTable({
       head, body, startY:y, margin:{left:M,right:M,top:22,bottom:20},
       theme: minimal ? 'plain' : 'grid',
-      styles:{fontSize:8, cellPadding:2, overflow:'linebreak', valign:'top', lineColor:[210,210,210], lineWidth:0.15},
+      styles:{fontSize:8, cellPadding:2, overflow:'linebreak', valign:'middle', lineColor:[210,210,210], lineWidth:0.15},
       headStyles:{fillColor: minimal ? [245,245,245] : accent, textColor: minimal ? 40 : 255,
                   fontStyle:'bold', fontSize:8.2, halign:'left'},
       alternateRowStyles: minimal ? {} : {fillColor:[250,250,250]},
       columnStyles: colStyles,
       showHead:'everyPage',            // repeating header on every page
-      rowPageBreak:'auto'
+      rowPageBreak:'auto',
+      didDrawCell: (data)=>{
+        if(data.section !== 'body' || data.column.index !== photoColIdx) return;
+        const it = d.items[data.row.index];
+        if(!it || !it.imageUrl) return;
+        const pad = 1.2;
+        const size = Math.min(data.cell.width, data.cell.height) - pad*2;
+        try{
+          doc.addImage(it.imageUrl, 'JPEG',
+            data.cell.x + (data.cell.width-size)/2,
+            data.cell.y + (data.cell.height-size)/2,
+            size, size);
+        }catch(e){ console.warn('item image skipped', e); }
+      }
     });
     y = doc.lastAutoTable.finalY + 6;
 
@@ -4515,6 +4546,28 @@ const RatePDF = {
     doc.line(sx, y+21, sx+56, y+21);
     doc.setFontSize(7.8); doc.setTextColor(90);
     doc.text('Authorised Signatory', sx, y+25);
+    y += 32;
+
+    /* --- "also on GeM" closing note, drawn once on the last page.
+       Uses a plain text wordmark, not the official GeM logo artwork -
+       we're not reproducing government branding, just naming the portal. --- */
+    if(y > PH - 34){ doc.addPage(); y = 24; }
+    const gemW = PW - M*2, gemH = 16;
+    doc.setFillColor(minimal ? 250 : accent[0], minimal ? 250 : accent[1], minimal ? 250 : accent[2]);
+    if(minimal){ doc.setDrawColor(210); doc.rect(M, y, gemW, gemH, 'S'); }
+    else doc.roundedRect(M, y, gemW, gemH, 2, 2, 'F');
+    const badgeColor = minimal ? [30,30,30] : [255,255,255];
+    doc.setDrawColor(badgeColor[0],badgeColor[1],badgeColor[2]);
+    doc.setLineWidth(0.6);
+    doc.roundedRect(M+4, y+3, 20, 10, 1.5, 1.5, 'S');
+    doc.setFont('helvetica','bold'); doc.setFontSize(9);
+    doc.setTextColor(badgeColor[0],badgeColor[1],badgeColor[2]);
+    doc.text('GeM', M+14, y+9.5, {align:'center'});
+    doc.setFont('helvetica','bold'); doc.setFontSize(9);
+    doc.text('Our products are also available on GeM (Government e-Marketplace)', M+29, y+7);
+    doc.setFont('helvetica','normal'); doc.setFontSize(8);
+    doc.text('Search for us on gem.gov.in for direct government procurement', M+29, y+12.5);
+    y += gemH + 6;
 
     /* --- footers: slim band + page numbers on every page --- */
     const pages = doc.internal.getNumberOfPages();
@@ -5005,6 +5058,83 @@ const RatePDF = {
         : '<div class="empty-state"><div class="ic">&#128193;</div><div class="t">No saved documents yet</div></div>',
       '<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>', true);
   },
+  /* ---------------- whole-document templates
+     "Save as Template" snapshots EVERYTHING (items, GST, terms, theme,
+     doc type) but blanks the customer-specific fields, so next time the
+     user just picks a party and everything else is ready. ---------------- */
+  saveDocAsTemplate(){
+    const d = this.draft;
+    if(!d.items.some(it=>(it.itemName||'').trim())){ UI.toast('Add at least one item first'); return; }
+    UI.openModal('Save Document as Template',
+      '<div class="field"><label>Template Name *</label><input id="rdtName" placeholder="e.g. Standard Waste Bin Offer"></div>' +
+      '<div class="hint">Saves every item, rate, GST setting and the selected terms. Customer details are left blank so next time you only fill in the party.</div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button>' +
+      '<button class="btn btn-primary" onclick="RatePDF.confirmSaveDocTemplate()">Save Template</button>');
+  },
+  async confirmSaveDocTemplate(){
+    const name = document.getElementById('rdtName').value.trim();
+    if(!name){ UI.toast('Template name is required'); return; }
+    if(Store.data.rateDocTemplates.some(t=>(t.name||'').toLowerCase()===name.toLowerCase())){
+      UI.toast('A document template with that name already exists'); return;
+    }
+    const now = new Date().toISOString();
+    const snap = JSON.parse(JSON.stringify(this.draft));
+    // Strip everything specific to this one customer / this one saved record.
+    ['id','parentId','revision','status','docNumber','createdAt','updatedAt',
+     'customerId','customerName','contactPerson','phone','email','address',
+     'district','gstin','customerRef'].forEach(f=>delete snap[f]);
+    const rec = { id:'DT'+String(Store.data.rateDocTemplates.length+1).padStart(3,'0'),
+      name, snapshot: snap,
+      createdBy:(Auth.session && (Auth.session.name||Auth.session.username))||'System',
+      createdAt: now, updatedAt: now };
+    Store.data.rateDocTemplates.unshift(rec);
+    const ok = await Store.save('rateDocTemplates');
+    if(ok){ await Activity.log('Document template saved', name); UI.toast('Document template saved'); }
+    UI.closeModal();
+  },
+  openDocTemplates(){
+    const list = Store.data.rateDocTemplates;
+    UI.openModal('Document Templates',
+      list.length
+        ? '<div class="table-wrap"><table><thead><tr><th>Actions</th><th>Template</th><th>Items</th><th>GST</th><th>Saved</th></tr></thead><tbody>' +
+          list.map(t=>'<tr>' +
+            '<td style="display:flex;gap:4px;">' +
+              '<button class="btn btn-primary btn-sm" onclick="RatePDF.useDocTemplate(\'' + t.id + '\')">Use</button>' +
+              '<button class="icon-btn" title="Delete" onclick="RatePDF.deleteDocTemplate(\'' + t.id + '\')">&#128465;</button>' +
+            '</td>' +
+            '<td class="cell-main">' + Util.escapeHtml(t.name) + '</td>' +
+            '<td class="cell-mute">' + t.snapshot.items.length + '</td>' +
+            '<td class="cell-mute">' + (t.snapshot.gstEnabled?'Yes':'No') + '</td>' +
+            '<td class="cell-mute">' + Util.fmtDate(t.createdAt) + '</td></tr>').join('') + '</tbody></table></div>'
+        : '<div class="empty-state"><div class="ic">&#128203;</div><div class="t">No document templates yet</div>' +
+          '<div class="d">Build a rate offer, then use "Save as Template" to reuse the whole thing next time \u2014 just swap the party.</div></div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>', true);
+  },
+  /* Deep-copies the saved snapshot into a fresh draft; the customer fields
+     start blank so the user only has to pick/enter the party. */
+  useDocTemplate(id){
+    const t = Store.data.rateDocTemplates.find(x=>x.id===id);
+    if(!t) return;
+    const fresh = this.blankDraft();
+    this.draft = Object.assign(fresh, JSON.parse(JSON.stringify(t.snapshot)), {
+      id:'', parentId:'', revision:0, status:'Draft', docNumber:'',
+      customerId:'', customerName:'', contactPerson:'', phone:'', email:'',
+      address:'', district:'', gstin:'', customerRef:'',
+      docDate: Util.todayISO(), createdAt:'', updatedAt:'',
+      createdBy:(Auth.session && (Auth.session.name||Auth.session.username))||'System'
+    });
+    this.draft.items = this.draft.items.map(it=>Object.assign({}, it, {uid:'I'+Date.now()+Math.floor(Math.random()*1000)}));
+    UI.closeModal(); this.render();
+    UI.toast('Loaded "' + t.name + '" \u2014 pick a customer and you\'re ready to send');
+  },
+  async deleteDocTemplate(id){
+    const t = Store.data.rateDocTemplates.find(x=>x.id===id); if(!t) return;
+    if(!confirm('Delete document template "' + t.name + '"?')) return;
+    Store.data.rateDocTemplates = Store.data.rateDocTemplates.filter(x=>x.id!==id);
+    const ok = await Store.save('rateDocTemplates');
+    if(ok){ await Activity.log('Document template deleted', t.name); UI.toast('Deleted'); }
+    this.openDocTemplates();
+  },
   newDoc(){
     if(this.draft && this.draft.items.some(i=>i.itemName) && !confirm('Discard the current unsaved document?')) return;
     this.draft = this.blankDraft();
@@ -5083,6 +5213,7 @@ const RatePDF = {
       '<div class="toolbar">' +
         '<button class="btn btn-primary btn-sm" onclick="RatePDF.newDoc()">&#65291; New Document</button>' +
         '<button class="btn btn-outline btn-sm" onclick="RatePDF.openHistory()">&#128193; Document History (' + Store.data.rateDocs.length + ')</button>' +
+        '<button class="btn btn-outline btn-sm" onclick="RatePDF.openDocTemplates()">&#128203; Document Templates (' + Store.data.rateDocTemplates.length + ')</button>' +
         '<button class="btn btn-outline btn-sm" onclick="RatePDF.openLibrary(\'\')">&#128194; Template Library (' + Store.data.rateTemplates.length + ')</button>' +
         '<button class="btn btn-outline btn-sm" onclick="RatePDF.openTerms()">&#128220; Terms Library</button>' +
         '<div class="toolbar-spacer"></div>' +
@@ -5185,6 +5316,7 @@ const RatePDF = {
           '</div>' +
           '<div class="toolbar" style="margin:8px 0 0;flex-wrap:wrap;">' +
             '<button class="btn btn-outline btn-sm" onclick="RatePDF.saveDraft()">&#128190; Save Draft</button>' +
+            '<button class="btn btn-outline btn-sm" onclick="RatePDF.saveDocAsTemplate()">&#11088; Save as Template</button>' +
             (d.id ? '<button class="btn btn-outline btn-sm" onclick="RatePDF.createRevision()">Create Revision</button>' : '') +
             (d.id && d.status!=='Final' ? '<button class="btn btn-outline btn-sm" onclick="RatePDF.markFinal()">Mark Final</button>' : '') +
           '</div>' +
@@ -5368,7 +5500,8 @@ const Backup = {
       gemcrac: Store.data.gemcrac, orders: Store.data.orders, complaints: Store.data.complaints,
       bids: Store.data.bids,
       waTemplates: Store.data.waTemplates, waHistory: Store.data.waHistory,
-      rateTemplates: Store.data.rateTemplates, rateDocs: Store.data.rateDocs, rateTerms: Store.data.rateTerms
+      rateTemplates: Store.data.rateTemplates, rateDocs: Store.data.rateDocs, rateTerms: Store.data.rateTerms,
+      rateDocTemplates: Store.data.rateDocTemplates
     };
   },
   downloadJSON(){
@@ -5395,10 +5528,10 @@ const Backup = {
     try{
       const text = await file.text();
       const data = JSON.parse(text);
-      ['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms'].forEach(k=>{
+      ['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates'].forEach(k=>{
         if(data[k]!==undefined) Store.data[k] = data[k];
       });
-      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms'].map(k=>Store.save(k)));
+      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates'].map(k=>Store.save(k)));
       await Activity.log('Data restored', 'Restored from backup file '+file.name);
       UI.toast('Data restored successfully');
       Router.render('backup');
@@ -5644,6 +5777,33 @@ Views.settings = function(){
       <button class="btn btn-primary" onclick="SettingsView.save()">Save Settings</button>
     </div>
     <div class="card card-pad" style="max-width:520px;margin-top:16px;">
+      <h3 style="margin:0 0 4px;font-size:14px;">Rate / Offer PDF Branding</h3>
+      <div class="hint" style="margin-bottom:12px;">Used on every Rate / Offer PDF header, footer and signature block.</div>
+      <div class="field"><label>Company Address</label><textarea id="s_companyAddress" rows="2">${Util.escapeHtml(s.companyAddress||'')}</textarea></div>
+      <div class="form-row">
+        <div class="field"><label>Website</label><input id="s_companyWebsite" value="${Util.escapeHtml(s.companyWebsite||'')}" placeholder="www.jaystrading.in"></div>
+        <div class="field"><label>GSTIN</label><input id="s_companyGSTIN" value="${Util.escapeHtml(s.companyGSTIN||'')}"></div>
+      </div>
+      <div class="field"><label>Udyam / MSME No.</label><input id="s_companyUdyam" value="${Util.escapeHtml(s.companyUdyam||'')}"></div>
+      <div class="form-row">
+        <div class="field">
+          <label>Company Logo</label>
+          <div class="wa-imgbox" id="s_logoBox" style="min-height:70px;margin-bottom:6px;">${s.companyLogo?`<img src="${Util.escapeHtml(s.companyLogo)}" alt="">`:'<span class="hint">No logo uploaded</span>'}</div>
+          <label class="btn btn-outline btn-sm" style="cursor:pointer;margin:0;">Upload Logo
+            <input type="file" accept="image/jpeg,image/png,image/webp" style="display:none;" onchange="SettingsView.onLogoFile(this)"></label>
+          ${s.companyLogo?`<button class="btn btn-outline btn-sm" onclick="SettingsView.clearImage('companyLogo','s_logoBox')">Remove</button>`:''}
+        </div>
+        <div class="field">
+          <label>Signature / Stamp</label>
+          <div class="wa-imgbox" id="s_sigBox" style="min-height:70px;margin-bottom:6px;">${s.signatureImage?`<img src="${Util.escapeHtml(s.signatureImage)}" alt="">`:'<span class="hint">No signature uploaded</span>'}</div>
+          <label class="btn btn-outline btn-sm" style="cursor:pointer;margin:0;">Upload Signature
+            <input type="file" accept="image/jpeg,image/png,image/webp" style="display:none;" onchange="SettingsView.onSignatureFile(this)"></label>
+          ${s.signatureImage?`<button class="btn btn-outline btn-sm" onclick="SettingsView.clearImage('signatureImage','s_sigBox')">Remove</button>`:''}
+        </div>
+      </div>
+      <button class="btn btn-primary" onclick="SettingsView.saveBranding()">Save Branding</button>
+    </div>
+    <div class="card card-pad" style="max-width:520px;margin-top:16px;">
       <h3 style="margin:0 0 4px;font-size:14px;">Bid Search Preferences</h3>
       <div class="hint" style="margin-bottom:12px;">Used to compute the match score on the GeM Bid Search dashboard — product categories from your Product Master are always included automatically.</div>
       <div class="field"><label>Preferred Keywords (comma-separated)</label><textarea id="s_preferredBidKeywords" placeholder="Waste Bin, Twin Bin, Outdoor Gym, Furniture, School Furniture, Water ATM, Incinerator, Raincoat, Safety Equipment">${Util.escapeHtml(s.preferredBidKeywords||'')}</textarea></div>
@@ -5670,6 +5830,57 @@ const SettingsView = {
     await Store.save('settings');
     await Activity.log('Settings updated', 'Company details changed');
     UI.toast('Settings saved');
+  },
+  _downscale(file, max, quality){
+    return new Promise((resolve, reject)=>{
+      const r = new FileReader();
+      r.onload = ()=>{
+        const img = new Image();
+        img.onload = ()=>{
+          let w = img.width, h = img.height;
+          if(w>max||h>max){ const sc = Math.min(max/w, max/h); w=Math.round(w*sc); h=Math.round(h*sc); }
+          const cv = document.createElement('canvas'); cv.width=w; cv.height=h;
+          cv.getContext('2d').drawImage(img,0,0,w,h);
+          resolve(cv.toDataURL('image/jpeg', quality));
+        };
+        img.onerror = ()=>reject(new Error('Not a readable image'));
+        img.src = r.result;
+      };
+      r.onerror = ()=>reject(new Error('Could not read that file'));
+      r.readAsDataURL(file);
+    });
+  },
+  async onLogoFile(input){
+    const f = input.files && input.files[0]; if(!f) return;
+    if(!/^image\/(jpe?g|png|webp)$/i.test(f.type)){ UI.toast('Use a JPG, PNG or WEBP image'); input.value=''; return; }
+    try{
+      const url = await this._downscale(f, 300, 0.85);
+      document.getElementById('s_logoBox').innerHTML = `<img src="${url}" alt="">`;
+      Store.data.settings.companyLogo = url;
+    }catch(e){ console.error(e); UI.toast('Could not process that image'); }
+    input.value = '';
+  },
+  async onSignatureFile(input){
+    const f = input.files && input.files[0]; if(!f) return;
+    if(!/^image\/(jpe?g|png|webp)$/i.test(f.type)){ UI.toast('Use a JPG, PNG or WEBP image'); input.value=''; return; }
+    try{
+      const url = await this._downscale(f, 300, 0.85);
+      document.getElementById('s_sigBox').innerHTML = `<img src="${url}" alt="">`;
+      Store.data.settings.signatureImage = url;
+    }catch(e){ console.error(e); UI.toast('Could not process that image'); }
+    input.value = '';
+  },
+  clearImage(field, boxId){
+    Store.data.settings[field] = '';
+    document.getElementById(boxId).innerHTML = '<span class="hint">No image uploaded</span>';
+  },
+  async saveBranding(){
+    Store.data.settings.companyAddress = document.getElementById('s_companyAddress').value.trim();
+    Store.data.settings.companyWebsite = document.getElementById('s_companyWebsite').value.trim();
+    Store.data.settings.companyGSTIN = document.getElementById('s_companyGSTIN').value.trim();
+    Store.data.settings.companyUdyam = document.getElementById('s_companyUdyam').value.trim();
+    const ok = await Store.save('settings');
+    if(ok){ await Activity.log('Settings updated', 'Rate/Offer PDF branding changed'); UI.toast('Branding saved'); }
   },
   async saveBidPrefs(){
     Store.data.settings.preferredBidKeywords = document.getElementById('s_preferredBidKeywords').value.trim();
