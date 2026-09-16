@@ -357,6 +357,25 @@
   @media(max-width:880px){.menu-toggle{display:inline-flex;align-items:center;justify-content:center;}}
 
   textarea{resize:vertical;min-height:70px;}
+  /* ---------- WhatsApp Rate Sender ---------- */
+  .wa-grid{display:grid;grid-template-columns:1fr 400px;gap:16px;align-items:start;}
+  @media(max-width:1100px){ .wa-grid{grid-template-columns:1fr;} }
+  .wa-step{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--orange);margin:0 0 10px;}
+  .wa-phone{background:#0b141a;border-radius:14px;padding:14px;min-height:180px;}
+  .wa-bubble{background:#005c4b;color:#e9edef;border-radius:10px;padding:10px 12px;font-size:13.5px;line-height:1.55;
+    white-space:pre-wrap;word-break:break-word;position:relative;box-shadow:0 1px 1px rgba(0,0,0,.2);}
+  .wa-bubble b{font-weight:700;}
+  .wa-bubble .wa-time{display:block;text-align:right;font-size:10.5px;opacity:.65;margin-top:6px;}
+  .wa-imgbox{border:1.5px dashed var(--border);border-radius:10px;min-height:150px;display:flex;align-items:center;
+    justify-content:center;overflow:hidden;background:var(--bg-soft,#faf9f7);}
+  .wa-imgbox img{max-width:100%;max-height:220px;display:block;object-fit:contain;}
+  .wa-tpl-card{border:1.5px solid var(--border);border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:6px;}
+  .wa-tpl-card.inactive{opacity:.55;}
+  .wa-tpl-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px;}
+  .wa-tpl-name{font-weight:650;font-size:13.5px;}
+  .wa-tpl-meta{font-size:11.5px;color:var(--text-mute,#6b7280);}
+  .wa-tpl-price{font-weight:700;color:var(--orange);font-size:13px;}
+  .wa-err{color:var(--red,#dc2626);font-size:12px;margin-top:6px;}
   label.chk{display:flex;align-items:center;gap:7px;font-size:13px;cursor:pointer;}
 
   /* ---------- Universal table system (sticky actions, pagination, sort) ---------- */
@@ -678,7 +697,7 @@ const Store = {
   data: {
     customers: [], products: [], quotations: [], payments: [],
     followups: [], tasks: [], notes: [], users: [], settings: {}, activityLog: [],
-    gemcrac: [], orders: [], complaints: [], bids: []
+    gemcrac: [], orders: [], complaints: [], bids: [], waTemplates: [], waHistory: []
   },
   defaults(){
     return {
@@ -741,6 +760,8 @@ const Store = {
     this.data.orders = await this.loadKey('jays_orders', []);
     this.data.complaints = await this.loadKey('jays_complaints', []);
     this.data.bids = await this.loadKey('jays_bids', []);
+    this.data.waTemplates = await this.loadKey('jays_watemplates', []);
+    this.data.waHistory = await this.loadKey('jays_wahistory', []);
 
     const settingsFailedBefore = false;
     const settings = await this.loadKey('jays_settings', null);
@@ -1036,6 +1057,7 @@ const NAV = [
     {id:'customers', ic:'&#128100;', label:'Customers'},
     {id:'pipeline', ic:'&#128202;', label:'Sales Pipeline'},
     {id:'quotations', ic:'&#128196;', label:'Quotations'},
+    {id:'whatsapp_rates', ic:'&#128172;', label:'WhatsApp Rate Sender'},
     {id:'orders', ic:'&#128230;', label:'Orders'},
   ]},
   {sec:'Finance', items:[
@@ -1073,6 +1095,7 @@ const PAGE_META = {
   pipeline:['Sales Pipeline','Leads, quotations and orders — one funnel'],
   followupcentre:['Follow-ups','Today, tomorrow, overdue &amp; upcoming — one click away'],
   quotations:['Quotations','Create and track quotes'],
+  whatsapp_rates:['WhatsApp Rate Sender','Prepare and send product rates quickly via WhatsApp'],
   outstanding:['Outstanding','Unpaid balances by party'],
   inventory:['Inventory','Stock levels across the product catalog'],
   bidsearch:['GeM Bid Search','Find, score and track government procurement opportunities'],
@@ -3949,6 +3972,609 @@ const BidSearch = {
 };
 Views.bidsearch = ()=>BidSearch.render();
 
+/* =====================================================================
+   WHATSAPP RATE SENDER
+   Customer -> Template -> Price -> Preview -> WhatsApp.
+
+   Two collections live in the shared Supabase key/value store, so they
+   inherit the same RLS, backup/restore and overwrite-protection as every
+   other CRM collection:
+     Store.data.waTemplates  (jays_watemplates) - reusable rate templates
+     Store.data.waHistory    (jays_wahistory)   - what was actually sent
+
+   TEMPLATE vs DRAFT: selecting a template COPIES it into WhatsAppRates.draft.
+   Editing the draft never touches the stored template - only the explicit
+   "Save Changes to Template" button writes back.
+===================================================================== */
+const WA_DEFAULT_GREETING = 'Hello Sir/Madam,';
+const WA_DEFAULT_CLOSING  = 'Please let us know if you require any further details.';
+
+const WhatsAppRates = {
+  draft: null,
+
+  blankDraft(){
+    return {
+      templateId:'', customerId:'', customerName:'', phone:'',
+      itemName:'', brand:'', model:'', category:'', features:'',
+      price:'', qty:1, unit:'Nos', discount:'',
+      imageUrl:'', includeImageLink:false,
+      greeting: WA_DEFAULT_GREETING,
+      closing: WA_DEFAULT_CLOSING,
+      signature: (Store.data.settings.companyName || 'JAYS TRADING AND BUSINESS SOLUTION')
+    };
+  },
+
+  /* ---------- phone ---------- */
+  normalizePhone(raw){
+    let d = String(raw||'').replace(/\D/g,'');
+    if(!d) return '';
+    if(d.startsWith('00')) d = d.slice(2);
+    const cc = String(Store.data.settings.whatsappCC || '91');
+    if(d.length === 10) d = cc + d;          // bare local number
+    return d;
+  },
+  phoneValid(raw){
+    const d = this.normalizePhone(raw);
+    return d.length >= 11 && d.length <= 15;
+  },
+
+  /* ---------- money ---------- */
+  rupee(n){ return '\u20B9' + (Number(n)||0).toLocaleString('en-IN', {maximumFractionDigits:2}); },
+  lineTotal(){
+    const d = this.draft;
+    const unit = Number(d.price)||0;
+    const qty  = Math.max(Number(d.qty)||1, 1);
+    const disc = Number(d.discount)||0;
+    return Math.max(unit*qty - disc, 0);
+  },
+
+  /* ---------- message ---------- */
+  buildMessage(){
+    const d = this.draft;
+    const esc = v => String(v||'').trim();
+    const lines = [];
+    if(esc(d.greeting)) lines.push(esc(d.greeting), '');
+
+    const title = esc(d.itemName) || 'Product';
+    const sub = [esc(d.brand), esc(d.model)].filter(Boolean).join(' ');
+    lines.push('*' + title.toUpperCase() + '*');
+    if(sub) lines.push(sub);
+    lines.push('');
+
+    const feats = esc(d.features).split('\n').map(x=>x.trim()).filter(Boolean);
+    if(feats.length){
+      lines.push('*Features:*');
+      feats.forEach(f=>lines.push('\u2022 ' + f.replace(/^[-*\u2022]\s*/, '')));
+      lines.push('');
+    }
+
+    const qty  = Math.max(Number(d.qty)||1, 1);
+    const disc = Number(d.discount)||0;
+    const unitPrice = Number(d.price)||0;
+    if(qty > 1 || disc > 0){
+      lines.push('*Rate: ' + this.rupee(unitPrice) + ' / ' + (esc(d.unit)||'Nos') + '*');
+      if(qty > 1) lines.push('Quantity: ' + qty + ' ' + (esc(d.unit)||'Nos'));
+      if(disc > 0) lines.push('Discount: ' + this.rupee(disc));
+      lines.push('*Total: ' + this.rupee(this.lineTotal()) + '*');
+    } else {
+      lines.push('*Price: ' + this.rupee(unitPrice) + ' / ' + (esc(d.unit)||'Nos') + '*');
+    }
+    lines.push('');
+
+    if(d.includeImageLink && /^https?:\/\//i.test(d.imageUrl||'')){
+      lines.push('Product image: ' + d.imageUrl, '');
+    }
+    if(esc(d.closing)) lines.push(esc(d.closing), '');
+    if(esc(d.signature)) lines.push('Regards,', esc(d.signature));
+    return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  },
+
+  /* ---------- draft field updates (no full re-render: keeps focus) ---------- */
+  upd(field, value){
+    if(!this.draft) this.draft = this.blankDraft();
+    this.draft[field] = value;
+    this.refreshPreview();
+  },
+  updNum(field, value){ this.upd(field, value === '' ? '' : Number(value)); },
+  refreshPreview(){
+    const box = document.getElementById('waPreview');
+    if(box) box.innerHTML = this.previewHTML();
+    const tot = document.getElementById('waTotal');
+    if(tot) tot.textContent = this.rupee(this.lineTotal());
+  },
+  previewHTML(){
+    const msg = this.buildMessage();
+    const html = Util.escapeHtml(msg)
+      .replace(/\*([^*\n]+)\*/g, '<b>$1</b>')
+      .replace(/_([^_\n]+)_/g, '<i>$1</i>');
+    const t = new Date().toLocaleTimeString('en-IN', {hour:'2-digit', minute:'2-digit'});
+    return '<div class="wa-bubble">' + html + '<span class="wa-time">' + t + ' \u2713\u2713</span></div>';
+  },
+
+  /* ---------- customer ---------- */
+  onCustomer(c){
+    if(!this.draft) this.draft = this.blankDraft();
+    this.draft.customerId   = c ? c.id : '';
+    this.draft.customerName = c ? c.name : '';
+    this.draft.phone        = c ? (c.phone||'') : '';
+    const p = document.getElementById('wa_phone');
+    if(p) p.value = this.draft.phone;
+    this.refreshPreview();
+  },
+
+  /* ---------- image ---------- */
+  _downscale(file, max, quality){
+    return new Promise((resolve, reject)=>{
+      const r = new FileReader();
+      r.onload = ()=>{
+        const img = new Image();
+        img.onload = ()=>{
+          let w = img.width, h = img.height;
+          if(w > max || h > max){ const s = Math.min(max/w, max/h); w = Math.round(w*s); h = Math.round(h*s); }
+          const cv = document.createElement('canvas');
+          cv.width = w; cv.height = h;
+          cv.getContext('2d').drawImage(img, 0, 0, w, h);
+          resolve(cv.toDataURL('image/jpeg', quality));
+        };
+        img.onerror = ()=>reject(new Error('Not a readable image'));
+        img.src = r.result;
+      };
+      r.onerror = ()=>reject(new Error('Could not read that file'));
+      r.readAsDataURL(file);
+    });
+  },
+  async onImageFile(input){
+    const file = input.files && input.files[0];
+    if(!file) return;
+    if(!/^image\/(jpe?g|png|webp)$/i.test(file.type)){ UI.toast('Use a JPG, PNG or WEBP image'); input.value=''; return; }
+    try{
+      // Downscaled before storing: templates live in the shared JSON store,
+      // so full-resolution photos would bloat every load for the whole team.
+      const dataUrl = await this._downscale(file, 520, 0.72);
+      this.draft.imageUrl = dataUrl;
+      this.renderImageBox();
+      this.refreshPreview();
+    }catch(e){
+      console.error(e);
+      UI.toast('Could not process that image');
+    }
+    input.value = '';
+  },
+  setImageUrl(v){
+    this.draft.imageUrl = (v||'').trim();
+    this.renderImageBox();
+    this.refreshPreview();
+  },
+  removeImage(){
+    this.draft.imageUrl = '';
+    const f = document.getElementById('wa_imageUrl'); if(f) f.value = '';
+    this.renderImageBox();
+    this.refreshPreview();
+  },
+  renderImageBox(){
+    const box = document.getElementById('waImageBox');
+    if(!box) return;
+    const u = this.draft.imageUrl;
+    box.innerHTML = u
+      ? '<img src="' + Util.escapeHtml(u) + '" alt="Product image" onerror="this.parentNode.innerHTML=\'<span class=&quot;hint&quot;>Image could not be loaded</span>\'">'
+      : '<span class="hint">No image selected</span>';
+  },
+
+  /* ---------- pull from CRM product master ---------- */
+  openProductPicker(){
+    const list = Store.data.products.slice().sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+    UI.openModal('Use an existing CRM product',
+      '<div class="field"><input id="waProdSearch" placeholder="Search product or category..." oninput="WhatsAppRates.filterProducts()"></div>' +
+      '<div id="waProdList" style="max-height:340px;overflow:auto;">' + this.productRows(list) + '</div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button>');
+  },
+  productRows(list){
+    if(!list.length) return '<div class="empty-state"><div class="t">No products found</div></div>';
+    return list.slice(0,200).map(p=>
+      '<div class="cust-picker-item" onclick="WhatsAppRates.useProduct(\'' + p.id + '\')">' +
+      '<span class="cpi-name">' + Util.escapeHtml(p.name) + '</span>' +
+      '<span class="cpi-sub">' + Util.escapeHtml(p.category||'') + ' &middot; ' + Util.escapeHtml(p.unit||'') + '</span></div>'
+    ).join('');
+  },
+  filterProducts(){
+    const q = (document.getElementById('waProdSearch').value||'').toLowerCase();
+    const list = Store.data.products.filter(p=>
+      !q || (p.name||'').toLowerCase().includes(q) || (p.category||'').toLowerCase().includes(q));
+    document.getElementById('waProdList').innerHTML = this.productRows(list);
+  },
+  useProduct(id){
+    const p = Store.data.products.find(x=>x.id===id);
+    if(!p) return;
+    // COPY into the draft - the product master record is never touched.
+    this.draft.itemName = p.name || '';
+    this.draft.category = p.category || '';
+    this.draft.unit     = p.unit || 'Nos';
+    if(p.price != null && p.price !== '') this.draft.price = Number(p.price)||'';
+    if(p.description) this.draft.features = p.description;
+    if(p.imageUrl) this.draft.imageUrl = p.imageUrl;
+    this.draft.templateId = '';
+    UI.closeModal();
+    this.render();
+    UI.toast('Loaded "' + p.name + '" into the draft');
+  },
+
+  /* ---------- template library ---------- */
+  openLibrary(){
+    UI.openModal('WhatsApp Rate Templates',
+      '<div class="toolbar" style="margin:0 0 10px;">' +
+        '<div class="search"><span class="ic">&#128269;</span>' +
+        '<input id="waTplSearch" placeholder="Search name, item, brand, model, SKU, category..." oninput="WhatsAppRates.filterTemplates()"></div>' +
+        '<button class="btn btn-primary btn-sm" onclick="WhatsAppRates.openTemplateForm(null)">&#65291; New Template</button>' +
+      '</div><div id="waTplList">' + this.templateCards(Store.data.waTemplates) + '</div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>', true);
+  },
+  filterTemplates(){
+    const q = (document.getElementById('waTplSearch').value||'').toLowerCase();
+    const list = Store.data.waTemplates.filter(t=> !q ||
+      [t.templateName,t.itemName,t.brand,t.model,t.sku,t.category].some(v=>(v||'').toLowerCase().includes(q)));
+    document.getElementById('waTplList').innerHTML = this.templateCards(list);
+  },
+  templateCards(list){
+    if(!list.length) return '<div class="empty-state"><div class="ic">&#128172;</div><div class="t">No templates yet</div>' +
+      '<div class="d">Build a rate below and use "Save as Template" to reuse it in seconds next time.</div></div>';
+    return '<div class="wa-tpl-grid">' + list.map(t=>
+      '<div class="wa-tpl-card' + (t.isActive===false?' inactive':'') + '">' +
+        '<div class="wa-tpl-name">' + Util.escapeHtml(t.templateName||t.itemName||'Untitled') +
+          (t.isActive===false?' <span class="badge badge-gray">Inactive</span>':'') + '</div>' +
+        '<div class="wa-tpl-meta">' + [t.category,t.brand,t.model].filter(Boolean).map(Util.escapeHtml).join(' &middot; ') + '</div>' +
+        '<div class="wa-tpl-price">' + this.rupee(t.defaultPrice) + ' / ' + Util.escapeHtml(t.unit||'Nos') + '</div>' +
+        '<div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:4px;">' +
+          '<button class="btn btn-primary btn-sm" onclick="WhatsAppRates.useTemplate(\'' + t.id + '\')">Use</button>' +
+          '<button class="btn btn-outline btn-sm" onclick="WhatsAppRates.openTemplateForm(\'' + t.id + '\')">Edit</button>' +
+          '<button class="btn btn-outline btn-sm" onclick="WhatsAppRates.duplicateTemplate(\'' + t.id + '\')">Duplicate</button>' +
+          '<button class="btn btn-outline btn-sm" onclick="WhatsAppRates.toggleActive(\'' + t.id + '\')">' + (t.isActive===false?'Activate':'Deactivate') + '</button>' +
+          '<button class="icon-btn" title="Delete" onclick="WhatsAppRates.deleteTemplate(\'' + t.id + '\')">&#128465;</button>' +
+        '</div></div>').join('') + '</div>';
+  },
+  openTemplateForm(id){
+    const rec = id ? Store.data.waTemplates.find(x=>x.id===id) : null;
+    const v = rec || {templateName:'',itemName:'',brand:'',model:'',sku:'',category:'',features:'',
+                      description:'',defaultPrice:'',unit:'Nos',imageUrl:'',notes:'',isActive:true};
+    const cats = [...new Set(Store.data.products.map(p=>p.category).filter(Boolean))].sort();
+    UI.openModal(rec?'Edit Template':'New Template',
+      '<div class="field"><label>Template Name *</label><input id="wt_templateName" value="' + Util.escapeHtml(v.templateName) + '" placeholder="e.g. Twin Bin - Government Rate"></div>' +
+      '<div class="form-row">' +
+        '<div class="field"><label>Item Name *</label><input id="wt_itemName" value="' + Util.escapeHtml(v.itemName) + '"></div>' +
+        '<div class="field"><label>Category</label><input id="wt_category" list="waCatList" value="' + Util.escapeHtml(v.category) + '">' +
+        '<datalist id="waCatList">' + cats.map(c=>'<option value="' + Util.escapeHtml(c) + '">').join('') + '</datalist></div>' +
+      '</div>' +
+      '<div class="form-row">' +
+        '<div class="field"><label>Brand</label><input id="wt_brand" value="' + Util.escapeHtml(v.brand) + '"></div>' +
+        '<div class="field"><label>Model</label><input id="wt_model" value="' + Util.escapeHtml(v.model) + '"></div>' +
+      '</div>' +
+      '<div class="form-row">' +
+        '<div class="field"><label>SKU / Part No.</label><input id="wt_sku" value="' + Util.escapeHtml(v.sku) + '"></div>' +
+        '<div class="field"><label>Unit</label><input id="wt_unit" value="' + Util.escapeHtml(v.unit||'Nos') + '"></div>' +
+      '</div>' +
+      '<div class="field"><label>Default Price</label><input id="wt_defaultPrice" type="number" step="0.01" value="' + (v.defaultPrice===''||v.defaultPrice==null?'':v.defaultPrice) + '"></div>' +
+      '<div class="field"><label>Features (one per line)</label><textarea id="wt_features" rows="5">' + Util.escapeHtml(v.features) + '</textarea></div>' +
+      '<div class="field"><label>Image URL</label><input id="wt_imageUrl" value="' + Util.escapeHtml(v.imageUrl) + '" placeholder="https://..."></div>' +
+      '<div class="field"><label>Notes (internal)</label><textarea id="wt_notes" rows="2">' + Util.escapeHtml(v.notes) + '</textarea></div>' +
+      '<label class="chk"><input type="checkbox" id="wt_isActive" ' + (v.isActive===false?'':'checked') + '> Active</label>',
+      '<button class="btn btn-outline" onclick="WhatsAppRates.openLibrary()">Back</button>' +
+      '<button class="btn btn-primary" onclick="WhatsAppRates.saveTemplate(\'' + (id||'') + '\')">Save Template</button>', true);
+  },
+  async saveTemplate(id){
+    const name = document.getElementById('wt_templateName').value.trim();
+    const item = document.getElementById('wt_itemName').value.trim();
+    if(!name){ UI.toast('Template name is required'); return; }
+    if(!item){ UI.toast('Item name is required'); return; }
+    const dup = Store.data.waTemplates.find(t=>t.id!==id && (t.templateName||'').toLowerCase()===name.toLowerCase());
+    if(dup){ UI.toast('A template with that name already exists'); return; }
+    const now = new Date().toISOString();
+    const existing = id ? Store.data.waTemplates.find(x=>x.id===id) : null;
+    const rec = {
+      id: id || Util.uid('WT', Store.data.waTemplates),
+      templateName: name,
+      itemName: item,
+      brand: document.getElementById('wt_brand').value.trim(),
+      model: document.getElementById('wt_model').value.trim(),
+      sku: document.getElementById('wt_sku').value.trim(),
+      category: document.getElementById('wt_category').value.trim(),
+      features: document.getElementById('wt_features').value,
+      description: existing ? (existing.description||'') : '',
+      defaultPrice: document.getElementById('wt_defaultPrice').value === '' ? '' : Number(document.getElementById('wt_defaultPrice').value),
+      unit: document.getElementById('wt_unit').value.trim() || 'Nos',
+      imageUrl: document.getElementById('wt_imageUrl').value.trim() || (existing ? (existing.imageUrl||'') : ''),
+      notes: document.getElementById('wt_notes').value,
+      isActive: document.getElementById('wt_isActive').checked,
+      createdBy: existing ? existing.createdBy : ((Auth.session && (Auth.session.name||Auth.session.username)) || 'System'),
+      createdAt: existing ? existing.createdAt : now,
+      updatedAt: now
+    };
+    if(id){ const i = Store.data.waTemplates.findIndex(x=>x.id===id); Store.data.waTemplates[i] = rec; }
+    else Store.data.waTemplates.unshift(rec);
+    const ok = await Store.save('waTemplates');
+    if(ok){ await Activity.log(id?'WhatsApp template updated':'WhatsApp template created', name); }
+    this.openLibrary();
+  },
+  useTemplate(id){
+    const t = Store.data.waTemplates.find(x=>x.id===id);
+    if(!t) return;
+    // COPY into draft. Editing price/features below never writes back here.
+    const keep = this.draft || this.blankDraft();
+    this.draft = Object.assign(this.blankDraft(), {
+      customerId: keep.customerId, customerName: keep.customerName, phone: keep.phone,
+      greeting: keep.greeting, closing: keep.closing, signature: keep.signature,
+      templateId: t.id,
+      itemName: t.itemName||'', brand: t.brand||'', model: t.model||'', category: t.category||'',
+      features: t.features||'', price: (t.defaultPrice===''||t.defaultPrice==null)?'':t.defaultPrice,
+      unit: t.unit||'Nos', imageUrl: t.imageUrl||''
+    });
+    UI.closeModal();
+    this.render();
+    UI.toast('Loaded "' + (t.templateName||t.itemName) + '"');
+  },
+  async duplicateTemplate(id){
+    const t = Store.data.waTemplates.find(x=>x.id===id);
+    if(!t) return;
+    let base = (t.templateName||'Template') + ' (copy)', name = base, n = 2;
+    while(Store.data.waTemplates.some(x=>(x.templateName||'').toLowerCase()===name.toLowerCase())){ name = base + ' ' + n; n++; }
+    const now = new Date().toISOString();
+    const copy = Object.assign({}, t, {
+      id: Util.uid('WT', Store.data.waTemplates), templateName: name,
+      createdBy: (Auth.session && (Auth.session.name||Auth.session.username)) || 'System',
+      createdAt: now, updatedAt: now
+    });
+    Store.data.waTemplates.unshift(copy);
+    const ok = await Store.save('waTemplates');
+    if(ok) await Activity.log('WhatsApp template duplicated', name);
+    this.openLibrary();
+  },
+  async toggleActive(id){
+    const t = Store.data.waTemplates.find(x=>x.id===id);
+    if(!t) return;
+    t.isActive = (t.isActive===false);
+    t.updatedAt = new Date().toISOString();
+    await Store.save('waTemplates');
+    this.openLibrary();
+  },
+  async deleteTemplate(id){
+    const t = Store.data.waTemplates.find(x=>x.id===id);
+    if(!t) return;
+    if(!confirm('Delete template "' + (t.templateName||t.itemName) + '"? Deactivate instead if you only want to hide it.')) return;
+    Store.data.waTemplates = Store.data.waTemplates.filter(x=>x.id!==id);
+    const ok = await Store.save('waTemplates');
+    if(ok){ await Activity.log('WhatsApp template deleted', t.templateName||t.itemName); UI.toast('Deleted'); }
+    this.openLibrary();
+  },
+  saveDraftAsTemplate(){
+    const d = this.draft;
+    if(!(d.itemName||'').trim()){ UI.toast('Enter an item name first'); return; }
+    UI.openModal('Save as Template',
+      '<div class="field"><label>Template Name *</label><input id="waNewTplName" value="' + Util.escapeHtml(d.itemName) + '" placeholder="e.g. Twin Bin - Government Rate"></div>' +
+      '<div class="hint">Saves the current item, features, price, unit and image as a reusable template.</div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button>' +
+      '<button class="btn btn-primary" onclick="WhatsAppRates.confirmSaveDraftAsTemplate()">Save</button>');
+  },
+  async confirmSaveDraftAsTemplate(){
+    const name = document.getElementById('waNewTplName').value.trim();
+    if(!name){ UI.toast('Template name is required'); return; }
+    if(Store.data.waTemplates.some(t=>(t.templateName||'').toLowerCase()===name.toLowerCase())){ UI.toast('That template name is already used'); return; }
+    const d = this.draft, now = new Date().toISOString();
+    const rec = {
+      id: Util.uid('WT', Store.data.waTemplates), templateName: name,
+      itemName: d.itemName, brand: d.brand, model: d.model, sku: '', category: d.category,
+      features: d.features, description: '', defaultPrice: d.price===''?'':Number(d.price),
+      unit: d.unit||'Nos', imageUrl: d.imageUrl||'', notes: '', isActive: true,
+      createdBy: (Auth.session && (Auth.session.name||Auth.session.username)) || 'System',
+      createdAt: now, updatedAt: now
+    };
+    Store.data.waTemplates.unshift(rec);
+    const ok = await Store.save('waTemplates');
+    if(ok){ await Activity.log('WhatsApp template created', name); UI.toast('Template saved'); }
+    this.draft.templateId = rec.id;
+    UI.closeModal();
+    this.render();
+  },
+  async saveChangesToTemplate(){
+    const d = this.draft;
+    const t = Store.data.waTemplates.find(x=>x.id===d.templateId);
+    if(!t){ UI.toast('No source template loaded'); return; }
+    if(!confirm('Overwrite the master template "' + (t.templateName||t.itemName) + '" with the current draft values?')) return;
+    Object.assign(t, {
+      itemName:d.itemName, brand:d.brand, model:d.model, category:d.category,
+      features:d.features, defaultPrice: d.price===''?'':Number(d.price),
+      unit:d.unit||'Nos', imageUrl:d.imageUrl||'', updatedAt:new Date().toISOString()
+    });
+    const ok = await Store.save('waTemplates');
+    if(ok){ await Activity.log('WhatsApp template updated', t.templateName||t.itemName); UI.toast('Template updated'); }
+  },
+
+  /* ---------- send ---------- */
+  validate(){
+    const d = this.draft, errs = [];
+    if(!(d.phone||'').trim()) errs.push('Select a customer or enter a phone number.');
+    else if(!this.phoneValid(d.phone)) errs.push('That phone number does not look valid for WhatsApp.');
+    if(!(d.itemName||'').trim()) errs.push('Enter an item name.');
+    if(d.price==='' || d.price===null || isNaN(Number(d.price)) || Number(d.price) <= 0) errs.push('Enter a price greater than zero.');
+    if(!this.buildMessage().trim()) errs.push('The message is empty.');
+    return errs;
+  },
+  showErrors(errs){
+    const box = document.getElementById('waErrors');
+    if(box) box.innerHTML = errs.length ? errs.map(e=>'<div class="wa-err">\u26A0 ' + Util.escapeHtml(e) + '</div>').join('') : '';
+  },
+  copyMessage(){
+    const msg = this.buildMessage();
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(msg).then(()=>UI.toast('Message copied')).catch(()=>UI.toast('Could not copy'));
+    } else UI.toast('Copy is not available in this browser');
+  },
+  async send(){
+    const errs = this.validate();
+    this.showErrors(errs);
+    if(errs.length){ UI.toast('Please fix the highlighted items'); return; }
+    const d = this.draft;
+    const phone = this.normalizePhone(d.phone);
+    const msg = this.buildMessage();
+    window.open('https://wa.me/' + phone + '?text=' + encodeURIComponent(msg), '_blank');
+    await this.saveHistory(phone, msg);
+    if(d.imageUrl){
+      UI.toast('WhatsApp opened \u2014 attach the product image manually before sending');
+    } else {
+      UI.toast('WhatsApp opened with your message');
+    }
+  },
+  async saveHistory(phone, msg){
+    const d = this.draft;
+    const rec = {
+      id: Util.uid('WH', Store.data.waHistory),
+      customerId: d.customerId||'', customerName: d.customerName || '(manual number)',
+      phone: phone, templateId: d.templateId||'',
+      itemName: d.itemName, price: Number(d.price)||0,
+      qty: Math.max(Number(d.qty)||1,1), unit: d.unit||'Nos',
+      discount: Number(d.discount)||0, total: this.lineTotal(),
+      hadImage: !!d.imageUrl, message: msg,
+      sentBy: (Auth.session && (Auth.session.name||Auth.session.username)) || 'System',
+      sentAt: new Date().toISOString()
+    };
+    Store.data.waHistory.unshift(rec);
+    if(Store.data.waHistory.length > 500) Store.data.waHistory.length = 500;
+    await Store.save('waHistory');
+    await Activity.log('WhatsApp rate sent', d.itemName + ' to ' + rec.customerName);
+    const h = document.getElementById('waHistoryBody');
+    if(h) h.innerHTML = this.historyRows();
+  },
+  historyRows(){
+    const list = Store.data.waHistory.slice(0,25);
+    if(!list.length) return '<tr><td colspan="6" class="cell-mute" style="text-align:center;padding:18px;">Nothing sent yet</td></tr>';
+    return list.map(h=>'<tr>' +
+      '<td class="cell-mute">' + Util.fmtDateTime(h.sentAt) + '</td>' +
+      '<td class="cell-main">' + Util.escapeHtml(h.customerName) + '</td>' +
+      '<td class="cell-mute">' + Util.escapeHtml(h.phone) + '</td>' +
+      '<td>' + Util.escapeHtml(h.itemName) + '</td>' +
+      '<td class="mono">' + this.rupee(h.total||h.price) + '</td>' +
+      '<td class="cell-mute">' + Util.escapeHtml(h.sentBy) + '</td></tr>').join('');
+  },
+
+  resetDraft(){
+    const keep = this.draft || this.blankDraft();
+    this.draft = Object.assign(this.blankDraft(), {
+      customerId:keep.customerId, customerName:keep.customerName, phone:keep.phone
+    });
+    this.render();
+  },
+
+  /* ---------- page ---------- */
+  render(){
+    if(!this.draft) this.draft = this.blankDraft();
+    const d = this.draft;
+    const active = Store.data.waTemplates.filter(t=>t.isActive!==false);
+    const srcTpl = d.templateId ? Store.data.waTemplates.find(t=>t.id===d.templateId) : null;
+    const units = [...new Set(Store.data.products.map(p=>p.unit).filter(Boolean))];
+
+    document.getElementById('content').innerHTML =
+      '<div class="wa-grid">' +
+
+        /* ---- left: builder ---- */
+        '<div>' +
+          '<div class="card card-pad" style="margin-bottom:14px;">' +
+            '<div class="wa-step">Step 1 &middot; Recipient</div>' +
+            '<div class="field"><label>Customer</label>' + CustPicker.html('wa', d.customerId, 'waCustomerSelected') + '</div>' +
+            '<div class="form-row">' +
+              '<div class="field"><label>Phone (WhatsApp)</label>' +
+                '<input id="wa_phone" value="' + Util.escapeHtml(d.phone) + '" placeholder="9876543210" oninput="WhatsAppRates.upd(\'phone\', this.value)"></div>' +
+              '<div class="field"><label>Sends to</label>' +
+                '<input value="' + Util.escapeHtml(d.phone ? '+' + this.normalizePhone(d.phone) : '') + '" disabled id="wa_phonePreview"></div>' +
+            '</div>' +
+          '</div>' +
+
+          '<div class="card card-pad" style="margin-bottom:14px;">' +
+            '<div class="wa-step">Step 2 &middot; Product / Template</div>' +
+            '<div class="toolbar" style="margin:0 0 10px;">' +
+              '<button class="btn btn-primary btn-sm" onclick="WhatsAppRates.openLibrary()">&#128194; Template Library (' + active.length + ')</button>' +
+              '<button class="btn btn-outline btn-sm" onclick="WhatsAppRates.openProductPicker()">&#128230; Use CRM Product</button>' +
+              '<div class="toolbar-spacer"></div>' +
+              '<button class="btn btn-outline btn-sm" onclick="WhatsAppRates.resetDraft()">&#8635; Clear</button>' +
+            '</div>' +
+            (srcTpl ? '<div class="hint" style="margin-bottom:10px;">Loaded from template <b>' + Util.escapeHtml(srcTpl.templateName||srcTpl.itemName) +
+                      '</b> &mdash; edits below affect only this message, not the saved template.</div>' : '') +
+            '<div class="form-row">' +
+              '<div class="field"><label>Item Name *</label><input id="wa_itemName" value="' + Util.escapeHtml(d.itemName) + '" oninput="WhatsAppRates.upd(\'itemName\', this.value)"></div>' +
+              '<div class="field"><label>Category</label><input value="' + Util.escapeHtml(d.category) + '" oninput="WhatsAppRates.upd(\'category\', this.value)"></div>' +
+            '</div>' +
+            '<div class="form-row">' +
+              '<div class="field"><label>Brand</label><input value="' + Util.escapeHtml(d.brand) + '" oninput="WhatsAppRates.upd(\'brand\', this.value)"></div>' +
+              '<div class="field"><label>Model</label><input value="' + Util.escapeHtml(d.model) + '" oninput="WhatsAppRates.upd(\'model\', this.value)"></div>' +
+            '</div>' +
+            '<div class="field"><label>Features / Description (one per line)</label>' +
+              '<textarea rows="5" oninput="WhatsAppRates.upd(\'features\', this.value)">' + Util.escapeHtml(d.features) + '</textarea></div>' +
+          '</div>' +
+
+          '<div class="card card-pad" style="margin-bottom:14px;">' +
+            '<div class="wa-step">Step 3 &middot; Image</div>' +
+            '<div class="wa-imgbox" id="waImageBox"></div>' +
+            '<div class="toolbar" style="margin:10px 0 0;">' +
+              '<label class="btn btn-outline btn-sm" style="cursor:pointer;margin:0;">Upload Image' +
+                '<input type="file" accept="image/jpeg,image/png,image/webp" style="display:none;" onchange="WhatsAppRates.onImageFile(this)"></label>' +
+              '<button class="btn btn-outline btn-sm" onclick="WhatsAppRates.removeImage()">Remove</button>' +
+            '</div>' +
+            '<div class="field" style="margin-top:10px;"><label>or Image URL</label>' +
+              '<input id="wa_imageUrl" value="' + Util.escapeHtml(/^data:/.test(d.imageUrl)?'':d.imageUrl) + '" placeholder="https://..." oninput="WhatsAppRates.setImageUrl(this.value)"></div>' +
+            '<label class="chk"><input type="checkbox" ' + (d.includeImageLink?'checked':'') +
+              ' onchange="WhatsAppRates.upd(\'includeImageLink\', this.checked)"> Include image link in the message</label>' +
+            '<div class="hint" style="margin-top:8px;">WhatsApp\'s share link can only pre-fill text &mdash; it cannot attach a file. ' +
+              'Attach the image manually in WhatsApp after the chat opens, or tick the box above to send a public image link instead.</div>' +
+          '</div>' +
+
+          '<div class="card card-pad">' +
+            '<div class="wa-step">Step 4 &middot; Rate</div>' +
+            '<div class="form-row">' +
+              '<div class="field"><label>Price *</label><input type="number" step="0.01" value="' + (d.price===''?'':d.price) + '" oninput="WhatsAppRates.updNum(\'price\', this.value)"></div>' +
+              '<div class="field"><label>Quantity</label><input type="number" min="1" value="' + (d.qty||1) + '" oninput="WhatsAppRates.updNum(\'qty\', this.value)"></div>' +
+            '</div>' +
+            '<div class="form-row">' +
+              '<div class="field"><label>Unit</label><input list="waUnitList" value="' + Util.escapeHtml(d.unit||'Nos') + '" oninput="WhatsAppRates.upd(\'unit\', this.value)">' +
+                '<datalist id="waUnitList">' + units.map(u=>'<option value="' + Util.escapeHtml(u) + '">').join('') + '</datalist></div>' +
+              '<div class="field"><label>Discount (total)</label><input type="number" step="0.01" value="' + (d.discount===''?'':d.discount) + '" oninput="WhatsAppRates.updNum(\'discount\', this.value)"></div>' +
+            '</div>' +
+            '<div class="field"><label>Final Amount</label><input id="waTotal" value="" disabled style="font-weight:700;"></div>' +
+            '<div class="form-row">' +
+              '<div class="field"><label>Greeting</label><input value="' + Util.escapeHtml(d.greeting) + '" oninput="WhatsAppRates.upd(\'greeting\', this.value)"></div>' +
+              '<div class="field"><label>Signature</label><input value="' + Util.escapeHtml(d.signature) + '" oninput="WhatsAppRates.upd(\'signature\', this.value)"></div>' +
+            '</div>' +
+            '<div class="field"><label>Closing Line</label><input value="' + Util.escapeHtml(d.closing) + '" oninput="WhatsAppRates.upd(\'closing\', this.value)"></div>' +
+          '</div>' +
+        '</div>' +
+
+        /* ---- right: preview + send ---- */
+        '<div>' +
+          '<div class="card card-pad" style="position:sticky;top:12px;">' +
+            '<div class="wa-step">Preview</div>' +
+            '<div class="wa-phone"><div id="waPreview"></div></div>' +
+            '<div id="waErrors"></div>' +
+            '<div class="toolbar" style="margin:12px 0 0;flex-wrap:wrap;">' +
+              '<button class="btn btn-primary btn-sm" onclick="WhatsAppRates.send()">&#128172; Send via WhatsApp</button>' +
+              '<button class="btn btn-outline btn-sm" onclick="WhatsAppRates.copyMessage()">Copy</button>' +
+            '</div>' +
+            '<div class="toolbar" style="margin:8px 0 0;flex-wrap:wrap;">' +
+              '<button class="btn btn-outline btn-sm" onclick="WhatsAppRates.saveDraftAsTemplate()">&#11088; Save as Template</button>' +
+              (srcTpl ? '<button class="btn btn-outline btn-sm" onclick="WhatsAppRates.saveChangesToTemplate()">Save Changes to Template</button>' : '') +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+
+      '<div class="card" style="margin-top:16px;"><div class="card-pad" style="padding-bottom:0;">' +
+        '<h3 style="margin:0 0 4px;font-size:14px;">Recent Sends</h3>' +
+        '<div class="hint" style="margin-bottom:10px;">Last 25 rates sent from this module.</div></div>' +
+        '<div class="table-wrap"><table><thead><tr><th>Sent</th><th>Customer</th><th>Phone</th><th>Item</th><th>Amount</th><th>By</th></tr></thead>' +
+        '<tbody id="waHistoryBody">' + this.historyRows() + '</tbody></table></div></div>';
+
+    this.renderImageBox();
+    this.refreshPreview();
+  }
+};
+/* CustPicker callback (global by contract - CustPicker calls window[cbName]) */
+function waCustomerSelected(c){ WhatsAppRates.onCustomer(c); }
+Views.whatsapp_rates = ()=>WhatsAppRates.render();
+
 const Reports = {
   render(){
     const c = Store.data.customers;
@@ -4112,7 +4738,8 @@ const Backup = {
       followups: Store.data.followups, tasks: Store.data.tasks, notes: Store.data.notes,
       users: Store.data.users, settings: Store.data.settings,
       gemcrac: Store.data.gemcrac, orders: Store.data.orders, complaints: Store.data.complaints,
-      bids: Store.data.bids
+      bids: Store.data.bids,
+      waTemplates: Store.data.waTemplates, waHistory: Store.data.waHistory
     };
   },
   downloadJSON(){
@@ -4139,10 +4766,10 @@ const Backup = {
     try{
       const text = await file.text();
       const data = JSON.parse(text);
-      ['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids'].forEach(k=>{
+      ['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory'].forEach(k=>{
         if(data[k]!==undefined) Store.data[k] = data[k];
       });
-      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids'].map(k=>Store.save(k)));
+      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory'].map(k=>Store.save(k)));
       await Activity.log('Data restored', 'Restored from backup file '+file.name);
       UI.toast('Data restored successfully');
       Router.render('backup');
