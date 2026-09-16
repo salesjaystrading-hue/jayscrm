@@ -8,6 +8,8 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 <style>
   :root{
     --navy:#0B1424;
@@ -357,15 +359,11 @@
   @media(max-width:880px){.menu-toggle{display:inline-flex;align-items:center;justify-content:center;}}
 
   textarea{resize:vertical;min-height:70px;}
-  /* ---------- WhatsApp Rate Sender ---------- */
+  /* ---------- Rate / Offer PDF builder ---------- */
   .wa-grid{display:grid;grid-template-columns:1fr 400px;gap:16px;align-items:start;}
   @media(max-width:1100px){ .wa-grid{grid-template-columns:1fr;} }
   .wa-step{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--orange);margin:0 0 10px;}
-  .wa-phone{background:#0b141a;border-radius:14px;padding:14px;min-height:180px;}
-  .wa-bubble{background:#005c4b;color:#e9edef;border-radius:10px;padding:10px 12px;font-size:13.5px;line-height:1.55;
     white-space:pre-wrap;word-break:break-word;position:relative;box-shadow:0 1px 1px rgba(0,0,0,.2);}
-  .wa-bubble b{font-weight:700;}
-  .wa-bubble .wa-time{display:block;text-align:right;font-size:10.5px;opacity:.65;margin-top:6px;}
   .wa-imgbox{border:1.5px dashed var(--border);border-radius:10px;min-height:150px;display:flex;align-items:center;
     justify-content:center;overflow:hidden;background:var(--bg-soft,#faf9f7);}
   .wa-imgbox img{max-width:100%;max-height:220px;display:block;object-fit:contain;}
@@ -697,7 +695,40 @@ const Store = {
   data: {
     customers: [], products: [], quotations: [], payments: [],
     followups: [], tasks: [], notes: [], users: [], settings: {}, activityLog: [],
-    gemcrac: [], orders: [], complaints: [], bids: [], waTemplates: [], waHistory: []
+    gemcrac: [], orders: [], complaints: [], bids: [], waTemplates: [], waHistory: [],
+    rateTemplates: [], rateDocs: [], rateTerms: []
+  },
+  /* One-time, non-destructive lift of the old WhatsApp rate templates into
+     the Rate Template Library. The source waTemplates rows are NEVER deleted
+     or altered - we only copy rows that have not been migrated before,
+     tracked by migratedFrom so re-running is idempotent. */
+  async migrateWaTemplates(){
+    if(this.loadFailed['jays_watemplates'] || this.loadFailed['jays_ratetemplates']) return;
+    const src = this.data.waTemplates || [];
+    if(!src.length) return;
+    const already = new Set(this.data.rateTemplates.map(t=>t.migratedFrom).filter(Boolean));
+    const fresh = src.filter(t=>!already.has(t.id));
+    if(!fresh.length) return;
+    fresh.forEach(t=>{
+      this.data.rateTemplates.push({
+        id: 'RT' + String(this.data.rateTemplates.length + 1).padStart(3,'0'),
+        migratedFrom: t.id,
+        templateName: t.templateName || t.itemName || 'Untitled',
+        itemName: t.itemName || '', brand: t.brand || '', model: t.model || '',
+        sku: t.sku || '', category: t.category || '',
+        specs: t.features || '', description: t.description || '',
+        defaultQty: 1, defaultRate: (t.defaultPrice===''||t.defaultPrice==null) ? '' : Number(t.defaultPrice),
+        discount: '', gstEnabled: false, gstRate: '',
+        unit: t.unit || 'Nos', imageUrl: t.imageUrl || '',
+        warranty: '', deliveryTerms: '', paymentTerms: '', validity: '',
+        notes: t.notes || '', isActive: t.isActive !== false,
+        createdBy: t.createdBy || 'System',
+        createdAt: t.createdAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      });
+    });
+    await this.saveKey('jays_ratetemplates', this.data.rateTemplates);
+    console.info('Migrated ' + fresh.length + ' WhatsApp rate template(s) into the Rate Template Library.');
   },
   defaults(){
     return {
@@ -711,6 +742,10 @@ const Store = {
       ordPrefix: 'ORD-', ordNext: 1,
       cmpPrefix: 'CMP-', cmpNext: 1,
       bidPrefix: 'BID-', bidNext: 1,
+      ratePrefix: 'RO-', rateNext: 1,
+      companyAddress: '', companyWebsite: '', companyGSTIN: '', companyUdyam: '',
+      companyLogo: '', signatureImage: '',
+      defaultGstEnabled: false, defaultGstRate: 18, defaultValidityDays: 15,
       preferredBidKeywords: 'Waste Bin, Twin Bin, Outdoor Gym, Furniture, School Furniture, Water ATM, Incinerator, Raincoat, Safety Equipment',
       preferredBidStates: '', preferredBidDepartments: '', minBidValue: '', maxBidValue: '',
       lastBackupAt: ''
@@ -762,6 +797,10 @@ const Store = {
     this.data.bids = await this.loadKey('jays_bids', []);
     this.data.waTemplates = await this.loadKey('jays_watemplates', []);
     this.data.waHistory = await this.loadKey('jays_wahistory', []);
+    this.data.rateTemplates = await this.loadKey('jays_ratetemplates', []);
+    this.data.rateDocs = await this.loadKey('jays_ratedocs', []);
+    this.data.rateTerms = await this.loadKey('jays_rateterms', []);
+    await this.migrateWaTemplates();
 
     const settingsFailedBefore = false;
     const settings = await this.loadKey('jays_settings', null);
@@ -1057,7 +1096,7 @@ const NAV = [
     {id:'customers', ic:'&#128100;', label:'Customers'},
     {id:'pipeline', ic:'&#128202;', label:'Sales Pipeline'},
     {id:'quotations', ic:'&#128196;', label:'Quotations'},
-    {id:'whatsapp_rates', ic:'&#128172;', label:'WhatsApp Rate Sender'},
+    {id:'rate_docs', ic:'&#128196;', label:'Rate / Offer PDF'},
     {id:'orders', ic:'&#128230;', label:'Orders'},
   ]},
   {sec:'Finance', items:[
@@ -1095,7 +1134,7 @@ const PAGE_META = {
   pipeline:['Sales Pipeline','Leads, quotations and orders — one funnel'],
   followupcentre:['Follow-ups','Today, tomorrow, overdue &amp; upcoming — one click away'],
   quotations:['Quotations','Create and track quotes'],
-  whatsapp_rates:['WhatsApp Rate Sender','Prepare and send product rates quickly via WhatsApp'],
+  rate_docs:['Rate / Offer PDF','Build professional rate offers and export them as PDF'],
   outstanding:['Outstanding','Unpaid balances by party'],
   inventory:['Inventory','Stock levels across the product catalog'],
   bidsearch:['GeM Bid Search','Find, score and track government procurement opportunities'],
@@ -3972,137 +4011,271 @@ const BidSearch = {
 };
 Views.bidsearch = ()=>BidSearch.render();
 
+
 /* =====================================================================
-   WHATSAPP RATE SENDER
-   Customer -> Template -> Price -> Preview -> WhatsApp.
+   RATE / OFFER PDF GENERATOR  (namespace: RatePDF)
+   Customer -> Items -> Optional GST -> Terms -> Preview -> PDF.
 
-   Two collections live in the shared Supabase key/value store, so they
-   inherit the same RLS, backup/restore and overwrite-protection as every
-   other CRM collection:
-     Store.data.waTemplates  (jays_watemplates) - reusable rate templates
-     Store.data.waHistory    (jays_wahistory)   - what was actually sent
+   Collections (shared key/value store, so they inherit the existing RLS,
+   backup/restore and overwrite-protection):
+     Store.data.rateTemplates (jays_ratetemplates) - reusable item templates
+     Store.data.rateDocs      (jays_ratedocs)      - saved documents + revisions
+     Store.data.rateTerms     (jays_rateterms)     - Terms & Conditions library
 
-   TEMPLATE vs DRAFT: selecting a template COPIES it into WhatsAppRates.draft.
-   Editing the draft never touches the stored template - only the explicit
-   "Save Changes to Template" button writes back.
+   GST RULE: gstEnabled defaults to FALSE. When false, no GST column is
+   rendered in the UI or the PDF and no GST figure is computed or stored.
+   TEMPLATE RULE: applying a template COPIES it into the draft item. The
+   stored template is only written by an explicit "Update Template".
 ===================================================================== */
-const WA_DEFAULT_GREETING = 'Hello Sir/Madam,';
-const WA_DEFAULT_CLOSING  = 'Please let us know if you require any further details.';
+const RATE_DOC_TYPES = ['Rate Offer','Commercial Offer','Budgetary Quotation','Product Proposal','Government Offer','Price Estimate'];
+const RATE_DOC_STATUSES = ['Draft','Generated','Final','Cancelled'];
+const RATE_THEMES = ['Corporate','Modern','Government Procurement','Minimal','Premium'];
+const RATE_THEME_COLORS = {
+  'Corporate':[194,65,12], 'Modern':[37,99,235], 'Government Procurement':[22,101,52],
+  'Minimal':[55,65,81], 'Premium':[91,33,182]
+};
+const DEFAULT_RATE_TERMS = [
+  {title:'Price Validity', body:'Prices are valid for 15 days from the date of this offer.'},
+  {title:'Delivery Period', body:'Delivery within 2-3 weeks from the date of confirmed order.'},
+  {title:'Payment Terms', body:'100% payment against delivery unless otherwise agreed in writing.'},
+  {title:'Warranty', body:'Standard manufacturer warranty applies to all supplied items.'},
+  {title:'Taxes', body:'Taxes extra as applicable unless explicitly included above.'}
+];
 
-const WhatsAppRates = {
+const RatePDF = {
   draft: null,
 
-  blankDraft(){
+  /* ---------------- draft model ---------------- */
+  blankItem(){
     return {
-      templateId:'', customerId:'', customerName:'', phone:'',
-      itemName:'', brand:'', model:'', category:'', features:'',
-      price:'', qty:1, unit:'Nos', discount:'',
-      imageUrl:'', includeImageLink:false,
-      greeting: WA_DEFAULT_GREETING,
-      closing: WA_DEFAULT_CLOSING,
-      signature: (Store.data.settings.companyName || 'JAYS TRADING AND BUSINESS SOLUTION')
+      uid: 'I' + Date.now() + Math.floor(Math.random()*1000),
+      templateId:'', itemName:'', brand:'', model:'', category:'',
+      specs:'', qty:1, unit:'Nos', rate:'', discount:'',
+      gstRate:'', imageUrl:''
+    };
+  },
+  blankDraft(){
+    const s = Store.data.settings || {};
+    const days = Number(s.defaultValidityDays)||15;
+    const validTo = new Date(Date.now() + days*86400000).toISOString().slice(0,10);
+    return {
+      id:'', revision:0, parentId:'', status:'Draft',
+      docType:'Rate Offer', theme:'Corporate',
+      docNumber:'', docDate: Util.todayISO(), validUntil: validTo,
+      reference:'', customerRef:'', subject:'',
+      salesperson: (Auth.session && (Auth.session.name||Auth.session.username)) || '',
+      customerId:'', customerName:'', contactPerson:'', phone:'', email:'',
+      address:'', district:'', gstin:'',
+      items:[ this.blankItem() ],
+      // GST is OFF unless the user turns it on.
+      gstEnabled: !!(s.defaultGstEnabled),
+      gstMode:'exclusive', gstScope:'intra', gstRate: Number(s.defaultGstRate)||18,
+      termIds:[], extraNotes:'',
+      createdBy:(Auth.session && (Auth.session.name||Auth.session.username)) || 'System',
+      createdAt:'', updatedAt:''
     };
   },
 
-  /* ---------- phone ---------- */
-  normalizePhone(raw){
-    let d = String(raw||'').replace(/\D/g,'');
-    if(!d) return '';
-    if(d.startsWith('00')) d = d.slice(2);
-    const cc = String(Store.data.settings.whatsappCC || '91');
-    if(d.length === 10) d = cc + d;          // bare local number
-    return d;
-  },
-  phoneValid(raw){
-    const d = this.normalizePhone(raw);
-    return d.length >= 11 && d.length <= 15;
-  },
-
-  /* ---------- money ---------- */
-  rupee(n){ return '\u20B9' + (Number(n)||0).toLocaleString('en-IN', {maximumFractionDigits:2}); },
-  lineTotal(){
+  /* ---------------- money maths ----------------
+     Every figure here is derived. When gstEnabled is false the function
+     returns zeroed tax fields and callers simply never render them. */
+  num(v){ const n = Number(v); return isFinite(n) ? n : 0; },
+  itemBase(it){ return Math.max(this.num(it.qty)*this.num(it.rate) - this.num(it.discount), 0); },
+  itemGstRate(it){
     const d = this.draft;
-    const unit = Number(d.price)||0;
-    const qty  = Math.max(Number(d.qty)||1, 1);
-    const disc = Number(d.discount)||0;
-    return Math.max(unit*qty - disc, 0);
+    if(!d.gstEnabled) return 0;
+    return it.gstRate === '' || it.gstRate === null || it.gstRate === undefined
+      ? this.num(d.gstRate) : this.num(it.gstRate);
   },
-
-  /* ---------- message ---------- */
-  buildMessage(){
+  totals(){
     const d = this.draft;
-    const esc = v => String(v||'').trim();
-    const lines = [];
-    if(esc(d.greeting)) lines.push(esc(d.greeting), '');
-
-    const title = esc(d.itemName) || 'Product';
-    const sub = [esc(d.brand), esc(d.model)].filter(Boolean).join(' ');
-    lines.push('*' + title.toUpperCase() + '*');
-    if(sub) lines.push(sub);
-    lines.push('');
-
-    const feats = esc(d.features).split('\n').map(x=>x.trim()).filter(Boolean);
-    if(feats.length){
-      lines.push('*Features:*');
-      feats.forEach(f=>lines.push('\u2022 ' + f.replace(/^[-*\u2022]\s*/, '')));
-      lines.push('');
+    let gross = 0, discount = 0, taxable = 0, tax = 0;
+    d.items.forEach(it=>{
+      gross    += this.num(it.qty) * this.num(it.rate);
+      discount += this.num(it.discount);
+      const base = this.itemBase(it);
+      if(!d.gstEnabled){ taxable += base; return; }
+      const r = this.itemGstRate(it);
+      if(d.gstMode === 'inclusive'){
+        const net = base / (1 + r/100);
+        taxable += net; tax += base - net;
+      } else {
+        taxable += base; tax += base * r/100;
+      }
+    });
+    const t = {
+      gross, discount, taxable, tax,
+      cgst: 0, sgst: 0, igst: 0,
+      grand: d.gstEnabled ? taxable + tax : taxable
+    };
+    if(d.gstEnabled){
+      if(d.gstScope === 'inter') t.igst = tax;
+      else { t.cgst = tax/2; t.sgst = tax/2; }
     }
+    return t;
+  },
+  money(n){ return Number(n||0).toLocaleString('en-IN',{minimumFractionDigits:2, maximumFractionDigits:2}); },
+  rupee(n){ return '\u20B9' + this.money(n); },
 
-    const qty  = Math.max(Number(d.qty)||1, 1);
-    const disc = Number(d.discount)||0;
-    const unitPrice = Number(d.price)||0;
-    if(qty > 1 || disc > 0){
-      lines.push('*Rate: ' + this.rupee(unitPrice) + ' / ' + (esc(d.unit)||'Nos') + '*');
-      if(qty > 1) lines.push('Quantity: ' + qty + ' ' + (esc(d.unit)||'Nos'));
-      if(disc > 0) lines.push('Discount: ' + this.rupee(disc));
-      lines.push('*Total: ' + this.rupee(this.lineTotal()) + '*');
-    } else {
-      lines.push('*Price: ' + this.rupee(unitPrice) + ' / ' + (esc(d.unit)||'Nos') + '*');
+  /* Indian-system amount in words (lakh / crore). */
+  words(amount){
+    const ones = ['','One','Two','Three','Four','Five','Six','Seven','Eight','Nine','Ten','Eleven','Twelve',
+      'Thirteen','Fourteen','Fifteen','Sixteen','Seventeen','Eighteen','Nineteen'];
+    const tens = ['','','Twenty','Thirty','Forty','Fifty','Sixty','Seventy','Eighty','Ninety'];
+    const two = n => n < 20 ? ones[n] : (tens[Math.floor(n/10)] + (n%10 ? ' ' + ones[n%10] : ''));
+    const three = n => (n >= 100 ? ones[Math.floor(n/100)] + ' Hundred' + (n%100 ? ' ' + two(n%100) : '') : two(n));
+    let n = Math.floor(Math.abs(Number(amount)||0));
+    const paise = Math.round((Math.abs(Number(amount)||0) - n) * 100);
+    if(n === 0 && !paise) return 'Zero Rupees Only';
+    let out = '';
+    const crore = Math.floor(n/10000000); n %= 10000000;
+    const lakh  = Math.floor(n/100000);   n %= 100000;
+    const thou  = Math.floor(n/1000);     n %= 1000;
+    if(crore) out += three(crore) + ' Crore ';
+    if(lakh)  out += three(lakh)  + ' Lakh ';
+    if(thou)  out += three(thou)  + ' Thousand ';
+    if(n)     out += three(n);
+    out = out.trim() + ' Rupees';
+    if(paise) out += ' and ' + two(paise) + ' Paise';
+    return out.replace(/\s+/g,' ') + ' Only';
+  },
+
+  /* ---------------- field updates (targeted re-render keeps focus) ---------------- */
+  upd(field, val){ this.draft[field] = val; this.refreshTotals(); },
+  updItem(uid, field, val){
+    const it = this.draft.items.find(x=>x.uid===uid);
+    if(!it) return;
+    it[field] = val;                       // draft only - never the template
+    this.refreshTotals();
+  },
+  addItem(){ this.draft.items.push(this.blankItem()); this.render(); },
+  removeItem(uid){
+    if(this.draft.items.length <= 1){ UI.toast('A document needs at least one item'); return; }
+    this.draft.items = this.draft.items.filter(x=>x.uid!==uid);
+    this.render();
+  },
+  moveItem(uid, dir){
+    const i = this.draft.items.findIndex(x=>x.uid===uid);
+    const j = i + dir;
+    if(i<0 || j<0 || j>=this.draft.items.length) return;
+    const a = this.draft.items;
+    [a[i], a[j]] = [a[j], a[i]];
+    this.render();
+  },
+  toggleGst(on){
+    this.draft.gstEnabled = !!on;          // OFF => nothing GST is computed or shown
+    this.render();
+  },
+  refreshTotals(){
+    const box = document.getElementById('rpTotals');
+    if(box) box.innerHTML = this.totalsHTML();
+  },
+  totalsHTML(){
+    const d = this.draft, t = this.totals();
+    const row = (label, val, strong)=>
+      '<div style="display:flex;justify-content:space-between;padding:3px 0;' + (strong?'font-weight:700;border-top:1.5px solid var(--border);margin-top:4px;padding-top:6px;':'') + '">' +
+      '<span>' + Util.escapeHtml(label) + '</span><span class="mono">' + this.rupee(val) + '</span></div>';
+    let h = row('Subtotal', t.gross);
+    if(t.discount > 0) h += row('Discount', -t.discount);
+    if(d.gstEnabled){
+      h += row('Taxable Amount', t.taxable);
+      if(d.gstScope === 'inter') h += row('IGST', t.igst);
+      else { h += row('CGST', t.cgst); h += row('SGST', t.sgst); }
     }
-    lines.push('');
-
-    if(d.includeImageLink && /^https?:\/\//i.test(d.imageUrl||'')){
-      lines.push('Product image: ' + d.imageUrl, '');
-    }
-    if(esc(d.closing)) lines.push(esc(d.closing), '');
-    if(esc(d.signature)) lines.push('Regards,', esc(d.signature));
-    return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    h += row('Grand Total', t.grand, true);
+    h += '<div class="hint" style="margin-top:8px;font-style:italic;">' + Util.escapeHtml(this.words(t.grand)) + '</div>';
+    return h;
   },
 
-  /* ---------- draft field updates (no full re-render: keeps focus) ---------- */
-  upd(field, value){
-    if(!this.draft) this.draft = this.blankDraft();
-    this.draft[field] = value;
-    this.refreshPreview();
-  },
-  updNum(field, value){ this.upd(field, value === '' ? '' : Number(value)); },
-  refreshPreview(){
-    const box = document.getElementById('waPreview');
-    if(box) box.innerHTML = this.previewHTML();
-    const tot = document.getElementById('waTotal');
-    if(tot) tot.textContent = this.rupee(this.lineTotal());
-  },
-  previewHTML(){
-    const msg = this.buildMessage();
-    const html = Util.escapeHtml(msg)
-      .replace(/\*([^*\n]+)\*/g, '<b>$1</b>')
-      .replace(/_([^_\n]+)_/g, '<i>$1</i>');
-    const t = new Date().toLocaleTimeString('en-IN', {hour:'2-digit', minute:'2-digit'});
-    return '<div class="wa-bubble">' + html + '<span class="wa-time">' + t + ' \u2713\u2713</span></div>';
-  },
-
-  /* ---------- customer ---------- */
+  /* ---------------- customer ---------------- */
   onCustomer(c){
-    if(!this.draft) this.draft = this.blankDraft();
-    this.draft.customerId   = c ? c.id : '';
-    this.draft.customerName = c ? c.name : '';
-    this.draft.phone        = c ? (c.phone||'') : '';
-    const p = document.getElementById('wa_phone');
-    if(p) p.value = this.draft.phone;
-    this.refreshPreview();
+    const d = this.draft;
+    d.customerId   = c ? c.id : '';
+    d.customerName = c ? (c.name||'') : '';
+    d.phone        = c ? (c.phone||'') : '';
+    d.email        = c ? (c.email||'') : '';
+    d.district     = c ? (c.district||'') : '';
+    d.address      = c ? [c.panchayath, c.district].filter(Boolean).join(', ') : '';
+    ['customerName','phone','email','address'].forEach(f=>{
+      const el = document.getElementById('rp_' + f);
+      if(el) el.value = d[f] || '';
+    });
+  },
+  /* Creates a real record in the existing Customer Master - no parallel store. */
+  openNewCustomer(){
+    UI.openModal('Add New Customer',
+      '<div class="form-row">' +
+        '<div class="field"><label>Name *</label><input id="rpc_name"></div>' +
+        '<div class="field"><label>Phone *</label><input id="rpc_phone"></div>' +
+      '</div>' +
+      '<div class="form-row">' +
+        '<div class="field"><label>Email</label><input id="rpc_email"></div>' +
+        '<div class="field"><label>District</label><input id="rpc_district"></div>' +
+      '</div>' +
+      '<div class="field"><label>Area / Panchayath</label><input id="rpc_panchayath"></div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button>' +
+      '<button class="btn btn-primary" onclick="RatePDF.saveNewCustomer()">Add Customer</button>');
+  },
+  async saveNewCustomer(){
+    const name = document.getElementById('rpc_name').value.trim();
+    const phone = document.getElementById('rpc_phone').value.trim();
+    if(!name || !phone){ UI.toast('Name and phone are required'); return; }
+    const rec = {
+      id: Util.uid('C', Store.data.customers), name, phone,
+      email: document.getElementById('rpc_email').value.trim(),
+      district: document.getElementById('rpc_district').value.trim(),
+      panchayath: document.getElementById('rpc_panchayath').value.trim(),
+      assignedTo: (Auth.session && (Auth.session.name||Auth.session.username)) || '',
+      status:'New Lead', lastContact: Util.todayISO(), createdDate: Util.todayISO(),
+      timeline:[{id:'T'+Date.now(), date:Util.todayISO(), stage:'First Contact',
+                 note:'Added while preparing a rate offer',
+                 by:(Auth.session && (Auth.session.name||Auth.session.username)) || 'System'}]
+    };
+    Store.data.customers.unshift(rec);
+    const ok = await Store.save('customers');
+    if(ok) await Activity.log('Customer created', name + ' (from Rate Offer)');
+    UI.closeModal();
+    this.onCustomer(rec);
+    this.render();
+    const inp = document.getElementById('rp_custSearch');
+    if(inp) inp.value = rec.name + ' \u2014 ' + (rec.panchayath||'\u2014') + ' \u2014 ' + rec.phone;
+    const hid = document.getElementById('rp_customerId');
+    if(hid) hid.value = rec.id;
   },
 
-  /* ---------- image ---------- */
+  /* ---------------- product master + images ---------------- */
+  openProductPicker(uid){
+    const rows = list => list.length
+      ? list.slice(0,200).map(p=>'<div class="cust-picker-item" onclick="RatePDF.useProduct(\'' + uid + '\',\'' + p.id + '\')">' +
+          '<span class="cpi-name">' + Util.escapeHtml(p.name) + '</span>' +
+          '<span class="cpi-sub">' + Util.escapeHtml(p.category||'') + ' &middot; ' + Util.escapeHtml(p.unit||'') + '</span></div>').join('')
+      : '<div class="empty-state"><div class="t">No products found</div></div>';
+    window.__rpProdRows = rows;
+    UI.openModal('Use a product from Product Master',
+      '<div class="field"><input id="rpProdSearch" placeholder="Search product or category..." oninput="RatePDF.filterProducts(\'' + uid + '\')"></div>' +
+      '<div id="rpProdList" style="max-height:340px;overflow:auto;">' + rows(Store.data.products) + '</div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button>');
+  },
+  filterProducts(uid){
+    const q = (document.getElementById('rpProdSearch').value||'').toLowerCase();
+    const list = Store.data.products.filter(p=>!q ||
+      (p.name||'').toLowerCase().includes(q) || (p.category||'').toLowerCase().includes(q));
+    document.getElementById('rpProdList').innerHTML = window.__rpProdRows(list);
+  },
+  useProduct(uid, pid){
+    const p = Store.data.products.find(x=>x.id===pid);
+    const it = this.draft.items.find(x=>x.uid===uid);
+    if(!p || !it) return;
+    it.itemName = p.name || '';            // copy into the draft item
+    it.category = p.category || '';
+    it.unit     = p.unit || 'Nos';
+    if(p.price != null && p.price !== '') it.rate = Number(p.price)||'';
+    if(p.description) it.specs = p.description;
+    if(p.imageUrl) it.imageUrl = p.imageUrl;
+    it.templateId = '';
+    UI.closeModal();
+    this.render();
+  },
   _downscale(file, max, quality){
     return new Promise((resolve, reject)=>{
       const r = new FileReader();
@@ -4110,10 +4283,9 @@ const WhatsAppRates = {
         const img = new Image();
         img.onload = ()=>{
           let w = img.width, h = img.height;
-          if(w > max || h > max){ const s = Math.min(max/w, max/h); w = Math.round(w*s); h = Math.round(h*s); }
-          const cv = document.createElement('canvas');
-          cv.width = w; cv.height = h;
-          cv.getContext('2d').drawImage(img, 0, 0, w, h);
+          if(w>max||h>max){ const s = Math.min(max/w, max/h); w=Math.round(w*s); h=Math.round(h*s); }
+          const cv = document.createElement('canvas'); cv.width=w; cv.height=h;
+          cv.getContext('2d').drawImage(img,0,0,w,h);
           resolve(cv.toDataURL('image/jpeg', quality));
         };
         img.onerror = ()=>reject(new Error('Not a readable image'));
@@ -4123,457 +4295,913 @@ const WhatsAppRates = {
       r.readAsDataURL(file);
     });
   },
-  async onImageFile(input){
-    const file = input.files && input.files[0];
-    if(!file) return;
-    if(!/^image\/(jpe?g|png|webp)$/i.test(file.type)){ UI.toast('Use a JPG, PNG or WEBP image'); input.value=''; return; }
+  async onItemImage(uid, input){
+    const f = input.files && input.files[0];
+    if(!f) return;
+    if(!/^image\/(jpe?g|png|webp)$/i.test(f.type)){ UI.toast('Use a JPG, PNG or WEBP image'); input.value=''; return; }
     try{
-      // Downscaled before storing: templates live in the shared JSON store,
-      // so full-resolution photos would bloat every load for the whole team.
-      const dataUrl = await this._downscale(file, 520, 0.72);
-      this.draft.imageUrl = dataUrl;
-      this.renderImageBox();
-      this.refreshPreview();
-    }catch(e){
-      console.error(e);
-      UI.toast('Could not process that image');
-    }
+      // Downscaled before storing: documents live in the shared JSON store.
+      const url = await this._downscale(f, 420, 0.7);
+      this.updItem(uid, 'imageUrl', url);
+      this.render();
+    }catch(e){ console.error(e); UI.toast('Could not process that image'); }
     input.value = '';
   },
-  setImageUrl(v){
-    this.draft.imageUrl = (v||'').trim();
-    this.renderImageBox();
-    this.refreshPreview();
+
+  /* ---------------- PDF engine (jsPDF + AutoTable) ---------------- */
+  libsReady(){
+    return !!(window.jspdf && window.jspdf.jsPDF && typeof window.jspdf.jsPDF.API.autoTable === 'function');
   },
-  removeImage(){
-    this.draft.imageUrl = '';
-    const f = document.getElementById('wa_imageUrl'); if(f) f.value = '';
-    this.renderImageBox();
-    this.refreshPreview();
-  },
-  renderImageBox(){
-    const box = document.getElementById('waImageBox');
-    if(!box) return;
-    const u = this.draft.imageUrl;
-    box.innerHTML = u
-      ? '<img src="' + Util.escapeHtml(u) + '" alt="Product image" onerror="this.parentNode.innerHTML=\'<span class=&quot;hint&quot;>Image could not be loaded</span>\'">'
-      : '<span class="hint">No image selected</span>';
+  buildPDF(){
+    if(!this.libsReady()) throw new Error('PDF libraries are still loading. Check your connection and try again.');
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({unit:'mm', format:'a4'});
+    const d = this.draft, s = Store.data.settings || {}, t = this.totals();
+    const accent = RATE_THEME_COLORS[d.theme] || RATE_THEME_COLORS.Corporate;
+    const PW = doc.internal.pageSize.getWidth();
+    const PH = doc.internal.pageSize.getHeight();
+    const M = 14;
+    const minimal = d.theme === 'Minimal';
+
+    /* --- header (drawn on page 1; repeated as a slim band on later pages) --- */
+    let y = M;
+    if(!minimal){
+      doc.setFillColor(accent[0],accent[1],accent[2]);
+      doc.rect(0,0,PW,3,'F');
+      y = M + 2;
+    }
+    if(s.companyLogo){
+      try{ doc.addImage(s.companyLogo,'JPEG',M,y,24,24); }catch(e){ console.warn('logo skipped',e); }
+    }
+    const tx = s.companyLogo ? M+28 : M;
+    doc.setFont('helvetica','bold'); doc.setFontSize(15);
+    doc.setTextColor(accent[0],accent[1],accent[2]);
+    doc.text(String(s.companyName||'JAYS TRADING AND BUSINESS SOLUTION'), tx, y+6);
+    doc.setFont('helvetica','normal'); doc.setFontSize(8.5); doc.setTextColor(70);
+    let hy = y + 11;
+    const cLines = [
+      s.companyAddress || '',
+      [s.companyPhone && ('Ph: '+s.companyPhone), s.companyEmail && ('Email: '+s.companyEmail)].filter(Boolean).join('   '),
+      [s.companyGSTIN && ('GSTIN: '+s.companyGSTIN), s.companyUdyam && ('Udyam: '+s.companyUdyam), s.companyWebsite].filter(Boolean).join('   ')
+    ].filter(x=>String(x).trim());
+    cLines.forEach(l=>{ doc.text(String(l), tx, hy); hy += 4; });
+
+    y = Math.max(hy + 3, y + 28);
+    doc.setDrawColor(accent[0],accent[1],accent[2]); doc.setLineWidth(0.5);
+    doc.line(M, y, PW-M, y);
+    y += 7;
+
+    /* --- document title --- */
+    doc.setFont('helvetica','bold'); doc.setFontSize(12.5); doc.setTextColor(30);
+    doc.text(String(d.docType||'Rate Offer').toUpperCase(), PW/2, y, {align:'center'});
+    y += 7;
+
+    /* --- meta + customer, side by side --- */
+    doc.setFontSize(8.5);
+    const meta = [
+      ['Document No', d.docNumber || '(draft)'],
+      ['Date', Util.fmtDate(d.docDate)],
+      ['Valid Until', d.validUntil ? Util.fmtDate(d.validUntil) : '-'],
+      ['Reference', d.reference || '-'],
+      ['Your Ref', d.customerRef || '-'],
+      ['Prepared By', d.salesperson || '-']
+    ].filter(r=>r[1] && r[1] !== '-' || ['Document No','Date'].includes(r[0]));
+    const cust = [
+      ['Customer', d.customerName || '-'],
+      ['Contact', d.contactPerson || '-'],
+      ['Phone', d.phone || '-'],
+      ['Email', d.email || '-'],
+      ['Address', d.address || '-'],
+      ['GSTIN', d.gstin || '-']
+    ].filter(r=>r[1] && r[1] !== '-' || r[0]==='Customer');
+
+    const colW = (PW - M*2 - 6) / 2;
+    const boxTop = y;
+    doc.setFont('helvetica','bold'); doc.setTextColor(accent[0],accent[1],accent[2]);
+    doc.text('OFFER TO', M+2, y+4);
+    doc.text('DOCUMENT DETAILS', M+colW+8, y+4);
+    doc.setFont('helvetica','normal'); doc.setTextColor(50);
+    let ly = y + 9, ry = y + 9;
+    cust.forEach(r=>{
+      const wrapped = doc.splitTextToSize(String(r[0]) + ': ' + String(r[1]), colW - 4);
+      wrapped.forEach(w=>{ doc.text(w, M+2, ly); ly += 4.2; });
+    });
+    meta.forEach(r=>{
+      doc.text(String(r[0]) + ': ' + String(r[1]), M+colW+8, ry); ry += 4.2;
+    });
+    y = Math.max(ly, ry) + 2;
+    if(!minimal){
+      doc.setDrawColor(215); doc.setLineWidth(0.2);
+      doc.rect(M, boxTop, colW, y-boxTop-1);
+      doc.rect(M+colW+6, boxTop, colW, y-boxTop-1);
+    }
+    y += 4;
+
+    if(d.subject){
+      doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(30);
+      const sub = doc.splitTextToSize('Subject: ' + d.subject, PW - M*2);
+      sub.forEach(l=>{ doc.text(l, M, y); y += 4.5; });
+      y += 2;
+    }
+
+    /* --- items table. GST columns exist ONLY when gstEnabled. --- */
+    const gst = d.gstEnabled;
+    const head = gst
+      ? [['#','Description','Qty','Unit','Rate','Disc','GST%','Amount']]
+      : [['#','Description','Qty','Unit','Rate','Disc','Amount']];
+    const body = d.items.map((it,i)=>{
+      let desc = it.itemName || '-';
+      const sub = [it.brand, it.model].filter(Boolean).join(' ');
+      if(sub) desc += '\n' + sub;
+      const specs = String(it.specs||'').split('\n').map(x=>x.trim()).filter(Boolean);
+      if(specs.length) desc += '\n' + specs.map(x=>'\u2022 ' + x).join('\n');
+      const base = this.itemBase(it);
+      const row = [String(i+1), desc, String(this.num(it.qty)), it.unit||'Nos',
+                   this.money(it.rate), this.num(it.discount) ? this.money(it.discount) : '-'];
+      if(gst) row.push(String(this.itemGstRate(it)) + '%');
+      row.push(this.money(base));
+      return row;
+    });
+
+    const colStyles = gst
+      ? {0:{cellWidth:8,halign:'center'},2:{cellWidth:12,halign:'right'},3:{cellWidth:14},
+         4:{cellWidth:22,halign:'right'},5:{cellWidth:18,halign:'right'},
+         6:{cellWidth:14,halign:'right'},7:{cellWidth:24,halign:'right'}}
+      : {0:{cellWidth:8,halign:'center'},2:{cellWidth:14,halign:'right'},3:{cellWidth:16},
+         4:{cellWidth:26,halign:'right'},5:{cellWidth:20,halign:'right'},
+         6:{cellWidth:28,halign:'right'}};
+
+    doc.autoTable({
+      head, body, startY:y, margin:{left:M,right:M,top:22,bottom:20},
+      theme: minimal ? 'plain' : 'grid',
+      styles:{fontSize:8, cellPadding:2, overflow:'linebreak', valign:'top', lineColor:[210,210,210], lineWidth:0.15},
+      headStyles:{fillColor: minimal ? [245,245,245] : accent, textColor: minimal ? 40 : 255,
+                  fontStyle:'bold', fontSize:8.2, halign:'left'},
+      alternateRowStyles: minimal ? {} : {fillColor:[250,250,250]},
+      columnStyles: colStyles,
+      showHead:'everyPage',            // repeating header on every page
+      rowPageBreak:'auto'
+    });
+    y = doc.lastAutoTable.finalY + 6;
+
+    /* --- summary, right aligned; tax rows only when GST is on --- */
+    const sumRows = [['Subtotal', this.money(t.gross)]];
+    if(t.discount > 0) sumRows.push(['Discount', '-' + this.money(t.discount)]);
+    if(gst){
+      sumRows.push(['Taxable Amount', this.money(t.taxable)]);
+      if(d.gstScope === 'inter') sumRows.push(['IGST', this.money(t.igst)]);
+      else { sumRows.push(['CGST', this.money(t.cgst)]); sumRows.push(['SGST', this.money(t.sgst)]); }
+    }
+    sumRows.push(['Grand Total', this.money(t.grand)]);
+
+    if(y > PH - 55){ doc.addPage(); y = 24; }
+    const sumW = 76;
+    doc.autoTable({
+      body: sumRows, startY: y, margin:{left: PW - M - sumW, right: M},
+      theme:'plain', tableWidth: sumW,
+      styles:{fontSize:8.6, cellPadding:1.7},
+      columnStyles:{0:{cellWidth:44}, 1:{cellWidth:32, halign:'right'}},
+      didParseCell: hook => {
+        if(hook.row.index === sumRows.length-1){
+          hook.cell.styles.fontStyle = 'bold';
+          hook.cell.styles.fontSize = 9.6;
+          hook.cell.styles.textColor = accent;
+        }
+      }
+    });
+    y = doc.lastAutoTable.finalY + 5;
+
+    if(y > PH - 40){ doc.addPage(); y = 24; }
+    doc.setFont('helvetica','bold'); doc.setFontSize(8.4); doc.setTextColor(40);
+    const wWords = doc.splitTextToSize('Amount in Words: ' + this.words(t.grand), PW - M*2);
+    wWords.forEach(l=>{ doc.text(l, M, y); y += 4.3; });
+    doc.setFont('helvetica','normal');
+    y += 4;
+
+    /* --- terms --- */
+    const terms = Store.data.rateTerms.filter(x=>d.termIds.includes(x.id) && x.isActive !== false);
+    if(terms.length || d.extraNotes){
+      if(y > PH - 45){ doc.addPage(); y = 24; }
+      doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(accent[0],accent[1],accent[2]);
+      doc.text('TERMS & CONDITIONS', M, y); y += 5;
+      doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(60);
+      terms.forEach((tm,i)=>{
+        const line = (i+1) + '. ' + tm.title + ': ' + tm.body;
+        const wrapped = doc.splitTextToSize(line, PW - M*2);
+        wrapped.forEach(w=>{
+          if(y > PH - 28){ doc.addPage(); y = 24; }
+          doc.text(w, M, y); y += 4;
+        });
+      });
+      if(d.extraNotes){
+        y += 2;
+        doc.splitTextToSize(d.extraNotes, PW - M*2).forEach(w=>{
+          if(y > PH - 28){ doc.addPage(); y = 24; }
+          doc.text(w, M, y); y += 4;
+        });
+      }
+      y += 4;
+    }
+
+    /* --- signature / stamp --- */
+    if(y > PH - 34){ doc.addPage(); y = 24; }
+    const sx = PW - M - 58;
+    doc.setFontSize(8.4); doc.setTextColor(40);
+    doc.text('For ' + String(s.companyName||'JAYS TRADING AND BUSINESS SOLUTION'), sx, y);
+    if(s.signatureImage){
+      try{ doc.addImage(s.signatureImage,'JPEG', sx, y+2, 40, 16); }catch(e){ console.warn('signature skipped',e); }
+    }
+    doc.setDrawColor(150); doc.setLineWidth(0.2);
+    doc.line(sx, y+21, sx+56, y+21);
+    doc.setFontSize(7.8); doc.setTextColor(90);
+    doc.text('Authorised Signatory', sx, y+25);
+
+    /* --- footers: slim band + page numbers on every page --- */
+    const pages = doc.internal.getNumberOfPages();
+    for(let i=1;i<=pages;i++){
+      doc.setPage(i);
+      if(i>1 && !minimal){
+        doc.setFillColor(accent[0],accent[1],accent[2]);
+        doc.rect(0,0,PW,2,'F');
+        doc.setFont('helvetica','bold'); doc.setFontSize(8); doc.setTextColor(accent[0],accent[1],accent[2]);
+        doc.text(String(s.companyName||''), M, 9);
+        doc.setFont('helvetica','normal'); doc.setTextColor(120);
+        doc.text(String(d.docType||'') + (d.docNumber ? ' \u2022 ' + d.docNumber : ''), PW-M, 9, {align:'right'});
+        doc.setDrawColor(225); doc.line(M, 12, PW-M, 12);
+      }
+      doc.setFont('helvetica','normal'); doc.setFontSize(7.4); doc.setTextColor(130);
+      doc.setDrawColor(228); doc.setLineWidth(0.2);
+      doc.line(M, PH-13, PW-M, PH-13);
+      doc.text('This is a computer generated offer document.', M, PH-9);
+      doc.text('Page ' + i + ' of ' + pages, PW-M, PH-9, {align:'right'});
+    }
+    return doc;
   },
 
-  /* ---------- pull from CRM product master ---------- */
-  openProductPicker(){
-    const list = Store.data.products.slice().sort((a,b)=>(a.name||'').localeCompare(b.name||''));
-    UI.openModal('Use an existing CRM product',
-      '<div class="field"><input id="waProdSearch" placeholder="Search product or category..." oninput="WhatsAppRates.filterProducts()"></div>' +
-      '<div id="waProdList" style="max-height:340px;overflow:auto;">' + this.productRows(list) + '</div>',
-      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button>');
+  fileName(){
+    const d = this.draft;
+    return ((d.docNumber || 'rate-offer') + (d.revision ? '-rev' + d.revision : '') + '.pdf')
+      .replace(/[^a-z0-9.\-]+/gi,'-');
   },
-  productRows(list){
-    if(!list.length) return '<div class="empty-state"><div class="t">No products found</div></div>';
-    return list.slice(0,200).map(p=>
-      '<div class="cust-picker-item" onclick="WhatsAppRates.useProduct(\'' + p.id + '\')">' +
-      '<span class="cpi-name">' + Util.escapeHtml(p.name) + '</span>' +
-      '<span class="cpi-sub">' + Util.escapeHtml(p.category||'') + ' &middot; ' + Util.escapeHtml(p.unit||'') + '</span></div>'
-    ).join('');
+  withPDF(fn, label){
+    const errs = this.validate();
+    if(errs.length){ this.showErrors(errs); UI.toast('Please fix the highlighted items'); return null; }
+    try{ return fn(this.buildPDF()); }
+    catch(e){ console.error(e); UI.toast((label||'PDF') + ' failed: ' + (e.message||'unknown error')); return null; }
   },
-  filterProducts(){
-    const q = (document.getElementById('waProdSearch').value||'').toLowerCase();
-    const list = Store.data.products.filter(p=>
-      !q || (p.name||'').toLowerCase().includes(q) || (p.category||'').toLowerCase().includes(q));
-    document.getElementById('waProdList').innerHTML = this.productRows(list);
+  preview(){
+    this.withPDF(doc=>{
+      const box = document.getElementById('rpPreviewFrame');
+      if(box) box.src = doc.output('bloburl');
+      const wrap = document.getElementById('rpPreviewWrap');
+      if(wrap) wrap.style.display = 'block';
+      UI.toast('Preview updated');
+    }, 'Preview');
   },
-  useProduct(id){
-    const p = Store.data.products.find(x=>x.id===id);
-    if(!p) return;
-    // COPY into the draft - the product master record is never touched.
-    this.draft.itemName = p.name || '';
-    this.draft.category = p.category || '';
-    this.draft.unit     = p.unit || 'Nos';
-    if(p.price != null && p.price !== '') this.draft.price = Number(p.price)||'';
-    if(p.description) this.draft.features = p.description;
-    if(p.imageUrl) this.draft.imageUrl = p.imageUrl;
-    this.draft.templateId = '';
-    UI.closeModal();
-    this.render();
-    UI.toast('Loaded "' + p.name + '" into the draft');
+  download(){
+    this.withPDF(doc=>{ doc.save(this.fileName()); this.markGenerated(); }, 'Download');
+  },
+  print(){
+    this.withPDF(doc=>{
+      const url = doc.output('bloburl');
+      const w = window.open(url,'_blank');
+      if(w){ w.addEventListener('load', ()=>{ try{ w.print(); }catch(e){} }); }
+      else UI.toast('Allow pop-ups to print');
+      this.markGenerated();
+    }, 'Print');
+  },
+  async markGenerated(){
+    const d = this.draft;
+    if(!d.id) return;                       // unsaved drafts are not promoted
+    const rec = Store.data.rateDocs.find(x=>x.id===d.id);
+    if(rec && rec.status === 'Draft'){
+      rec.status = 'Generated'; d.status = 'Generated';
+      rec.updatedAt = new Date().toISOString();
+      await Store.save('rateDocs');
+      await Activity.log('Rate PDF generated', d.docNumber || d.id);
+    }
   },
 
-  /* ---------- template library ---------- */
-  openLibrary(){
-    UI.openModal('WhatsApp Rate Templates',
+  /* ---------------- validation ---------------- */
+  validate(){
+    const d = this.draft, e = [];
+    if(!(d.customerName||'').trim()) e.push('Select a customer or enter a customer name.');
+    if(!d.items.length) e.push('Add at least one item.');
+    d.items.forEach((it,i)=>{
+      if(!(it.itemName||'').trim()) e.push('Item ' + (i+1) + ': enter a description.');
+      if(this.num(it.qty) <= 0)     e.push('Item ' + (i+1) + ': quantity must be more than zero.');
+      if(this.num(it.rate) <= 0)    e.push('Item ' + (i+1) + ': rate must be more than zero.');
+    });
+    if(d.gstEnabled && this.num(d.gstRate) <= 0 && d.items.every(it=>this.itemGstRate(it) <= 0))
+      e.push('GST is on but no GST rate has been set.');
+    return e;
+  },
+  showErrors(errs){
+    const b = document.getElementById('rpErrors');
+    if(b) b.innerHTML = errs.length
+      ? errs.map(x=>'<div class="wa-err">\u26A0 ' + Util.escapeHtml(x) + '</div>').join('') : '';
+  },
+
+  /* ---------------- template library (strict copy isolation) ---------------- */
+  openLibrary(uid){
+    const cards = list => list.length
+      ? '<div class="wa-tpl-grid">' + list.map(t=>
+          '<div class="wa-tpl-card' + (t.isActive===false?' inactive':'') + '">' +
+          '<div class="wa-tpl-name">' + Util.escapeHtml(t.templateName||t.itemName||'Untitled') +
+            (t.isActive===false?' <span class="badge badge-gray">Inactive</span>':'') + '</div>' +
+          '<div class="wa-tpl-meta">' + [t.category,t.brand,t.model].filter(Boolean).map(Util.escapeHtml).join(' &middot; ') + '</div>' +
+          '<div class="wa-tpl-price">' + this.rupee(t.defaultRate) + ' / ' + Util.escapeHtml(t.unit||'Nos') + '</div>' +
+          '<div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:4px;">' +
+            (uid ? '<button class="btn btn-primary btn-sm" onclick="RatePDF.applyTemplate(\'' + uid + '\',\'' + t.id + '\')">Use</button>' : '') +
+            '<button class="btn btn-outline btn-sm" onclick="RatePDF.openTemplateForm(\'' + t.id + '\')">Edit</button>' +
+            '<button class="btn btn-outline btn-sm" onclick="RatePDF.duplicateTemplate(\'' + t.id + '\')">Duplicate</button>' +
+            '<button class="btn btn-outline btn-sm" onclick="RatePDF.toggleTemplate(\'' + t.id + '\')">' + (t.isActive===false?'Activate':'Deactivate') + '</button>' +
+            '<button class="icon-btn" title="Delete" onclick="RatePDF.deleteTemplate(\'' + t.id + '\')">&#128465;</button>' +
+          '</div></div>').join('') + '</div>'
+      : '<div class="empty-state"><div class="ic">&#128196;</div><div class="t">No templates yet</div>' +
+        '<div class="d">Build an item below and use "Save as Template" to reuse it next time.</div></div>';
+    window.__rpTplCards = cards;
+    window.__rpTplUid = uid || '';
+    UI.openModal('Rate Template Library',
       '<div class="toolbar" style="margin:0 0 10px;">' +
         '<div class="search"><span class="ic">&#128269;</span>' +
-        '<input id="waTplSearch" placeholder="Search name, item, brand, model, SKU, category..." oninput="WhatsAppRates.filterTemplates()"></div>' +
-        '<button class="btn btn-primary btn-sm" onclick="WhatsAppRates.openTemplateForm(null)">&#65291; New Template</button>' +
-      '</div><div id="waTplList">' + this.templateCards(Store.data.waTemplates) + '</div>',
+        '<input id="rpTplSearch" placeholder="Search name, item, brand, model, SKU, category..." oninput="RatePDF.filterTemplates()"></div>' +
+        '<button class="btn btn-primary btn-sm" onclick="RatePDF.openTemplateForm(null)">&#65291; New Template</button>' +
+      '</div><div id="rpTplList">' + cards(Store.data.rateTemplates) + '</div>',
       '<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>', true);
   },
   filterTemplates(){
-    const q = (document.getElementById('waTplSearch').value||'').toLowerCase();
-    const list = Store.data.waTemplates.filter(t=> !q ||
+    const q = (document.getElementById('rpTplSearch').value||'').toLowerCase();
+    const list = Store.data.rateTemplates.filter(t=>!q ||
       [t.templateName,t.itemName,t.brand,t.model,t.sku,t.category].some(v=>(v||'').toLowerCase().includes(q)));
-    document.getElementById('waTplList').innerHTML = this.templateCards(list);
+    document.getElementById('rpTplList').innerHTML = window.__rpTplCards(list);
   },
-  templateCards(list){
-    if(!list.length) return '<div class="empty-state"><div class="ic">&#128172;</div><div class="t">No templates yet</div>' +
-      '<div class="d">Build a rate below and use "Save as Template" to reuse it in seconds next time.</div></div>';
-    return '<div class="wa-tpl-grid">' + list.map(t=>
-      '<div class="wa-tpl-card' + (t.isActive===false?' inactive':'') + '">' +
-        '<div class="wa-tpl-name">' + Util.escapeHtml(t.templateName||t.itemName||'Untitled') +
-          (t.isActive===false?' <span class="badge badge-gray">Inactive</span>':'') + '</div>' +
-        '<div class="wa-tpl-meta">' + [t.category,t.brand,t.model].filter(Boolean).map(Util.escapeHtml).join(' &middot; ') + '</div>' +
-        '<div class="wa-tpl-price">' + this.rupee(t.defaultPrice) + ' / ' + Util.escapeHtml(t.unit||'Nos') + '</div>' +
-        '<div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:4px;">' +
-          '<button class="btn btn-primary btn-sm" onclick="WhatsAppRates.useTemplate(\'' + t.id + '\')">Use</button>' +
-          '<button class="btn btn-outline btn-sm" onclick="WhatsAppRates.openTemplateForm(\'' + t.id + '\')">Edit</button>' +
-          '<button class="btn btn-outline btn-sm" onclick="WhatsAppRates.duplicateTemplate(\'' + t.id + '\')">Duplicate</button>' +
-          '<button class="btn btn-outline btn-sm" onclick="WhatsAppRates.toggleActive(\'' + t.id + '\')">' + (t.isActive===false?'Activate':'Deactivate') + '</button>' +
-          '<button class="icon-btn" title="Delete" onclick="WhatsAppRates.deleteTemplate(\'' + t.id + '\')">&#128465;</button>' +
-        '</div></div>').join('') + '</div>';
+  /* Applying a template COPIES its values into the draft item. The stored
+     template object is never handed out by reference and never written here. */
+  applyTemplate(uid, tid){
+    const t = Store.data.rateTemplates.find(x=>x.id===tid);
+    const it = this.draft.items.find(x=>x.uid===uid);
+    if(!t || !it) return;
+    it.templateId = t.id;
+    it.itemName = t.itemName || '';
+    it.brand    = t.brand || '';
+    it.model    = t.model || '';
+    it.category = t.category || '';
+    it.specs    = t.specs || '';
+    it.unit     = t.unit || 'Nos';
+    it.qty      = t.defaultQty || 1;
+    it.rate     = (t.defaultRate===''||t.defaultRate==null) ? '' : Number(t.defaultRate);
+    it.discount = (t.discount===''||t.discount==null) ? '' : Number(t.discount);
+    it.gstRate  = (t.gstRate===''||t.gstRate==null) ? '' : Number(t.gstRate);
+    it.imageUrl = t.imageUrl || '';
+    UI.closeModal();
+    this.render();
+    UI.toast('Loaded "' + (t.templateName||t.itemName) + '" into this item');
   },
   openTemplateForm(id){
-    const rec = id ? Store.data.waTemplates.find(x=>x.id===id) : null;
-    const v = rec || {templateName:'',itemName:'',brand:'',model:'',sku:'',category:'',features:'',
-                      description:'',defaultPrice:'',unit:'Nos',imageUrl:'',notes:'',isActive:true};
+    const rec = id ? Store.data.rateTemplates.find(x=>x.id===id) : null;
+    const v = rec || {templateName:'',itemName:'',brand:'',model:'',sku:'',category:'',specs:'',
+                      defaultQty:1,defaultRate:'',discount:'',gstRate:'',unit:'Nos',imageUrl:'',
+                      warranty:'',deliveryTerms:'',paymentTerms:'',validity:'',notes:'',isActive:true};
     const cats = [...new Set(Store.data.products.map(p=>p.category).filter(Boolean))].sort();
     UI.openModal(rec?'Edit Template':'New Template',
-      '<div class="field"><label>Template Name *</label><input id="wt_templateName" value="' + Util.escapeHtml(v.templateName) + '" placeholder="e.g. Twin Bin - Government Rate"></div>' +
+      '<div class="field"><label>Template Name *</label><input id="rt_templateName" value="' + Util.escapeHtml(v.templateName) + '"></div>' +
       '<div class="form-row">' +
-        '<div class="field"><label>Item Name *</label><input id="wt_itemName" value="' + Util.escapeHtml(v.itemName) + '"></div>' +
-        '<div class="field"><label>Category</label><input id="wt_category" list="waCatList" value="' + Util.escapeHtml(v.category) + '">' +
-        '<datalist id="waCatList">' + cats.map(c=>'<option value="' + Util.escapeHtml(c) + '">').join('') + '</datalist></div>' +
+        '<div class="field"><label>Item Name *</label><input id="rt_itemName" value="' + Util.escapeHtml(v.itemName) + '"></div>' +
+        '<div class="field"><label>Category</label><input id="rt_category" list="rtCats" value="' + Util.escapeHtml(v.category) + '">' +
+          '<datalist id="rtCats">' + cats.map(c=>'<option value="' + Util.escapeHtml(c) + '">').join('') + '</datalist></div>' +
       '</div>' +
       '<div class="form-row">' +
-        '<div class="field"><label>Brand</label><input id="wt_brand" value="' + Util.escapeHtml(v.brand) + '"></div>' +
-        '<div class="field"><label>Model</label><input id="wt_model" value="' + Util.escapeHtml(v.model) + '"></div>' +
+        '<div class="field"><label>Brand</label><input id="rt_brand" value="' + Util.escapeHtml(v.brand) + '"></div>' +
+        '<div class="field"><label>Model</label><input id="rt_model" value="' + Util.escapeHtml(v.model) + '"></div>' +
       '</div>' +
       '<div class="form-row">' +
-        '<div class="field"><label>SKU / Part No.</label><input id="wt_sku" value="' + Util.escapeHtml(v.sku) + '"></div>' +
-        '<div class="field"><label>Unit</label><input id="wt_unit" value="' + Util.escapeHtml(v.unit||'Nos') + '"></div>' +
+        '<div class="field"><label>SKU</label><input id="rt_sku" value="' + Util.escapeHtml(v.sku) + '"></div>' +
+        '<div class="field"><label>Unit</label><input id="rt_unit" value="' + Util.escapeHtml(v.unit||'Nos') + '"></div>' +
       '</div>' +
-      '<div class="field"><label>Default Price</label><input id="wt_defaultPrice" type="number" step="0.01" value="' + (v.defaultPrice===''||v.defaultPrice==null?'':v.defaultPrice) + '"></div>' +
-      '<div class="field"><label>Features (one per line)</label><textarea id="wt_features" rows="5">' + Util.escapeHtml(v.features) + '</textarea></div>' +
-      '<div class="field"><label>Image URL</label><input id="wt_imageUrl" value="' + Util.escapeHtml(v.imageUrl) + '" placeholder="https://..."></div>' +
-      '<div class="field"><label>Notes (internal)</label><textarea id="wt_notes" rows="2">' + Util.escapeHtml(v.notes) + '</textarea></div>' +
-      '<label class="chk"><input type="checkbox" id="wt_isActive" ' + (v.isActive===false?'':'checked') + '> Active</label>',
-      '<button class="btn btn-outline" onclick="WhatsAppRates.openLibrary()">Back</button>' +
-      '<button class="btn btn-primary" onclick="WhatsAppRates.saveTemplate(\'' + (id||'') + '\')">Save Template</button>', true);
+      '<div class="form-row">' +
+        '<div class="field"><label>Default Qty</label><input id="rt_defaultQty" type="number" min="1" value="' + (v.defaultQty||1) + '"></div>' +
+        '<div class="field"><label>Default Rate</label><input id="rt_defaultRate" type="number" step="0.01" value="' + (v.defaultRate===''||v.defaultRate==null?'':v.defaultRate) + '"></div>' +
+      '</div>' +
+      '<div class="form-row">' +
+        '<div class="field"><label>Default Discount</label><input id="rt_discount" type="number" step="0.01" value="' + (v.discount===''||v.discount==null?'':v.discount) + '"></div>' +
+        '<div class="field"><label>GST % <span class="hint">(optional)</span></label><input id="rt_gstRate" type="number" step="0.01" placeholder="leave blank" value="' + (v.gstRate===''||v.gstRate==null?'':v.gstRate) + '"></div>' +
+      '</div>' +
+      '<div class="field"><label>Specifications (one per line)</label><textarea id="rt_specs" rows="5">' + Util.escapeHtml(v.specs) + '</textarea></div>' +
+      '<div class="field"><label>Image URL</label><input id="rt_imageUrl" value="' + Util.escapeHtml(v.imageUrl) + '"></div>' +
+      '<div class="form-row">' +
+        '<div class="field"><label>Warranty</label><input id="rt_warranty" value="' + Util.escapeHtml(v.warranty) + '"></div>' +
+        '<div class="field"><label>Validity</label><input id="rt_validity" value="' + Util.escapeHtml(v.validity) + '"></div>' +
+      '</div>' +
+      '<div class="form-row">' +
+        '<div class="field"><label>Delivery Terms</label><input id="rt_deliveryTerms" value="' + Util.escapeHtml(v.deliveryTerms) + '"></div>' +
+        '<div class="field"><label>Payment Terms</label><input id="rt_paymentTerms" value="' + Util.escapeHtml(v.paymentTerms) + '"></div>' +
+      '</div>' +
+      '<div class="field"><label>Notes</label><textarea id="rt_notes" rows="2">' + Util.escapeHtml(v.notes) + '</textarea></div>' +
+      '<label class="chk"><input type="checkbox" id="rt_isActive" ' + (v.isActive===false?'':'checked') + '> Active</label>',
+      '<button class="btn btn-outline" onclick="RatePDF.openLibrary(window.__rpTplUid)">Back</button>' +
+      '<button class="btn btn-primary" onclick="RatePDF.saveTemplate(\'' + (id||'') + '\')">Save Template</button>', true);
   },
   async saveTemplate(id){
-    const name = document.getElementById('wt_templateName').value.trim();
-    const item = document.getElementById('wt_itemName').value.trim();
+    const g = x => document.getElementById('rt_'+x).value;
+    const name = g('templateName').trim(), item = g('itemName').trim();
     if(!name){ UI.toast('Template name is required'); return; }
     if(!item){ UI.toast('Item name is required'); return; }
-    const dup = Store.data.waTemplates.find(t=>t.id!==id && (t.templateName||'').toLowerCase()===name.toLowerCase());
-    if(dup){ UI.toast('A template with that name already exists'); return; }
-    const now = new Date().toISOString();
-    const existing = id ? Store.data.waTemplates.find(x=>x.id===id) : null;
+    if(Store.data.rateTemplates.some(t=>t.id!==id && (t.templateName||'').toLowerCase()===name.toLowerCase())){
+      UI.toast('A template with that name already exists'); return;
+    }
+    const ex = id ? Store.data.rateTemplates.find(x=>x.id===id) : null;
+    const num = x => g(x)==='' ? '' : Number(g(x));
     const rec = {
-      id: id || Util.uid('WT', Store.data.waTemplates),
-      templateName: name,
-      itemName: item,
-      brand: document.getElementById('wt_brand').value.trim(),
-      model: document.getElementById('wt_model').value.trim(),
-      sku: document.getElementById('wt_sku').value.trim(),
-      category: document.getElementById('wt_category').value.trim(),
-      features: document.getElementById('wt_features').value,
-      description: existing ? (existing.description||'') : '',
-      defaultPrice: document.getElementById('wt_defaultPrice').value === '' ? '' : Number(document.getElementById('wt_defaultPrice').value),
-      unit: document.getElementById('wt_unit').value.trim() || 'Nos',
-      imageUrl: document.getElementById('wt_imageUrl').value.trim() || (existing ? (existing.imageUrl||'') : ''),
-      notes: document.getElementById('wt_notes').value,
-      isActive: document.getElementById('wt_isActive').checked,
-      createdBy: existing ? existing.createdBy : ((Auth.session && (Auth.session.name||Auth.session.username)) || 'System'),
-      createdAt: existing ? existing.createdAt : now,
-      updatedAt: now
+      id: id || 'RT' + String(Store.data.rateTemplates.length+1).padStart(3,'0'),
+      migratedFrom: ex ? (ex.migratedFrom||'') : '',
+      templateName:name, itemName:item, brand:g('brand').trim(), model:g('model').trim(),
+      sku:g('sku').trim(), category:g('category').trim(), specs:g('specs'),
+      description: ex ? (ex.description||'') : '',
+      defaultQty: Number(g('defaultQty'))||1, defaultRate:num('defaultRate'),
+      discount:num('discount'), gstEnabled: ex ? !!ex.gstEnabled : false, gstRate:num('gstRate'),
+      unit:g('unit').trim()||'Nos', imageUrl:g('imageUrl').trim() || (ex?ex.imageUrl||'':''),
+      warranty:g('warranty').trim(), deliveryTerms:g('deliveryTerms').trim(),
+      paymentTerms:g('paymentTerms').trim(), validity:g('validity').trim(),
+      notes:g('notes'), isActive: document.getElementById('rt_isActive').checked,
+      createdBy: ex ? ex.createdBy : ((Auth.session && (Auth.session.name||Auth.session.username))||'System'),
+      createdAt: ex ? ex.createdAt : new Date().toISOString(),
+      updatedAt: new Date().toISOString()
     };
-    if(id){ const i = Store.data.waTemplates.findIndex(x=>x.id===id); Store.data.waTemplates[i] = rec; }
-    else Store.data.waTemplates.unshift(rec);
-    const ok = await Store.save('waTemplates');
-    if(ok){ await Activity.log(id?'WhatsApp template updated':'WhatsApp template created', name); }
-    this.openLibrary();
-  },
-  useTemplate(id){
-    const t = Store.data.waTemplates.find(x=>x.id===id);
-    if(!t) return;
-    // COPY into draft. Editing price/features below never writes back here.
-    const keep = this.draft || this.blankDraft();
-    this.draft = Object.assign(this.blankDraft(), {
-      customerId: keep.customerId, customerName: keep.customerName, phone: keep.phone,
-      greeting: keep.greeting, closing: keep.closing, signature: keep.signature,
-      templateId: t.id,
-      itemName: t.itemName||'', brand: t.brand||'', model: t.model||'', category: t.category||'',
-      features: t.features||'', price: (t.defaultPrice===''||t.defaultPrice==null)?'':t.defaultPrice,
-      unit: t.unit||'Nos', imageUrl: t.imageUrl||''
-    });
-    UI.closeModal();
-    this.render();
-    UI.toast('Loaded "' + (t.templateName||t.itemName) + '"');
+    if(id){ const i = Store.data.rateTemplates.findIndex(x=>x.id===id); Store.data.rateTemplates[i]=rec; }
+    else Store.data.rateTemplates.unshift(rec);
+    const ok = await Store.save('rateTemplates');
+    if(ok) await Activity.log(id?'Rate template updated':'Rate template created', name);
+    this.openLibrary(window.__rpTplUid);
   },
   async duplicateTemplate(id){
-    const t = Store.data.waTemplates.find(x=>x.id===id);
-    if(!t) return;
+    const t = Store.data.rateTemplates.find(x=>x.id===id); if(!t) return;
     let base = (t.templateName||'Template') + ' (copy)', name = base, n = 2;
-    while(Store.data.waTemplates.some(x=>(x.templateName||'').toLowerCase()===name.toLowerCase())){ name = base + ' ' + n; n++; }
+    while(Store.data.rateTemplates.some(x=>(x.templateName||'').toLowerCase()===name.toLowerCase())){ name = base+' '+n; n++; }
     const now = new Date().toISOString();
-    const copy = Object.assign({}, t, {
-      id: Util.uid('WT', Store.data.waTemplates), templateName: name,
-      createdBy: (Auth.session && (Auth.session.name||Auth.session.username)) || 'System',
-      createdAt: now, updatedAt: now
-    });
-    Store.data.waTemplates.unshift(copy);
-    const ok = await Store.save('waTemplates');
-    if(ok) await Activity.log('WhatsApp template duplicated', name);
-    this.openLibrary();
+    Store.data.rateTemplates.unshift(Object.assign({}, t, {
+      id:'RT'+String(Store.data.rateTemplates.length+1).padStart(3,'0'), templateName:name,
+      migratedFrom:'', createdAt:now, updatedAt:now,
+      createdBy:(Auth.session && (Auth.session.name||Auth.session.username))||'System'
+    }));
+    const ok = await Store.save('rateTemplates');
+    if(ok) await Activity.log('Rate template duplicated', name);
+    this.openLibrary(window.__rpTplUid);
   },
-  async toggleActive(id){
-    const t = Store.data.waTemplates.find(x=>x.id===id);
-    if(!t) return;
-    t.isActive = (t.isActive===false);
-    t.updatedAt = new Date().toISOString();
-    await Store.save('waTemplates');
-    this.openLibrary();
+  async toggleTemplate(id){
+    const t = Store.data.rateTemplates.find(x=>x.id===id); if(!t) return;
+    t.isActive = (t.isActive===false); t.updatedAt = new Date().toISOString();
+    await Store.save('rateTemplates');
+    this.openLibrary(window.__rpTplUid);
   },
   async deleteTemplate(id){
-    const t = Store.data.waTemplates.find(x=>x.id===id);
-    if(!t) return;
+    const t = Store.data.rateTemplates.find(x=>x.id===id); if(!t) return;
     if(!confirm('Delete template "' + (t.templateName||t.itemName) + '"? Deactivate instead if you only want to hide it.')) return;
-    Store.data.waTemplates = Store.data.waTemplates.filter(x=>x.id!==id);
-    const ok = await Store.save('waTemplates');
-    if(ok){ await Activity.log('WhatsApp template deleted', t.templateName||t.itemName); UI.toast('Deleted'); }
-    this.openLibrary();
+    Store.data.rateTemplates = Store.data.rateTemplates.filter(x=>x.id!==id);
+    const ok = await Store.save('rateTemplates');
+    if(ok){ await Activity.log('Rate template deleted', t.templateName||t.itemName); UI.toast('Deleted'); }
+    this.openLibrary(window.__rpTplUid);
   },
-  saveDraftAsTemplate(){
-    const d = this.draft;
-    if(!(d.itemName||'').trim()){ UI.toast('Enter an item name first'); return; }
+  saveItemAsTemplate(uid){
+    const it = this.draft.items.find(x=>x.uid===uid); if(!it) return;
+    if(!(it.itemName||'').trim()){ UI.toast('Enter an item name first'); return; }
+    window.__rpTplUid = uid;
     UI.openModal('Save as Template',
-      '<div class="field"><label>Template Name *</label><input id="waNewTplName" value="' + Util.escapeHtml(d.itemName) + '" placeholder="e.g. Twin Bin - Government Rate"></div>' +
-      '<div class="hint">Saves the current item, features, price, unit and image as a reusable template.</div>',
+      '<div class="field"><label>Template Name *</label><input id="rpNewTpl" value="' + Util.escapeHtml(it.itemName) + '"></div>' +
+      '<div class="hint">Saves this item\'s details, specs, rate and image as a reusable template.</div>',
       '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button>' +
-      '<button class="btn btn-primary" onclick="WhatsAppRates.confirmSaveDraftAsTemplate()">Save</button>');
+      '<button class="btn btn-primary" onclick="RatePDF.confirmSaveItemTemplate(\'' + uid + '\')">Save</button>');
   },
-  async confirmSaveDraftAsTemplate(){
-    const name = document.getElementById('waNewTplName').value.trim();
+  async confirmSaveItemTemplate(uid){
+    const name = document.getElementById('rpNewTpl').value.trim();
     if(!name){ UI.toast('Template name is required'); return; }
-    if(Store.data.waTemplates.some(t=>(t.templateName||'').toLowerCase()===name.toLowerCase())){ UI.toast('That template name is already used'); return; }
-    const d = this.draft, now = new Date().toISOString();
-    const rec = {
-      id: Util.uid('WT', Store.data.waTemplates), templateName: name,
-      itemName: d.itemName, brand: d.brand, model: d.model, sku: '', category: d.category,
-      features: d.features, description: '', defaultPrice: d.price===''?'':Number(d.price),
-      unit: d.unit||'Nos', imageUrl: d.imageUrl||'', notes: '', isActive: true,
-      createdBy: (Auth.session && (Auth.session.name||Auth.session.username)) || 'System',
-      createdAt: now, updatedAt: now
-    };
-    Store.data.waTemplates.unshift(rec);
-    const ok = await Store.save('waTemplates');
-    if(ok){ await Activity.log('WhatsApp template created', name); UI.toast('Template saved'); }
-    this.draft.templateId = rec.id;
-    UI.closeModal();
-    this.render();
-  },
-  async saveChangesToTemplate(){
-    const d = this.draft;
-    const t = Store.data.waTemplates.find(x=>x.id===d.templateId);
-    if(!t){ UI.toast('No source template loaded'); return; }
-    if(!confirm('Overwrite the master template "' + (t.templateName||t.itemName) + '" with the current draft values?')) return;
-    Object.assign(t, {
-      itemName:d.itemName, brand:d.brand, model:d.model, category:d.category,
-      features:d.features, defaultPrice: d.price===''?'':Number(d.price),
-      unit:d.unit||'Nos', imageUrl:d.imageUrl||'', updatedAt:new Date().toISOString()
-    });
-    const ok = await Store.save('waTemplates');
-    if(ok){ await Activity.log('WhatsApp template updated', t.templateName||t.itemName); UI.toast('Template updated'); }
-  },
-
-  /* ---------- send ---------- */
-  validate(){
-    const d = this.draft, errs = [];
-    if(!(d.phone||'').trim()) errs.push('Select a customer or enter a phone number.');
-    else if(!this.phoneValid(d.phone)) errs.push('That phone number does not look valid for WhatsApp.');
-    if(!(d.itemName||'').trim()) errs.push('Enter an item name.');
-    if(d.price==='' || d.price===null || isNaN(Number(d.price)) || Number(d.price) <= 0) errs.push('Enter a price greater than zero.');
-    if(!this.buildMessage().trim()) errs.push('The message is empty.');
-    return errs;
-  },
-  showErrors(errs){
-    const box = document.getElementById('waErrors');
-    if(box) box.innerHTML = errs.length ? errs.map(e=>'<div class="wa-err">\u26A0 ' + Util.escapeHtml(e) + '</div>').join('') : '';
-  },
-  copyMessage(){
-    const msg = this.buildMessage();
-    if(navigator.clipboard && navigator.clipboard.writeText){
-      navigator.clipboard.writeText(msg).then(()=>UI.toast('Message copied')).catch(()=>UI.toast('Could not copy'));
-    } else UI.toast('Copy is not available in this browser');
-  },
-  async send(){
-    const errs = this.validate();
-    this.showErrors(errs);
-    if(errs.length){ UI.toast('Please fix the highlighted items'); return; }
-    const d = this.draft;
-    const phone = this.normalizePhone(d.phone);
-    const msg = this.buildMessage();
-    window.open('https://wa.me/' + phone + '?text=' + encodeURIComponent(msg), '_blank');
-    await this.saveHistory(phone, msg);
-    if(d.imageUrl){
-      UI.toast('WhatsApp opened \u2014 attach the product image manually before sending');
-    } else {
-      UI.toast('WhatsApp opened with your message');
+    if(Store.data.rateTemplates.some(t=>(t.templateName||'').toLowerCase()===name.toLowerCase())){
+      UI.toast('That template name is already used'); return;
     }
-  },
-  async saveHistory(phone, msg){
-    const d = this.draft;
+    const it = this.draft.items.find(x=>x.uid===uid); if(!it) return;
+    const now = new Date().toISOString();
     const rec = {
-      id: Util.uid('WH', Store.data.waHistory),
-      customerId: d.customerId||'', customerName: d.customerName || '(manual number)',
-      phone: phone, templateId: d.templateId||'',
-      itemName: d.itemName, price: Number(d.price)||0,
-      qty: Math.max(Number(d.qty)||1,1), unit: d.unit||'Nos',
-      discount: Number(d.discount)||0, total: this.lineTotal(),
-      hadImage: !!d.imageUrl, message: msg,
-      sentBy: (Auth.session && (Auth.session.name||Auth.session.username)) || 'System',
-      sentAt: new Date().toISOString()
+      id:'RT'+String(Store.data.rateTemplates.length+1).padStart(3,'0'), migratedFrom:'',
+      templateName:name, itemName:it.itemName, brand:it.brand, model:it.model, sku:'',
+      category:it.category, specs:it.specs, description:'',
+      defaultQty:this.num(it.qty)||1, defaultRate:it.rate===''?'':Number(it.rate),
+      discount:it.discount===''?'':Number(it.discount), gstEnabled:false,
+      gstRate:it.gstRate===''?'':Number(it.gstRate),
+      unit:it.unit||'Nos', imageUrl:it.imageUrl||'',
+      warranty:'', deliveryTerms:'', paymentTerms:'', validity:'', notes:'', isActive:true,
+      createdBy:(Auth.session && (Auth.session.name||Auth.session.username))||'System',
+      createdAt:now, updatedAt:now
     };
-    Store.data.waHistory.unshift(rec);
-    if(Store.data.waHistory.length > 500) Store.data.waHistory.length = 500;
-    await Store.save('waHistory');
-    await Activity.log('WhatsApp rate sent', d.itemName + ' to ' + rec.customerName);
-    const h = document.getElementById('waHistoryBody');
-    if(h) h.innerHTML = this.historyRows();
+    Store.data.rateTemplates.unshift(rec);
+    const ok = await Store.save('rateTemplates');
+    if(ok){ await Activity.log('Rate template created', name); UI.toast('Template saved'); }
+    it.templateId = rec.id;
+    UI.closeModal(); this.render();
   },
-  historyRows(){
-    const list = Store.data.waHistory.slice(0,25);
-    if(!list.length) return '<tr><td colspan="6" class="cell-mute" style="text-align:center;padding:18px;">Nothing sent yet</td></tr>';
-    return list.map(h=>'<tr>' +
-      '<td class="cell-mute">' + Util.fmtDateTime(h.sentAt) + '</td>' +
-      '<td class="cell-main">' + Util.escapeHtml(h.customerName) + '</td>' +
-      '<td class="cell-mute">' + Util.escapeHtml(h.phone) + '</td>' +
-      '<td>' + Util.escapeHtml(h.itemName) + '</td>' +
-      '<td class="mono">' + this.rupee(h.total||h.price) + '</td>' +
-      '<td class="cell-mute">' + Util.escapeHtml(h.sentBy) + '</td></tr>').join('');
+  /* The ONLY path that writes draft values back into a stored template. */
+  async updateTemplateFromItem(uid){
+    const it = this.draft.items.find(x=>x.uid===uid); if(!it) return;
+    const t = Store.data.rateTemplates.find(x=>x.id===it.templateId);
+    if(!t){ UI.toast('This item is not linked to a template'); return; }
+    if(!confirm('Overwrite the master template "' + (t.templateName||t.itemName) + '" with this item\'s current values?')) return;
+    Object.assign(t, {
+      itemName:it.itemName, brand:it.brand, model:it.model, category:it.category,
+      specs:it.specs, unit:it.unit||'Nos',
+      defaultQty:this.num(it.qty)||1,
+      defaultRate:it.rate===''?'':Number(it.rate),
+      discount:it.discount===''?'':Number(it.discount),
+      gstRate:it.gstRate===''?'':Number(it.gstRate),
+      imageUrl:it.imageUrl||'', updatedAt:new Date().toISOString()
+    });
+    const ok = await Store.save('rateTemplates');
+    if(ok){ await Activity.log('Rate template updated', t.templateName||t.itemName); UI.toast('Template updated'); }
   },
 
-  resetDraft(){
-    const keep = this.draft || this.blankDraft();
-    this.draft = Object.assign(this.blankDraft(), {
-      customerId:keep.customerId, customerName:keep.customerName, phone:keep.phone
-    });
+  /* ---------------- Terms & Conditions library ---------------- */
+  async seedTerms(){
+    if(Store.data.rateTerms.length) return;
+    const now = new Date().toISOString();
+    Store.data.rateTerms = DEFAULT_RATE_TERMS.map((t,i)=>({
+      id:'TC'+String(i+1).padStart(3,'0'), title:t.title, body:t.body,
+      isActive:true, createdAt:now, updatedAt:now
+    }));
+    await Store.save('rateTerms');
+  },
+  openTerms(){
+    const list = Store.data.rateTerms;
+    UI.openModal('Terms & Conditions Library',
+      '<div class="toolbar" style="margin:0 0 10px;"><div class="toolbar-spacer"></div>' +
+      '<button class="btn btn-primary btn-sm" onclick="RatePDF.openTermForm(null)">&#65291; New Term</button></div>' +
+      (list.length
+        ? '<div class="table-wrap"><table><thead><tr><th>Use</th><th>Title</th><th>Text</th><th>Status</th><th></th></tr></thead><tbody>' +
+          list.map(t=>'<tr>' +
+            '<td><input type="checkbox" class="rpTermPick" value="' + t.id + '" ' + (this.draft && this.draft.termIds.includes(t.id)?'checked':'') + (t.isActive===false?' disabled':'') + '></td>' +
+            '<td class="cell-main">' + Util.escapeHtml(t.title) + '</td>' +
+            '<td class="cell-mute" style="white-space:normal;max-width:320px;">' + Util.escapeHtml(t.body) + '</td>' +
+            '<td>' + (t.isActive===false?'<span class="badge badge-gray">Inactive</span>':'<span class="badge badge-green">Active</span>') + '</td>' +
+            '<td style="display:flex;gap:4px;">' +
+              '<button class="icon-btn" onclick="RatePDF.openTermForm(\'' + t.id + '\')">&#9998;</button>' +
+              '<button class="btn btn-outline btn-sm" onclick="RatePDF.toggleTerm(\'' + t.id + '\')">' + (t.isActive===false?'On':'Off') + '</button>' +
+              '<button class="icon-btn" onclick="RatePDF.deleteTerm(\'' + t.id + '\')">&#128465;</button>' +
+            '</td></tr>').join('') + '</tbody></table></div>'
+        : '<div class="empty-state"><div class="ic">&#128220;</div><div class="t">No terms yet</div></div>'),
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button>' +
+      '<button class="btn btn-primary" onclick="RatePDF.applyTerms()">Apply to Document</button>', true);
+  },
+  applyTerms(){
+    this.draft.termIds = Array.from(document.querySelectorAll('.rpTermPick:checked')).map(c=>c.value);
+    UI.closeModal(); this.render();
+  },
+  openTermForm(id){
+    const rec = id ? Store.data.rateTerms.find(x=>x.id===id) : null;
+    const v = rec || {title:'', body:'', isActive:true};
+    UI.openModal(rec?'Edit Term':'New Term',
+      '<div class="field"><label>Title *</label><input id="tc_title" value="' + Util.escapeHtml(v.title) + '"></div>' +
+      '<div class="field"><label>Text *</label><textarea id="tc_body" rows="4">' + Util.escapeHtml(v.body) + '</textarea></div>' +
+      '<label class="chk"><input type="checkbox" id="tc_isActive" ' + (v.isActive===false?'':'checked') + '> Active</label>',
+      '<button class="btn btn-outline" onclick="RatePDF.openTerms()">Back</button>' +
+      '<button class="btn btn-primary" onclick="RatePDF.saveTerm(\'' + (id||'') + '\')">Save</button>');
+  },
+  async saveTerm(id){
+    const title = document.getElementById('tc_title').value.trim();
+    const body  = document.getElementById('tc_body').value.trim();
+    if(!title || !body){ UI.toast('Title and text are required'); return; }
+    const now = new Date().toISOString();
+    const ex = id ? Store.data.rateTerms.find(x=>x.id===id) : null;
+    const rec = {id: id || 'TC'+String(Store.data.rateTerms.length+1).padStart(3,'0'),
+                 title, body, isActive: document.getElementById('tc_isActive').checked,
+                 createdAt: ex?ex.createdAt:now, updatedAt: now};
+    if(id){ const i = Store.data.rateTerms.findIndex(x=>x.id===id); Store.data.rateTerms[i]=rec; }
+    else Store.data.rateTerms.push(rec);
+    await Store.save('rateTerms');
+    this.openTerms();
+  },
+  async toggleTerm(id){
+    const t = Store.data.rateTerms.find(x=>x.id===id); if(!t) return;
+    t.isActive = (t.isActive===false); t.updatedAt = new Date().toISOString();
+    await Store.save('rateTerms'); this.openTerms();
+  },
+  async deleteTerm(id){
+    const t = Store.data.rateTerms.find(x=>x.id===id); if(!t) return;
+    if(!confirm('Delete the term "' + t.title + '"?')) return;
+    Store.data.rateTerms = Store.data.rateTerms.filter(x=>x.id!==id);
+    this.draft.termIds = this.draft.termIds.filter(x=>x!==id);
+    await Store.save('rateTerms'); this.openTerms();
+  },
+
+  /* ---------------- document save / history / revisions ---------------- */
+  nextDocNumber(){
+    const s = Store.data.settings;
+    return (s.ratePrefix||'RO-') + String(s.rateNext||1).padStart(4,'0');
+  },
+  async saveDraft(){
+    const d = this.draft;
+    if(!(d.customerName||'').trim()){ UI.toast('Select a customer first'); return; }
+    const now = new Date().toISOString();
+    if(!d.id){
+      d.id = 'RD' + String(Store.data.rateDocs.length+1).padStart(4,'0');
+      d.docNumber = d.docNumber || this.nextDocNumber();
+      d.createdAt = now;
+      Store.data.rateDocs.unshift(JSON.parse(JSON.stringify(Object.assign({}, d, {updatedAt:now}))));
+      Store.data.settings.rateNext = (Store.data.settings.rateNext||1) + 1;
+      await Store.save('settings');
+    } else {
+      const rec = Store.data.rateDocs.find(x=>x.id===d.id);
+      if(rec && rec.status === 'Final'){
+        UI.toast('This document is Final \u2014 use Create Revision instead'); return;
+      }
+      d.updatedAt = now;
+      const i = Store.data.rateDocs.findIndex(x=>x.id===d.id);
+      if(i>=0) Store.data.rateDocs[i] = JSON.parse(JSON.stringify(d));
+    }
+    const ok = await Store.save('rateDocs');
+    if(ok){ await Activity.log('Rate document saved', d.docNumber||d.id); UI.toast('Saved'); }
+    this.render();
+  },
+  async markFinal(){
+    const d = this.draft;
+    if(!d.id){ UI.toast('Save the document first'); return; }
+    if(!confirm('Mark ' + (d.docNumber||d.id) + ' as Final? Final documents cannot be edited \u2014 you would create a revision instead.')) return;
+    const rec = Store.data.rateDocs.find(x=>x.id===d.id); if(!rec) return;
+    rec.status = 'Final'; d.status = 'Final'; rec.updatedAt = new Date().toISOString();
+    const ok = await Store.save('rateDocs');
+    if(ok){ await Activity.log('Rate document finalised', d.docNumber||d.id); UI.toast('Marked Final'); }
+    this.render();
+  },
+  /* A revision is a NEW record; the original is never overwritten. */
+  async createRevision(id){
+    const src = Store.data.rateDocs.find(x=>x.id===(id||this.draft.id));
+    if(!src){ UI.toast('Save the document first'); return; }
+    const root = src.parentId || src.id;
+    const rev = Math.max(0, ...Store.data.rateDocs
+      .filter(x=>x.id===root || x.parentId===root).map(x=>Number(x.revision)||0)) + 1;
+    const now = new Date().toISOString();
+    const copy = JSON.parse(JSON.stringify(src));
+    copy.id = 'RD' + String(Store.data.rateDocs.length+1).padStart(4,'0');
+    copy.parentId = root;
+    copy.revision = rev;
+    copy.status = 'Draft';
+    copy.docNumber = (src.docNumber||'') + '-R' + rev;
+    copy.docDate = Util.todayISO();
+    copy.createdAt = now; copy.updatedAt = now;
+    Store.data.rateDocs.unshift(copy);
+    const ok = await Store.save('rateDocs');
+    if(ok) await Activity.log('Rate document revision created', copy.docNumber);
+    this.draft = JSON.parse(JSON.stringify(copy));
+    UI.closeModal(); this.render();
+    UI.toast('Revision ' + rev + ' created');
+  },
+  async duplicateDoc(id){
+    const src = Store.data.rateDocs.find(x=>x.id===id); if(!src) return;
+    const copy = JSON.parse(JSON.stringify(src));
+    copy.id=''; copy.parentId=''; copy.revision=0; copy.status='Draft';
+    copy.docNumber=''; copy.docDate=Util.todayISO(); copy.createdAt=''; copy.updatedAt='';
+    this.draft = copy;
+    UI.closeModal(); this.render();
+    UI.toast('Copied into a new document \u2014 Save Draft to keep it');
+  },
+  loadDoc(id){
+    const rec = Store.data.rateDocs.find(x=>x.id===id); if(!rec) return;
+    this.draft = JSON.parse(JSON.stringify(rec));   // deep copy: editing never mutates the stored row
+    if(!Array.isArray(this.draft.items) || !this.draft.items.length) this.draft.items = [this.blankItem()];
+    if(!Array.isArray(this.draft.termIds)) this.draft.termIds = [];
+    UI.closeModal(); this.render();
+  },
+  async deleteDoc(id){
+    const rec = Store.data.rateDocs.find(x=>x.id===id); if(!rec) return;
+    if(!confirm('Delete document ' + (rec.docNumber||rec.id) + '? This cannot be undone.')) return;
+    Store.data.rateDocs = Store.data.rateDocs.filter(x=>x.id!==id);
+    const ok = await Store.save('rateDocs');
+    if(ok){ await Activity.log('Rate document deleted', rec.docNumber||rec.id); UI.toast('Deleted'); }
+    if(this.draft.id === id) this.draft = this.blankDraft();
+    this.openHistory();
+  },
+  openHistory(){
+    const list = Store.data.rateDocs.slice().sort((a,b)=>String(b.updatedAt||b.createdAt||'').localeCompare(String(a.updatedAt||a.createdAt||'')));
+    const badge = st => '<span class="badge badge-' +
+      (st==='Final'?'green':st==='Generated'?'blue':st==='Cancelled'?'gray':'amber') + '">' + Util.escapeHtml(st||'Draft') + '</span>';
+    UI.openModal('Rate Document History',
+      list.length
+        ? '<div class="table-wrap"><table><thead><tr><th>Actions</th><th>Document</th><th>Customer</th><th>Date</th><th>Total</th><th>GST</th><th>Status</th></tr></thead><tbody>' +
+          list.map(r=>{
+            const saved = this.draft;
+            this.draft = r;                     // borrow for the totals calc
+            const tot = this.totals().grand;
+            this.draft = saved;
+            return '<tr>' +
+              '<td style="display:flex;gap:4px;">' +
+                '<button class="btn btn-outline btn-sm" onclick="RatePDF.loadDoc(\'' + r.id + '\')">Open</button>' +
+                '<button class="btn btn-outline btn-sm" onclick="RatePDF.duplicateDoc(\'' + r.id + '\')">Duplicate</button>' +
+                '<button class="btn btn-outline btn-sm" onclick="RatePDF.createRevision(\'' + r.id + '\')">Revision</button>' +
+                '<button class="icon-btn" onclick="RatePDF.deleteDoc(\'' + r.id + '\')">&#128465;</button>' +
+              '</td>' +
+              '<td class="mono cell-main">' + Util.escapeHtml(r.docNumber||r.id) + (r.revision?' <span class="badge badge-gray">rev ' + r.revision + '</span>':'') + '</td>' +
+              '<td>' + Util.escapeHtml(r.customerName||'-') + '</td>' +
+              '<td class="cell-mute">' + Util.fmtDate(r.docDate) + '</td>' +
+              '<td class="mono">' + this.rupee(tot) + '</td>' +
+              '<td class="cell-mute">' + (r.gstEnabled?'Yes':'No') + '</td>' +
+              '<td>' + badge(r.status) + '</td></tr>';
+          }).join('') + '</tbody></table></div>'
+        : '<div class="empty-state"><div class="ic">&#128193;</div><div class="t">No saved documents yet</div></div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>', true);
+  },
+  newDoc(){
+    if(this.draft && this.draft.items.some(i=>i.itemName) && !confirm('Discard the current unsaved document?')) return;
+    this.draft = this.blankDraft();
     this.render();
   },
 
-  /* ---------- page ---------- */
+  /* ---------------- page ---------------- */
+  itemCard(it, idx){
+    const d = this.draft;
+    const linked = it.templateId && Store.data.rateTemplates.some(t=>t.id===it.templateId);
+    const base = this.itemBase(it);
+    const E = Util.escapeHtml;
+    return '<div class="card card-pad" style="margin-bottom:10px;">' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">' +
+        '<span class="badge badge-blue">Item ' + (idx+1) + '</span>' +
+        (linked ? '<span class="hint">linked to a template \u2014 edits here stay in this document</span>' : '') +
+        '<div class="toolbar-spacer"></div>' +
+        '<button class="icon-btn" title="Move up" onclick="RatePDF.moveItem(\'' + it.uid + '\',-1)">&#8593;</button>' +
+        '<button class="icon-btn" title="Move down" onclick="RatePDF.moveItem(\'' + it.uid + '\',1)">&#8595;</button>' +
+        '<button class="icon-btn" title="Remove" onclick="RatePDF.removeItem(\'' + it.uid + '\')">&#128465;</button>' +
+      '</div>' +
+      '<div class="toolbar" style="margin:0 0 10px;">' +
+        '<button class="btn btn-outline btn-sm" onclick="RatePDF.openLibrary(\'' + it.uid + '\')">&#128194; Template</button>' +
+        '<button class="btn btn-outline btn-sm" onclick="RatePDF.openProductPicker(\'' + it.uid + '\')">&#128230; Product Master</button>' +
+        '<button class="btn btn-outline btn-sm" onclick="RatePDF.saveItemAsTemplate(\'' + it.uid + '\')">&#11088; Save as Template</button>' +
+        (linked ? '<button class="btn btn-outline btn-sm" onclick="RatePDF.updateTemplateFromItem(\'' + it.uid + '\')">Update Template</button>' : '') +
+      '</div>' +
+      '<div class="form-row">' +
+        '<div class="field"><label>Description *</label><input value="' + E(it.itemName) + '" oninput="RatePDF.updItem(\'' + it.uid + '\',\'itemName\',this.value)"></div>' +
+        '<div class="field"><label>Category</label><input value="' + E(it.category) + '" oninput="RatePDF.updItem(\'' + it.uid + '\',\'category\',this.value)"></div>' +
+      '</div>' +
+      '<div class="form-row">' +
+        '<div class="field"><label>Brand</label><input value="' + E(it.brand) + '" oninput="RatePDF.updItem(\'' + it.uid + '\',\'brand\',this.value)"></div>' +
+        '<div class="field"><label>Model</label><input value="' + E(it.model) + '" oninput="RatePDF.updItem(\'' + it.uid + '\',\'model\',this.value)"></div>' +
+      '</div>' +
+      '<div class="field"><label>Specifications (one per line)</label>' +
+        '<textarea rows="4" oninput="RatePDF.updItem(\'' + it.uid + '\',\'specs\',this.value)">' + E(it.specs) + '</textarea></div>' +
+      '<div class="form-row">' +
+        '<div class="field"><label>Qty *</label><input type="number" min="1" value="' + (it.qty||1) + '" oninput="RatePDF.updItem(\'' + it.uid + '\',\'qty\',this.value)"></div>' +
+        '<div class="field"><label>Unit</label><input value="' + E(it.unit||'Nos') + '" oninput="RatePDF.updItem(\'' + it.uid + '\',\'unit\',this.value)"></div>' +
+      '</div>' +
+      '<div class="form-row">' +
+        '<div class="field"><label>Rate *</label><input type="number" step="0.01" value="' + (it.rate===''?'':it.rate) + '" oninput="RatePDF.updItem(\'' + it.uid + '\',\'rate\',this.value)"></div>' +
+        '<div class="field"><label>Discount</label><input type="number" step="0.01" value="' + (it.discount===''?'':it.discount) + '" oninput="RatePDF.updItem(\'' + it.uid + '\',\'discount\',this.value)"></div>' +
+      '</div>' +
+      // GST field is rendered ONLY when GST is switched on for the document.
+      (d.gstEnabled
+        ? '<div class="field"><label>GST % for this item <span class="hint">(blank = document rate ' + this.num(d.gstRate) + '%)</span></label>' +
+          '<input type="number" step="0.01" value="' + (it.gstRate===''?'':it.gstRate) + '" oninput="RatePDF.updItem(\'' + it.uid + '\',\'gstRate\',this.value)"></div>'
+        : '') +
+      '<div style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;">' +
+        '<div style="flex:1;min-width:180px;">' +
+          '<div class="field" style="margin-bottom:6px;"><label>Image URL</label>' +
+            '<input value="' + E(/^data:/.test(it.imageUrl||'')?'':(it.imageUrl||'')) + '" oninput="RatePDF.updItem(\'' + it.uid + '\',\'imageUrl\',this.value)"></div>' +
+          '<label class="btn btn-outline btn-sm" style="cursor:pointer;">Upload Image' +
+            '<input type="file" accept="image/jpeg,image/png,image/webp" style="display:none;" onchange="RatePDF.onItemImage(\'' + it.uid + '\',this)"></label>' +
+          (it.imageUrl ? ' <button class="btn btn-outline btn-sm" onclick="RatePDF.updItem(\'' + it.uid + '\',\'imageUrl\',\'\');RatePDF.render()">Remove</button>' : '') +
+        '</div>' +
+        (it.imageUrl ? '<div class="wa-imgbox" style="width:130px;min-height:90px;"><img src="' + E(it.imageUrl) + '" alt=""></div>' : '') +
+        '<div style="min-width:130px;text-align:right;">' +
+          '<div class="hint">Line amount</div>' +
+          '<div class="mono" style="font-size:16px;font-weight:700;">' + this.rupee(base) + '</div>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  },
+
   render(){
     if(!this.draft) this.draft = this.blankDraft();
-    const d = this.draft;
-    const active = Store.data.waTemplates.filter(t=>t.isActive!==false);
-    const srcTpl = d.templateId ? Store.data.waTemplates.find(t=>t.id===d.templateId) : null;
-    const units = [...new Set(Store.data.products.map(p=>p.unit).filter(Boolean))];
+    const d = this.draft, E = Util.escapeHtml;
+    const terms = Store.data.rateTerms.filter(t=>d.termIds.includes(t.id));
+    const statusBadge = '<span class="badge badge-' +
+      (d.status==='Final'?'green':d.status==='Generated'?'blue':'amber') + '">' + E(d.status||'Draft') + '</span>';
 
     document.getElementById('content').innerHTML =
+      '<div class="toolbar">' +
+        '<button class="btn btn-primary btn-sm" onclick="RatePDF.newDoc()">&#65291; New Document</button>' +
+        '<button class="btn btn-outline btn-sm" onclick="RatePDF.openHistory()">&#128193; Document History (' + Store.data.rateDocs.length + ')</button>' +
+        '<button class="btn btn-outline btn-sm" onclick="RatePDF.openLibrary(\'\')">&#128194; Template Library (' + Store.data.rateTemplates.length + ')</button>' +
+        '<button class="btn btn-outline btn-sm" onclick="RatePDF.openTerms()">&#128220; Terms Library</button>' +
+        '<div class="toolbar-spacer"></div>' +
+        statusBadge + (d.docNumber ? ' <span class="mono cell-mute">' + E(d.docNumber) + '</span>' : '') +
+      '</div>' +
+
       '<div class="wa-grid">' +
-
-        /* ---- left: builder ---- */
-        '<div>' +
-          '<div class="card card-pad" style="margin-bottom:14px;">' +
-            '<div class="wa-step">Step 1 &middot; Recipient</div>' +
-            '<div class="field"><label>Customer</label>' + CustPicker.html('wa', d.customerId, 'waCustomerSelected') + '</div>' +
-            '<div class="form-row">' +
-              '<div class="field"><label>Phone (WhatsApp)</label>' +
-                '<input id="wa_phone" value="' + Util.escapeHtml(d.phone) + '" placeholder="9876543210" oninput="WhatsAppRates.upd(\'phone\', this.value)"></div>' +
-              '<div class="field"><label>Sends to</label>' +
-                '<input value="' + Util.escapeHtml(d.phone ? '+' + this.normalizePhone(d.phone) : '') + '" disabled id="wa_phonePreview"></div>' +
-            '</div>' +
+      '<div>' +
+        '<div class="card card-pad" style="margin-bottom:14px;">' +
+          '<div class="wa-step">Step 1 &middot; Customer</div>' +
+          '<div class="field"><label>Customer (from Customer Master)</label>' +
+            CustPicker.html('rp', d.customerId, 'ratePdfCustomerSelected') + '</div>' +
+          '<div class="toolbar" style="margin:0 0 10px;"><button class="btn btn-outline btn-sm" onclick="RatePDF.openNewCustomer()">&#65291; Add New Customer</button></div>' +
+          '<div class="form-row">' +
+            '<div class="field"><label>Customer Name *</label><input id="rp_customerName" value="' + E(d.customerName) + '" oninput="RatePDF.upd(\'customerName\',this.value)"></div>' +
+            '<div class="field"><label>Contact Person</label><input value="' + E(d.contactPerson) + '" oninput="RatePDF.upd(\'contactPerson\',this.value)"></div>' +
           '</div>' +
-
-          '<div class="card card-pad" style="margin-bottom:14px;">' +
-            '<div class="wa-step">Step 2 &middot; Product / Template</div>' +
-            '<div class="toolbar" style="margin:0 0 10px;">' +
-              '<button class="btn btn-primary btn-sm" onclick="WhatsAppRates.openLibrary()">&#128194; Template Library (' + active.length + ')</button>' +
-              '<button class="btn btn-outline btn-sm" onclick="WhatsAppRates.openProductPicker()">&#128230; Use CRM Product</button>' +
-              '<div class="toolbar-spacer"></div>' +
-              '<button class="btn btn-outline btn-sm" onclick="WhatsAppRates.resetDraft()">&#8635; Clear</button>' +
-            '</div>' +
-            (srcTpl ? '<div class="hint" style="margin-bottom:10px;">Loaded from template <b>' + Util.escapeHtml(srcTpl.templateName||srcTpl.itemName) +
-                      '</b> &mdash; edits below affect only this message, not the saved template.</div>' : '') +
-            '<div class="form-row">' +
-              '<div class="field"><label>Item Name *</label><input id="wa_itemName" value="' + Util.escapeHtml(d.itemName) + '" oninput="WhatsAppRates.upd(\'itemName\', this.value)"></div>' +
-              '<div class="field"><label>Category</label><input value="' + Util.escapeHtml(d.category) + '" oninput="WhatsAppRates.upd(\'category\', this.value)"></div>' +
-            '</div>' +
-            '<div class="form-row">' +
-              '<div class="field"><label>Brand</label><input value="' + Util.escapeHtml(d.brand) + '" oninput="WhatsAppRates.upd(\'brand\', this.value)"></div>' +
-              '<div class="field"><label>Model</label><input value="' + Util.escapeHtml(d.model) + '" oninput="WhatsAppRates.upd(\'model\', this.value)"></div>' +
-            '</div>' +
-            '<div class="field"><label>Features / Description (one per line)</label>' +
-              '<textarea rows="5" oninput="WhatsAppRates.upd(\'features\', this.value)">' + Util.escapeHtml(d.features) + '</textarea></div>' +
+          '<div class="form-row">' +
+            '<div class="field"><label>Phone</label><input id="rp_phone" value="' + E(d.phone) + '" oninput="RatePDF.upd(\'phone\',this.value)"></div>' +
+            '<div class="field"><label>Email</label><input id="rp_email" value="' + E(d.email) + '" oninput="RatePDF.upd(\'email\',this.value)"></div>' +
           '</div>' +
-
-          '<div class="card card-pad" style="margin-bottom:14px;">' +
-            '<div class="wa-step">Step 3 &middot; Image</div>' +
-            '<div class="wa-imgbox" id="waImageBox"></div>' +
-            '<div class="toolbar" style="margin:10px 0 0;">' +
-              '<label class="btn btn-outline btn-sm" style="cursor:pointer;margin:0;">Upload Image' +
-                '<input type="file" accept="image/jpeg,image/png,image/webp" style="display:none;" onchange="WhatsAppRates.onImageFile(this)"></label>' +
-              '<button class="btn btn-outline btn-sm" onclick="WhatsAppRates.removeImage()">Remove</button>' +
-            '</div>' +
-            '<div class="field" style="margin-top:10px;"><label>or Image URL</label>' +
-              '<input id="wa_imageUrl" value="' + Util.escapeHtml(/^data:/.test(d.imageUrl)?'':d.imageUrl) + '" placeholder="https://..." oninput="WhatsAppRates.setImageUrl(this.value)"></div>' +
-            '<label class="chk"><input type="checkbox" ' + (d.includeImageLink?'checked':'') +
-              ' onchange="WhatsAppRates.upd(\'includeImageLink\', this.checked)"> Include image link in the message</label>' +
-            '<div class="hint" style="margin-top:8px;">WhatsApp\'s share link can only pre-fill text &mdash; it cannot attach a file. ' +
-              'Attach the image manually in WhatsApp after the chat opens, or tick the box above to send a public image link instead.</div>' +
-          '</div>' +
-
-          '<div class="card card-pad">' +
-            '<div class="wa-step">Step 4 &middot; Rate</div>' +
-            '<div class="form-row">' +
-              '<div class="field"><label>Price *</label><input type="number" step="0.01" value="' + (d.price===''?'':d.price) + '" oninput="WhatsAppRates.updNum(\'price\', this.value)"></div>' +
-              '<div class="field"><label>Quantity</label><input type="number" min="1" value="' + (d.qty||1) + '" oninput="WhatsAppRates.updNum(\'qty\', this.value)"></div>' +
-            '</div>' +
-            '<div class="form-row">' +
-              '<div class="field"><label>Unit</label><input list="waUnitList" value="' + Util.escapeHtml(d.unit||'Nos') + '" oninput="WhatsAppRates.upd(\'unit\', this.value)">' +
-                '<datalist id="waUnitList">' + units.map(u=>'<option value="' + Util.escapeHtml(u) + '">').join('') + '</datalist></div>' +
-              '<div class="field"><label>Discount (total)</label><input type="number" step="0.01" value="' + (d.discount===''?'':d.discount) + '" oninput="WhatsAppRates.updNum(\'discount\', this.value)"></div>' +
-            '</div>' +
-            '<div class="field"><label>Final Amount</label><input id="waTotal" value="" disabled style="font-weight:700;"></div>' +
-            '<div class="form-row">' +
-              '<div class="field"><label>Greeting</label><input value="' + Util.escapeHtml(d.greeting) + '" oninput="WhatsAppRates.upd(\'greeting\', this.value)"></div>' +
-              '<div class="field"><label>Signature</label><input value="' + Util.escapeHtml(d.signature) + '" oninput="WhatsAppRates.upd(\'signature\', this.value)"></div>' +
-            '</div>' +
-            '<div class="field"><label>Closing Line</label><input value="' + Util.escapeHtml(d.closing) + '" oninput="WhatsAppRates.upd(\'closing\', this.value)"></div>' +
-          '</div>' +
+          '<div class="field"><label>Address</label><input id="rp_address" value="' + E(d.address) + '" oninput="RatePDF.upd(\'address\',this.value)"></div>' +
+          '<div class="field"><label>Customer GSTIN <span class="hint">(optional)</span></label><input value="' + E(d.gstin) + '" oninput="RatePDF.upd(\'gstin\',this.value)"></div>' +
         '</div>' +
 
-        /* ---- right: preview + send ---- */
-        '<div>' +
-          '<div class="card card-pad" style="position:sticky;top:12px;">' +
-            '<div class="wa-step">Preview</div>' +
-            '<div class="wa-phone"><div id="waPreview"></div></div>' +
-            '<div id="waErrors"></div>' +
-            '<div class="toolbar" style="margin:12px 0 0;flex-wrap:wrap;">' +
-              '<button class="btn btn-primary btn-sm" onclick="WhatsAppRates.send()">&#128172; Send via WhatsApp</button>' +
-              '<button class="btn btn-outline btn-sm" onclick="WhatsAppRates.copyMessage()">Copy</button>' +
-            '</div>' +
-            '<div class="toolbar" style="margin:8px 0 0;flex-wrap:wrap;">' +
-              '<button class="btn btn-outline btn-sm" onclick="WhatsAppRates.saveDraftAsTemplate()">&#11088; Save as Template</button>' +
-              (srcTpl ? '<button class="btn btn-outline btn-sm" onclick="WhatsAppRates.saveChangesToTemplate()">Save Changes to Template</button>' : '') +
-            '</div>' +
+        '<div class="card card-pad" style="margin-bottom:14px;">' +
+          '<div class="wa-step">Step 2 &middot; Document</div>' +
+          '<div class="form-row">' +
+            '<div class="field"><label>Document Type</label><select onchange="RatePDF.upd(\'docType\',this.value)">' +
+              RATE_DOC_TYPES.map(x=>'<option ' + (x===d.docType?'selected':'') + '>' + x + '</option>').join('') + '</select></div>' +
+            '<div class="field"><label>Theme</label><select onchange="RatePDF.upd(\'theme\',this.value)">' +
+              RATE_THEMES.map(x=>'<option ' + (x===d.theme?'selected':'') + '>' + x + '</option>').join('') + '</select></div>' +
           '</div>' +
+          '<div class="form-row">' +
+            '<div class="field"><label>Document No.</label><input value="' + E(d.docNumber) + '" placeholder="auto on save" oninput="RatePDF.upd(\'docNumber\',this.value)"></div>' +
+            '<div class="field"><label>Date</label><input type="date" value="' + E(d.docDate) + '" oninput="RatePDF.upd(\'docDate\',this.value)"></div>' +
+          '</div>' +
+          '<div class="form-row">' +
+            '<div class="field"><label>Valid Until</label><input type="date" value="' + E(d.validUntil) + '" oninput="RatePDF.upd(\'validUntil\',this.value)"></div>' +
+            '<div class="field"><label>Prepared By</label><input value="' + E(d.salesperson) + '" oninput="RatePDF.upd(\'salesperson\',this.value)"></div>' +
+          '</div>' +
+          '<div class="form-row">' +
+            '<div class="field"><label>Reference</label><input value="' + E(d.reference) + '" oninput="RatePDF.upd(\'reference\',this.value)"></div>' +
+            '<div class="field"><label>Customer Reference</label><input value="' + E(d.customerRef) + '" oninput="RatePDF.upd(\'customerRef\',this.value)"></div>' +
+          '</div>' +
+          '<div class="field"><label>Subject</label><input value="' + E(d.subject) + '" oninput="RatePDF.upd(\'subject\',this.value)"></div>' +
+        '</div>' +
+
+        '<div class="card card-pad" style="margin-bottom:14px;">' +
+          '<div class="wa-step">Step 3 &middot; Tax (optional)</div>' +
+          '<label class="chk"><input type="checkbox" ' + (d.gstEnabled?'checked':'') + ' onchange="RatePDF.toggleGst(this.checked)"> ' +
+            '<b>Apply GST to this document</b></label>' +
+          '<div class="hint" style="margin-top:6px;">' +
+            (d.gstEnabled
+              ? 'GST columns and totals will appear on the PDF.'
+              : 'GST is off \u2014 no GST column, no tax rows and no GSTIN are required or printed.') + '</div>' +
+          (d.gstEnabled
+            ? '<div class="form-row" style="margin-top:10px;">' +
+                '<div class="field"><label>Default GST %</label><input type="number" step="0.01" value="' + (d.gstRate===''?'':d.gstRate) + '" oninput="RatePDF.upd(\'gstRate\',this.value)"></div>' +
+                '<div class="field"><label>Rate Basis</label><select onchange="RatePDF.upd(\'gstMode\',this.value)">' +
+                  '<option value="exclusive" ' + (d.gstMode==='exclusive'?'selected':'') + '>Exclusive (add GST)</option>' +
+                  '<option value="inclusive" ' + (d.gstMode==='inclusive'?'selected':'') + '>Inclusive (rate has GST)</option>' +
+                '</select></div>' +
+              '</div>' +
+              '<div class="field"><label>Supply Type</label><select onchange="RatePDF.upd(\'gstScope\',this.value)">' +
+                '<option value="intra" ' + (d.gstScope==='intra'?'selected':'') + '>Within State \u2014 CGST + SGST</option>' +
+                '<option value="inter" ' + (d.gstScope==='inter'?'selected':'') + '>Inter State \u2014 IGST</option>' +
+              '</select></div>'
+            : '') +
+        '</div>' +
+
+        '<div class="card card-pad" style="margin-bottom:14px;">' +
+          '<div class="wa-step">Step 4 &middot; Items</div>' +
+          d.items.map((it,i)=>this.itemCard(it,i)).join('') +
+          '<button class="btn btn-outline btn-sm" onclick="RatePDF.addItem()">&#65291; Add Item</button>' +
+        '</div>' +
+
+        '<div class="card card-pad">' +
+          '<div class="wa-step">Step 5 &middot; Terms</div>' +
+          '<div class="toolbar" style="margin:0 0 10px;">' +
+            '<button class="btn btn-outline btn-sm" onclick="RatePDF.openTerms()">Choose Terms (' + terms.length + ' selected)</button></div>' +
+          (terms.length
+            ? '<ol style="margin:0 0 10px 18px;font-size:12.5px;color:var(--text-mute,#6b7280);">' +
+              terms.map(t=>'<li style="margin-bottom:3px;"><b>' + E(t.title) + ':</b> ' + E(t.body) + '</li>').join('') + '</ol>'
+            : '<div class="hint" style="margin-bottom:10px;">No terms selected.</div>') +
+          '<div class="field"><label>Additional Notes</label>' +
+            '<textarea rows="3" oninput="RatePDF.upd(\'extraNotes\',this.value)">' + E(d.extraNotes) + '</textarea></div>' +
         '</div>' +
       '</div>' +
 
-      '<div class="card" style="margin-top:16px;"><div class="card-pad" style="padding-bottom:0;">' +
-        '<h3 style="margin:0 0 4px;font-size:14px;">Recent Sends</h3>' +
-        '<div class="hint" style="margin-bottom:10px;">Last 25 rates sent from this module.</div></div>' +
-        '<div class="table-wrap"><table><thead><tr><th>Sent</th><th>Customer</th><th>Phone</th><th>Item</th><th>Amount</th><th>By</th></tr></thead>' +
-        '<tbody id="waHistoryBody">' + this.historyRows() + '</tbody></table></div></div>';
+      '<div>' +
+        '<div class="card card-pad" style="position:sticky;top:12px;">' +
+          '<div class="wa-step">Summary</div>' +
+          '<div id="rpTotals" style="font-size:13px;">' + this.totalsHTML() + '</div>' +
+          '<div id="rpErrors"></div>' +
+          '<div class="toolbar" style="margin:12px 0 0;flex-wrap:wrap;">' +
+            '<button class="btn btn-primary btn-sm" onclick="RatePDF.preview()">&#128065; Preview</button>' +
+            '<button class="btn btn-primary btn-sm" onclick="RatePDF.download()">&#11015; Download PDF</button>' +
+            '<button class="btn btn-outline btn-sm" onclick="RatePDF.print()">&#128424; Print</button>' +
+          '</div>' +
+          '<div class="toolbar" style="margin:8px 0 0;flex-wrap:wrap;">' +
+            '<button class="btn btn-outline btn-sm" onclick="RatePDF.saveDraft()">&#128190; Save Draft</button>' +
+            (d.id ? '<button class="btn btn-outline btn-sm" onclick="RatePDF.createRevision()">Create Revision</button>' : '') +
+            (d.id && d.status!=='Final' ? '<button class="btn btn-outline btn-sm" onclick="RatePDF.markFinal()">Mark Final</button>' : '') +
+          '</div>' +
+          '<div class="hint" style="margin-top:10px;">Share the PDF over WhatsApp by downloading it and attaching it in your chat.</div>' +
+        '</div>' +
+      '</div>' +
+      '</div>' +
 
-    this.renderImageBox();
-    this.refreshPreview();
+      '<div class="card" id="rpPreviewWrap" style="display:none;margin-top:16px;">' +
+        '<div class="card-pad" style="padding-bottom:6px;"><h3 style="margin:0;font-size:14px;">PDF Preview</h3></div>' +
+        '<iframe id="rpPreviewFrame" style="width:100%;height:760px;border:0;border-top:1px solid var(--border);"></iframe>' +
+      '</div>';
   }
 };
-/* CustPicker callback (global by contract - CustPicker calls window[cbName]) */
-function waCustomerSelected(c){ WhatsAppRates.onCustomer(c); }
-Views.whatsapp_rates = ()=>WhatsAppRates.render();
+/* CustPicker invokes window[cbName] by contract. */
+function ratePdfCustomerSelected(c){ RatePDF.onCustomer(c); }
+Views.rate_docs = ()=>{ RatePDF.seedTerms().then(()=>RatePDF.render()); };
 
 const Reports = {
   render(){
@@ -4739,7 +5367,8 @@ const Backup = {
       users: Store.data.users, settings: Store.data.settings,
       gemcrac: Store.data.gemcrac, orders: Store.data.orders, complaints: Store.data.complaints,
       bids: Store.data.bids,
-      waTemplates: Store.data.waTemplates, waHistory: Store.data.waHistory
+      waTemplates: Store.data.waTemplates, waHistory: Store.data.waHistory,
+      rateTemplates: Store.data.rateTemplates, rateDocs: Store.data.rateDocs, rateTerms: Store.data.rateTerms
     };
   },
   downloadJSON(){
@@ -4766,10 +5395,10 @@ const Backup = {
     try{
       const text = await file.text();
       const data = JSON.parse(text);
-      ['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory'].forEach(k=>{
+      ['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms'].forEach(k=>{
         if(data[k]!==undefined) Store.data[k] = data[k];
       });
-      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory'].map(k=>Store.save(k)));
+      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms'].map(k=>Store.save(k)));
       await Activity.log('Data restored', 'Restored from backup file '+file.name);
       UI.toast('Data restored successfully');
       Router.render('backup');
