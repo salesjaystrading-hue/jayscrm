@@ -4472,17 +4472,75 @@ const RatePDF = {
     }
 
     /* --- items table. GST columns exist ONLY when gstEnabled.
-       A Photo column is always present when any item has an image;
+       A Photo column is present only when at least one item has an image;
        didDrawCell paints the actual image (AutoTable cells can't hold
-       image data as cell text). Specifications get their own column. --- */
+       image data as cell text). Specifications get their own column.
+
+       FIX: column headers and column widths used to be built as two
+       separate lists that had to stay in sync by hand - they didn't,
+       and every combination overflowed the printable A4 width (182mm
+       inside the 14mm margins), which is exactly what clipped the
+       Amount column off the right edge. Both lists are now derived
+       from ONE array below, so they can never drift apart again, and
+       every width combination is pre-verified to total exactly 182mm
+       or less. */
     const gst = d.gstEnabled;
     const hasAnyImage = d.items.some(it=>it.imageUrl);
-    const cols = ['S.No.'];
-    if(hasAnyImage) cols.push('Photo');
-    cols.push('Item / Description','Specifications','Qty','Unit','Rate','Discount');
-    if(gst) cols.push('GST');
-    cols.push('Amount');
-    const head = [cols];
+
+    let columns;
+    if(hasAnyImage && gst){
+      columns = [
+        {header:'S.No.', width:8, halign:'center'},
+        {header:'Photo', width:14, minCellHeight:14},
+        {header:'Item / Description', width:38},
+        {header:'Specifications', width:36},
+        {header:'Qty', width:10, halign:'right'},
+        {header:'Unit', width:12},
+        {header:'Rate', width:18, halign:'right'},
+        {header:'Discount', width:15, halign:'right'},
+        {header:'GST', width:11, halign:'right'},
+        {header:'Amount', width:20, halign:'right'}
+      ];
+    } else if(hasAnyImage && !gst){
+      columns = [
+        {header:'S.No.', width:9, halign:'center'},
+        {header:'Photo', width:16, minCellHeight:16},
+        {header:'Item / Description', width:36},
+        {header:'Specifications', width:36},
+        {header:'Qty', width:11, halign:'right'},
+        {header:'Unit', width:13},
+        {header:'Rate', width:22, halign:'right'},
+        {header:'Discount', width:18, halign:'right'},
+        {header:'Amount', width:21, halign:'right'}
+      ];
+    } else if(!hasAnyImage && gst){
+      columns = [
+        {header:'S.No.', width:9, halign:'center'},
+        {header:'Item / Description', width:38},
+        {header:'Specifications', width:38},
+        {header:'Qty', width:11, halign:'right'},
+        {header:'Unit', width:13},
+        {header:'Rate', width:20, halign:'right'},
+        {header:'Discount', width:16, halign:'right'},
+        {header:'GST', width:12, halign:'right'},
+        {header:'Amount', width:25, halign:'right'}
+      ];
+    } else {
+      columns = [
+        {header:'S.No.', width:9, halign:'center'},
+        {header:'Item / Description', width:44},
+        {header:'Specifications', width:44},
+        {header:'Qty', width:12, halign:'right'},
+        {header:'Unit', width:14},
+        {header:'Rate', width:24, halign:'right'},
+        {header:'Discount', width:20, halign:'right'},
+        {header:'Amount', width:15, halign:'right'}
+      ];
+    }
+    const photoColIdx = columns.findIndex(c=>c.header==='Photo');
+    const head = [columns.map(c=>c.header)];
+    const colStyles = {};
+    columns.forEach((c,i)=>{ colStyles[i] = {cellWidth:c.width, halign:c.halign, minCellHeight:c.minCellHeight}; });
 
     const body = d.items.map((it,i)=>{
       let desc = it.itemName || '-';
@@ -4493,29 +4551,15 @@ const RatePDF = {
       const base = this.itemBase(it);
       const row = [String(i+1)];
       if(hasAnyImage) row.push('');        // photo cell stays blank; image is painted on top of it
+      // Discount is always a fully-formatted figure (never a bare '-' for
+      // zero) so the column reads consistently whether or not this
+      // particular item has a discount.
       row.push(desc, specsText, String(this.num(it.qty)), it.unit||'Nos',
-                this.money(it.rate), this.num(it.discount) ? this.money(it.discount) : '-');
+                this.money(it.rate), this.money(this.num(it.discount)));
       if(gst) row.push(String(this.itemGstRate(it)) + '%');
       row.push(this.money(base));
       return row;
     });
-
-    // Column widths assigned by position rather than hand-picked indices,
-    // so adding/removing a column (Photo, GST) can never silently shift
-    // a style onto the wrong column.
-    let ci = 0;
-    const colStyles = {};
-    colStyles[ci++] = {cellWidth:9, halign:'center'};              // S.No.
-    const photoColIdx = hasAnyImage ? ci : -1;
-    if(hasAnyImage) colStyles[ci++] = {cellWidth:18, minCellHeight:18};   // Photo
-    colStyles[ci++] = {cellWidth: gst?46:52};                      // Item / Description
-    colStyles[ci++] = {cellWidth: gst?38:42};                      // Specifications
-    colStyles[ci++] = {cellWidth: gst?11:13, halign:'right'};      // Qty
-    colStyles[ci++] = {cellWidth: gst?13:15};                      // Unit
-    colStyles[ci++] = {cellWidth: gst?20:24, halign:'right'};      // Rate
-    colStyles[ci++] = {cellWidth: gst?17:19, halign:'right'};      // Discount
-    if(gst) colStyles[ci++] = {cellWidth:13, halign:'right'};      // GST
-    colStyles[ci] = {cellWidth: gst?22:26, halign:'right'};        // Amount
 
     doc.autoTable({
       head, body, startY:y, margin:{left:M,right:M,top:22,bottom:20},
@@ -4524,6 +4568,7 @@ const RatePDF = {
       headStyles:{fillColor: minimal ? [245,245,245] : accent, textColor: minimal ? 40 : 255,
                   fontStyle:'bold', fontSize:7.8, halign:'left'},
       alternateRowStyles: minimal ? {} : {fillColor:[250,250,250]},
+      tableWidth: columns.reduce((s,c)=>s+c.width,0),
       columnStyles: colStyles,
       showHead:'everyPage',            // repeating header on every page
       rowPageBreak:'auto',
