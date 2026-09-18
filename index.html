@@ -363,7 +363,6 @@
   .wa-grid{display:grid;grid-template-columns:1fr 400px;gap:16px;align-items:start;}
   @media(max-width:1100px){ .wa-grid{grid-template-columns:1fr;} }
   .wa-step{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--orange);margin:0 0 10px;}
-    white-space:pre-wrap;word-break:break-word;position:relative;box-shadow:0 1px 1px rgba(0,0,0,.2);}
   .wa-imgbox{border:1.5px dashed var(--border);border-radius:10px;min-height:150px;display:flex;align-items:center;
     justify-content:center;overflow:hidden;background:var(--bg-soft,#faf9f7);}
   .wa-imgbox img{max-width:100%;max-height:220px;display:block;object-fit:contain;}
@@ -375,6 +374,37 @@
   .wa-tpl-price{font-weight:700;color:var(--orange);font-size:13px;}
   .wa-err{color:var(--red,#dc2626);font-size:12px;margin-top:6px;}
   label.chk{display:flex;align-items:center;gap:7px;font-size:13px;cursor:pointer;}
+
+  /* Rate/Offer: compact item card */
+  .rp-item-card{margin-bottom:10px;}
+  .form-row-4{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;}
+  @media(max-width:700px){.form-row-4{grid-template-columns:repeat(2,1fr);}}
+  .rp-item-foot{display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap;justify-content:space-between;margin-top:8px;}
+  .rp-item-image{display:flex;gap:10px;align-items:flex-start;flex:1;min-width:220px;}
+  .rp-item-thumb{width:64px;height:64px;min-height:0;border-radius:8px;flex-shrink:0;}
+  .rp-item-thumb img{max-height:64px;}
+  .rp-item-amount{min-width:120px;text-align:right;}
+
+  /* Rate/Offer: New / Draft / Saved segmented switcher, navy+orange branded */
+  .rp-switcher{display:flex;gap:4px;background:var(--navy);border-radius:11px;padding:4px;margin-bottom:14px;}
+  .rp-switcher button{flex:1;border:0;background:transparent;color:#9fb3cc;font-weight:700;font-size:12.5px;
+    padding:9px 10px;border-radius:8px;cursor:pointer;transition:background .15s,color .15s;}
+  .rp-switcher button.active{background:linear-gradient(135deg,var(--orange),var(--orange-dark));color:#fff;
+    box-shadow:0 4px 12px rgba(235,90,40,0.3);}
+  .rp-switcher button:not(.active):hover{background:var(--navy-2);color:#fff;}
+
+  /* Rate/Offer: sticky bottom action bar (editor mode only) */
+  .rp-sticky-actions{position:fixed;left:236px;right:0;bottom:0;z-index:80;
+    background:var(--navy);border-top:1px solid var(--navy-3);
+    padding:10px 22px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;
+    box-shadow:0 -8px 24px rgba(11,20,36,0.25);}
+  @media(max-width:880px){ .rp-sticky-actions{left:0;padding:9px 14px;} }
+  .rp-sticky-actions .rp-status-pill{margin-left:auto;font-size:11.5px;color:#9fb3cc;display:flex;align-items:center;gap:8px;}
+  .rp-editor-pad{padding-bottom:78px;}
+
+  /* Rate/Offer: Saved/Draft list toolbar + table */
+  .rp-list-toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px;}
+  .rp-list-toolbar .search{flex:1;min-width:220px;}
 
   /* ---------- Universal table system (sticky actions, pagination, sort) ---------- */
   table th.col-actions, table td.col-actions{
@@ -4052,7 +4082,7 @@ const RatePDF = {
       uid: 'I' + Date.now() + Math.floor(Math.random()*1000),
       templateId:'', itemName:'', brand:'', model:'', category:'',
       specs:'', qty:1, unit:'Nos', rate:'', discount:'',
-      gstRate:'', imageUrl:''
+      gstRate:'', imageUrl:'', imageSize:0
     };
   },
   blankDraft(){
@@ -4117,6 +4147,11 @@ const RatePDF = {
   },
   money(n){ return Number(n||0).toLocaleString('en-IN',{minimumFractionDigits:2, maximumFractionDigits:2}); },
   rupee(n){ return '\u20B9' + this.money(n); },
+  fmtBytes(n){
+    n = Number(n)||0;
+    if(!n) return '';
+    return n >= 1024*1024 ? (n/1024/1024).toFixed(2)+' MB' : Math.round(n/1024)+' KB';
+  },
 
   /* Indian-system amount in words (lakh / crore). */
   words(amount){
@@ -4300,13 +4335,21 @@ const RatePDF = {
     const f = input.files && input.files[0];
     if(!f) return;
     if(!/^image\/(jpe?g|png|webp)$/i.test(f.type)){ UI.toast('Use a JPG, PNG or WEBP image'); input.value=''; return; }
+    if(f.size > 1024*1024){ UI.toast('Image must be 1 MB or smaller.'); input.value=''; return; }
     try{
-      // Downscaled before storing: documents live in the shared JSON store.
+      // Hard limit is checked above on the ORIGINAL file; downscaling below is
+      // purely to keep the shared JSON store small, not a substitute for it.
       const url = await this._downscale(f, 420, 0.7);
-      this.updItem(uid, 'imageUrl', url);
+      const it = this.draft.items.find(x=>x.uid===uid);
+      if(it){ it.imageUrl = url; it.imageSize = f.size; }
       this.render();
     }catch(e){ console.error(e); UI.toast('Could not process that image'); }
     input.value = '';
+  },
+  removeItemImage(uid){
+    const it = this.draft.items.find(x=>x.uid===uid);
+    if(it){ it.imageUrl=''; it.imageSize=0; }
+    this.render();
   },
 
   /* ---------------- PDF engine (jsPDF + AutoTable) ---------------- */
@@ -4331,15 +4374,30 @@ const RatePDF = {
       doc.rect(0,0,PW,3,'F');
       y = M + 2;
     }
+    // Logo is drawn at its real aspect ratio (via jsPDF's own image-properties
+    // lookup) instead of a fixed square, so a wide wordmark logo isn't stretched.
+    // Sized generously so it reads clearly at the top of an A4 page.
+    let logoW = 0, logoH = 0;
     if(s.companyLogo){
-      try{ doc.addImage(s.companyLogo,'JPEG',M,y,24,24); }catch(e){ console.warn('logo skipped',e); }
+      try{
+        const props = doc.getImageProperties(s.companyLogo);
+        const maxW = 52, maxH = 26;
+        const scale = Math.min(maxW/props.width, maxH/props.height);
+        logoW = props.width*scale; logoH = props.height*scale;
+        doc.addImage(s.companyLogo,'JPEG',M,y,logoW,logoH);
+      }catch(e){ console.warn('logo skipped',e); }
     }
-    const tx = s.companyLogo ? M+28 : M;
+    const tx = logoW ? M + logoW + 6 : M;
     doc.setFont('helvetica','bold'); doc.setFontSize(15);
     doc.setTextColor(accent[0],accent[1],accent[2]);
-    doc.text(String(s.companyName||'JAYS TRADING AND BUSINESS SOLUTION'), tx, y+6);
+    doc.text(String(s.companyName||'JAYS TRADING AND BUSINESS SOLUTION').toUpperCase(), tx, y + Math.max(6, logoH/2 + 2));
+    let hy = y + Math.max(11, logoH + 3);
+    if(s.companySlogan){
+      doc.setFont('helvetica','italic'); doc.setFontSize(8.2); doc.setTextColor(120);
+      doc.splitTextToSize(String(s.companySlogan), PW - tx - M).slice(0,2).forEach(l=>{ doc.text(l, tx, hy); hy += 3.8; });
+      hy += 0.5;
+    }
     doc.setFont('helvetica','normal'); doc.setFontSize(8.5); doc.setTextColor(70);
-    let hy = y + 11;
     const cLines = [
       s.companyAddress || '',
       [s.companyPhone && ('Ph: '+s.companyPhone), s.companyEmail && ('Email: '+s.companyEmail)].filter(Boolean).join('   '),
@@ -4347,7 +4405,7 @@ const RatePDF = {
     ].filter(x=>String(x).trim());
     cLines.forEach(l=>{ doc.text(String(l), tx, hy); hy += 4; });
 
-    y = Math.max(hy + 3, y + 28);
+    y = Math.max(hy + 3, y + Math.max(logoH, 28));
     doc.setDrawColor(accent[0],accent[1],accent[2]); doc.setLineWidth(0.5);
     doc.line(M, y, PW-M, y);
     y += 6;
@@ -4414,47 +4472,57 @@ const RatePDF = {
     }
 
     /* --- items table. GST columns exist ONLY when gstEnabled.
-       A Photo column is always present; didDrawCell paints the actual
-       image (AutoTable cells can't hold image data as cell text). --- */
+       A Photo column is always present when any item has an image;
+       didDrawCell paints the actual image (AutoTable cells can't hold
+       image data as cell text). Specifications get their own column. --- */
     const gst = d.gstEnabled;
     const hasAnyImage = d.items.some(it=>it.imageUrl);
-    const head = gst
-      ? (hasAnyImage ? [['#','Photo','Description','Qty','Unit','Rate','Disc','GST%','Amount']] : [['#','Description','Qty','Unit','Rate','Disc','GST%','Amount']])
-      : (hasAnyImage ? [['#','Photo','Description','Qty','Unit','Rate','Disc','Amount']] : [['#','Description','Qty','Unit','Rate','Disc','Amount']]);
+    const cols = ['S.No.'];
+    if(hasAnyImage) cols.push('Photo');
+    cols.push('Item / Description','Specifications','Qty','Unit','Rate','Discount');
+    if(gst) cols.push('GST');
+    cols.push('Amount');
+    const head = [cols];
+
     const body = d.items.map((it,i)=>{
       let desc = it.itemName || '-';
       const sub = [it.brand, it.model].filter(Boolean).join(' ');
       if(sub) desc += '\n' + sub;
-      const specs = String(it.specs||'').split('\n').map(x=>x.trim()).filter(Boolean);
-      if(specs.length) desc += '\n' + specs.map(x=>'\u2022 ' + x).join('\n');
+      const specLines = String(it.specs||'').split('\n').map(x=>x.trim()).filter(Boolean);
+      const specsText = specLines.length ? specLines.map(x=>'\u2022 ' + x).join('\n') : '-';
       const base = this.itemBase(it);
       const row = [String(i+1)];
       if(hasAnyImage) row.push('');        // photo cell stays blank; image is painted on top of it
-      row.push(desc, String(this.num(it.qty)), it.unit||'Nos',
+      row.push(desc, specsText, String(this.num(it.qty)), it.unit||'Nos',
                 this.money(it.rate), this.num(it.discount) ? this.money(it.discount) : '-');
       if(gst) row.push(String(this.itemGstRate(it)) + '%');
       row.push(this.money(base));
       return row;
     });
 
-    const photoColIdx = hasAnyImage ? 1 : -1;
-    const colStyles = {0:{cellWidth:8,halign:'center'}};
-    if(hasAnyImage) colStyles[photoColIdx] = {cellWidth:18,minCellHeight:18};
-    let ci = hasAnyImage ? 2 : 1;
-    colStyles[ci++] = {}; // description - flexible width, no fixed value needed
-    colStyles[ci++] = {cellWidth: gst?12:14, halign:'right'};   // qty
-    colStyles[ci++] = {cellWidth: gst?14:16};                    // unit
-    colStyles[ci++] = {cellWidth: gst?22:26, halign:'right'};    // rate
-    colStyles[ci++] = {cellWidth: gst?18:20, halign:'right'};    // disc
-    if(gst) colStyles[ci++] = {cellWidth:14, halign:'right'};    // gst%
-    colStyles[ci] = {cellWidth: gst?24:28, halign:'right'};      // amount
+    // Column widths assigned by position rather than hand-picked indices,
+    // so adding/removing a column (Photo, GST) can never silently shift
+    // a style onto the wrong column.
+    let ci = 0;
+    const colStyles = {};
+    colStyles[ci++] = {cellWidth:9, halign:'center'};              // S.No.
+    const photoColIdx = hasAnyImage ? ci : -1;
+    if(hasAnyImage) colStyles[ci++] = {cellWidth:18, minCellHeight:18};   // Photo
+    colStyles[ci++] = {cellWidth: gst?46:52};                      // Item / Description
+    colStyles[ci++] = {cellWidth: gst?38:42};                      // Specifications
+    colStyles[ci++] = {cellWidth: gst?11:13, halign:'right'};      // Qty
+    colStyles[ci++] = {cellWidth: gst?13:15};                      // Unit
+    colStyles[ci++] = {cellWidth: gst?20:24, halign:'right'};      // Rate
+    colStyles[ci++] = {cellWidth: gst?17:19, halign:'right'};      // Discount
+    if(gst) colStyles[ci++] = {cellWidth:13, halign:'right'};      // GST
+    colStyles[ci] = {cellWidth: gst?22:26, halign:'right'};        // Amount
 
     doc.autoTable({
       head, body, startY:y, margin:{left:M,right:M,top:22,bottom:20},
       theme: minimal ? 'plain' : 'grid',
-      styles:{fontSize:8, cellPadding:2, overflow:'linebreak', valign:'middle', lineColor:[210,210,210], lineWidth:0.15},
+      styles:{fontSize:7.6, cellPadding:2, overflow:'linebreak', valign:'middle', lineColor:[210,210,210], lineWidth:0.15},
       headStyles:{fillColor: minimal ? [245,245,245] : accent, textColor: minimal ? 40 : 255,
-                  fontStyle:'bold', fontSize:8.2, halign:'left'},
+                  fontStyle:'bold', fontSize:7.8, halign:'left'},
       alternateRowStyles: minimal ? {} : {fillColor:[250,250,250]},
       columnStyles: colStyles,
       showHead:'everyPage',            // repeating header on every page
@@ -4538,7 +4606,7 @@ const RatePDF = {
     if(y > PH - 34){ doc.addPage(); y = 24; }
     const sx = PW - M - 58;
     doc.setFontSize(8.4); doc.setTextColor(40);
-    doc.text('For ' + String(s.companyName||'JAYS TRADING AND BUSINESS SOLUTION'), sx, y);
+    doc.text('For ' + String(s.companyName||'JAYS TRADING AND BUSINESS SOLUTION').toUpperCase(), sx, y);
     if(s.signatureImage){
       try{ doc.addImage(s.signatureImage,'JPEG', sx, y+2, 40, 16); }catch(e){ console.warn('signature skipped',e); }
     }
@@ -4577,7 +4645,7 @@ const RatePDF = {
         doc.setFillColor(accent[0],accent[1],accent[2]);
         doc.rect(0,0,PW,2,'F');
         doc.setFont('helvetica','bold'); doc.setFontSize(8); doc.setTextColor(accent[0],accent[1],accent[2]);
-        doc.text(String(s.companyName||''), M, 9);
+        doc.text(String(s.companyName||'').toUpperCase(), M, 9);
         doc.setFont('helvetica','normal'); doc.setTextColor(120);
         doc.text(String(d.docType||'') + (d.docNumber ? ' \u2022 ' + d.docNumber : ''), PW-M, 9, {align:'right'});
         doc.setDrawColor(225); doc.line(M, 12, PW-M, 12);
@@ -5001,7 +5069,7 @@ const RatePDF = {
     const ok = await Store.save('rateDocs');
     if(ok) await Activity.log('Rate document revision created', copy.docNumber);
     this.draft = JSON.parse(JSON.stringify(copy));
-    UI.closeModal(); this.render();
+    this.viewMode = 'editor'; UI.closeModal(); this.render();
     UI.toast('Revision ' + rev + ' created');
   },
   async duplicateDoc(id){
@@ -5010,7 +5078,7 @@ const RatePDF = {
     copy.id=''; copy.parentId=''; copy.revision=0; copy.status='Draft';
     copy.docNumber=''; copy.docDate=Util.todayISO(); copy.createdAt=''; copy.updatedAt='';
     this.draft = copy;
-    UI.closeModal(); this.render();
+    this.viewMode = 'editor'; UI.closeModal(); this.render();
     UI.toast('Copied into a new document \u2014 Save Draft to keep it');
   },
   loadDoc(id){
@@ -5018,7 +5086,7 @@ const RatePDF = {
     this.draft = JSON.parse(JSON.stringify(rec));   // deep copy: editing never mutates the stored row
     if(!Array.isArray(this.draft.items) || !this.draft.items.length) this.draft.items = [this.blankItem()];
     if(!Array.isArray(this.draft.termIds)) this.draft.termIds = [];
-    UI.closeModal(); this.render();
+    this.viewMode = 'editor'; UI.closeModal(); this.render();
   },
   async deleteDoc(id){
     const rec = Store.data.rateDocs.find(x=>x.id===id); if(!rec) return;
@@ -5027,37 +5095,120 @@ const RatePDF = {
     const ok = await Store.save('rateDocs');
     if(ok){ await Activity.log('Rate document deleted', rec.docNumber||rec.id); UI.toast('Deleted'); }
     if(this.draft.id === id) this.draft = this.blankDraft();
-    this.openHistory();
+    this.viewMode = 'list'; this.render();
   },
-  openHistory(){
-    const list = Store.data.rateDocs.slice().sort((a,b)=>String(b.updatedAt||b.createdAt||'').localeCompare(String(a.updatedAt||a.createdAt||'')));
-    const badge = st => '<span class="badge badge-' +
+  openHistory(){ this.switchToList(''); },
+
+  /* ---------------- Saved / Draft / New switcher + inline list ----------------
+     Reuses Store.data.rateDocs as the single source of truth - no parallel
+     data system. The "Saved" and "Draft" quick-tabs are just presets for the
+     same status filter the list itself exposes for full control. */
+  viewMode: 'editor',
+  listFilter: { status:'', q:'' },
+  switchToEditor(){ this.viewMode = 'editor'; this.render(); },
+  switchToList(presetStatus){
+    this.viewMode = 'list';
+    this.listFilter = { status: presetStatus||'', q:'' };
+    this.render();
+  },
+  filteredDocs(){
+    const f = this.listFilter;
+    let list = Store.data.rateDocs.slice();
+    if(f.status) list = list.filter(r=>r.status===f.status);
+    if(f.q){
+      const q = f.q.toLowerCase();
+      list = list.filter(r=>(r.docNumber||'').toLowerCase().includes(q) ||
+        (r.customerName||'').toLowerCase().includes(q) || (r.phone||'').includes(q));
+    }
+    list.sort((a,b)=>String(b.updatedAt||b.createdAt||'').localeCompare(String(a.updatedAt||a.createdAt||'')));
+    return list;
+  },
+  docStatusBadge(st){
+    return '<span class="badge badge-' +
       (st==='Final'?'green':st==='Generated'?'blue':st==='Cancelled'?'gray':'amber') + '">' + Util.escapeHtml(st||'Draft') + '</span>';
-    UI.openModal('Rate Document History',
-      list.length
-        ? '<div class="table-wrap"><table><thead><tr><th>Actions</th><th>Document</th><th>Customer</th><th>Date</th><th>Total</th><th>GST</th><th>Status</th></tr></thead><tbody>' +
-          list.map(r=>{
-            const saved = this.draft;
-            this.draft = r;                     // borrow for the totals calc
-            const tot = this.totals().grand;
-            this.draft = saved;
-            return '<tr>' +
-              '<td style="display:flex;gap:4px;">' +
-                '<button class="btn btn-outline btn-sm" onclick="RatePDF.loadDoc(\'' + r.id + '\')">Open</button>' +
-                '<button class="btn btn-outline btn-sm" onclick="RatePDF.duplicateDoc(\'' + r.id + '\')">Duplicate</button>' +
-                '<button class="btn btn-outline btn-sm" onclick="RatePDF.createRevision(\'' + r.id + '\')">Revision</button>' +
-                '<button class="icon-btn" onclick="RatePDF.deleteDoc(\'' + r.id + '\')">&#128465;</button>' +
-              '</td>' +
-              '<td class="mono cell-main">' + Util.escapeHtml(r.docNumber||r.id) + (r.revision?' <span class="badge badge-gray">rev ' + r.revision + '</span>':'') + '</td>' +
-              '<td>' + Util.escapeHtml(r.customerName||'-') + '</td>' +
-              '<td class="cell-mute">' + Util.fmtDate(r.docDate) + '</td>' +
-              '<td class="mono">' + this.rupee(tot) + '</td>' +
-              '<td class="cell-mute">' + (r.gstEnabled?'Yes':'No') + '</td>' +
-              '<td>' + badge(r.status) + '</td></tr>';
-          }).join('') + '</tbody></table></div>'
-        : '<div class="empty-state"><div class="ic">&#128193;</div><div class="t">No saved documents yet</div></div>',
-      '<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>', true);
   },
+  /* Runs fn against a temporary copy of a saved document without disturbing
+     whatever is currently open in the editor. */
+  _withBorrowedDraft(id, fn){
+    const rec = Store.data.rateDocs.find(x=>x.id===id);
+    if(!rec){ UI.toast('That document could not be found'); return; }
+    const saved = this.draft;
+    this.draft = JSON.parse(JSON.stringify(rec));
+    const errs = this.validate();
+    if(errs.length){ this.draft = saved; UI.toast('That document is missing required fields'); return; }
+    try{ fn(this.draft); } finally { this.draft = saved; }
+  },
+  previewDocById(id){
+    this._withBorrowedDraft(id, ()=>{
+      try{ window.open(this.buildPDF().output('bloburl'), '_blank'); }
+      catch(e){ console.error(e); UI.toast('Preview failed: ' + (e.message||'unknown error')); }
+    });
+  },
+  downloadDocById(id){
+    this._withBorrowedDraft(id, ()=>{
+      try{ this.buildPDF().save(this.fileName()); }
+      catch(e){ console.error(e); UI.toast('Download failed: ' + (e.message||'unknown error')); }
+    });
+  },
+  filterList(){
+    this.listFilter.q = (document.getElementById('rpListSearch')||{}).value || '';
+    this.listFilter.status = (document.getElementById('rpListStatus')||{}).value || '';
+    this.render();
+  },
+  renderList(){
+    const list = this.filteredDocs();
+    const f = this.listFilter;
+    document.getElementById('content').innerHTML =
+      this.switcherHTML() +
+      '<div class="card card-pad">' +
+        '<div class="rp-list-toolbar">' +
+          '<div class="search"><span class="ic">&#128269;</span>' +
+            '<input id="rpListSearch" placeholder="Search by document no., customer or phone..." value="' + Util.escapeHtml(f.q) + '" oninput="RatePDF.filterList()"></div>' +
+          '<select id="rpListStatus" onchange="RatePDF.filterList()">' +
+            '<option value="">All Statuses</option>' +
+            RATE_DOC_STATUSES.map(s=>'<option value="' + s + '" ' + (s===f.status?'selected':'') + '>' + s + '</option>').join('') +
+          '</select>' +
+          '<div class="toolbar-spacer"></div>' +
+          '<button class="btn btn-primary btn-sm" onclick="RatePDF.newDoc()">&#65291; New Rate / Offer</button>' +
+        '</div>' +
+        (list.length
+          ? '<div class="table-wrap"><table><thead><tr><th class="col-actions">Actions</th><th>Document No.</th><th>Customer</th><th>Date</th><th>Valid Until</th><th>Total</th><th>Status</th><th>Rev</th></tr></thead><tbody>' +
+            list.map(r=>{
+              const saved = this.draft; this.draft = r;
+              const tot = this.totals().grand;
+              this.draft = saved;
+              const isFinal = r.status === 'Final';
+              return '<tr>' +
+                '<td class="col-actions"><div class="row-action-btns">' +
+                  '<button class="icon-btn" title="' + (isFinal?'View':'Edit') + '" onclick="RatePDF.loadDoc(\'' + r.id + '\')">' + (isFinal?'&#128065;':'&#9998;') + '</button>' +
+                  '<button class="icon-btn" title="Preview PDF" onclick="RatePDF.previewDocById(\'' + r.id + '\')">&#128196;</button>' +
+                  '<button class="icon-btn" title="Download PDF" onclick="RatePDF.downloadDocById(\'' + r.id + '\')">&#11015;</button>' +
+                  '<button class="icon-btn" title="Duplicate" onclick="RatePDF.duplicateDoc(\'' + r.id + '\')">&#128203;</button>' +
+                  '<button class="icon-btn" title="Create Revision" onclick="RatePDF.createRevision(\'' + r.id + '\')">&#8635;</button>' +
+                  '<button class="icon-btn" title="Delete" onclick="RatePDF.deleteDoc(\'' + r.id + '\')">&#128465;</button>' +
+                '</div></td>' +
+                '<td class="mono cell-main">' + Util.escapeHtml(r.docNumber||r.id) + '</td>' +
+                '<td>' + Util.escapeHtml(r.customerName||'-') + '</td>' +
+                '<td class="cell-mute">' + Util.fmtDate(r.docDate) + '</td>' +
+                '<td class="cell-mute">' + (r.validUntil?Util.fmtDate(r.validUntil):'-') + '</td>' +
+                '<td class="mono">' + this.rupee(tot) + '</td>' +
+                '<td>' + this.docStatusBadge(r.status) + '</td>' +
+                '<td class="cell-mute">' + (r.revision?('R'+r.revision):'-') + '</td></tr>';
+            }).join('') + '</tbody></table></div>'
+          : '<div class="empty-state"><div class="ic">&#128193;</div><div class="t">No ' + (f.status||'saved') + ' offers yet</div>' +
+            '<div class="d">Build a rate offer and Save Draft to see it listed here.</div></div>') +
+      '</div>';
+  },
+  switcherHTML(){
+    const mode = this.viewMode;
+    const st = this.listFilter.status;
+    return '<div class="rp-switcher">' +
+      '<button class="' + (mode==='editor'?'active':'') + '" onclick="RatePDF.newDoc()">&#65291; New Rate / Offer</button>' +
+      '<button class="' + (mode==='list'&&st==='Draft'?'active':'') + '" onclick="RatePDF.switchToList(\'Draft\')">Draft Offers</button>' +
+      '<button class="' + (mode==='list'&&st!=='Draft'?'active':'') + '" onclick="RatePDF.switchToList(\'\')">Saved Offers</button>' +
+    '</div>';
+  },
+
   /* ---------------- whole-document templates
      "Save as Template" snapshots EVERYTHING (items, GST, terms, theme,
      doc type) but blanks the customer-specific fields, so next time the
@@ -5136,8 +5287,9 @@ const RatePDF = {
     this.openDocTemplates();
   },
   newDoc(){
-    if(this.draft && this.draft.items.some(i=>i.itemName) && !confirm('Discard the current unsaved document?')) return;
+    if(this.viewMode==='editor' && this.draft && this.draft.items.some(i=>i.itemName) && !confirm('Discard the current unsaved document?')) return;
     this.draft = this.blankDraft();
+    this.viewMode = 'editor';
     this.render();
   },
 
@@ -5147,16 +5299,16 @@ const RatePDF = {
     const linked = it.templateId && Store.data.rateTemplates.some(t=>t.id===it.templateId);
     const base = this.itemBase(it);
     const E = Util.escapeHtml;
-    return '<div class="card card-pad" style="margin-bottom:10px;">' +
+    return '<div class="card card-pad rp-item-card">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">' +
         '<span class="badge badge-blue">Item ' + (idx+1) + '</span>' +
         (linked ? '<span class="hint">linked to a template \u2014 edits here stay in this document</span>' : '') +
         '<div class="toolbar-spacer"></div>' +
         '<button class="icon-btn" title="Move up" onclick="RatePDF.moveItem(\'' + it.uid + '\',-1)">&#8593;</button>' +
         '<button class="icon-btn" title="Move down" onclick="RatePDF.moveItem(\'' + it.uid + '\',1)">&#8595;</button>' +
-        '<button class="icon-btn" title="Remove" onclick="RatePDF.removeItem(\'' + it.uid + '\')">&#128465;</button>' +
+        '<button class="icon-btn" title="Remove item" onclick="RatePDF.removeItem(\'' + it.uid + '\')">&#128465;</button>' +
       '</div>' +
-      '<div class="toolbar" style="margin:0 0 10px;">' +
+      '<div class="toolbar" style="margin:0 0 8px;">' +
         '<button class="btn btn-outline btn-sm" onclick="RatePDF.openLibrary(\'' + it.uid + '\')">&#128194; Template</button>' +
         '<button class="btn btn-outline btn-sm" onclick="RatePDF.openProductPicker(\'' + it.uid + '\')">&#128230; Product Master</button>' +
         '<button class="btn btn-outline btn-sm" onclick="RatePDF.saveItemAsTemplate(\'' + it.uid + '\')">&#11088; Save as Template</button>' +
@@ -5170,31 +5322,32 @@ const RatePDF = {
         '<div class="field"><label>Brand</label><input value="' + E(it.brand) + '" oninput="RatePDF.updItem(\'' + it.uid + '\',\'brand\',this.value)"></div>' +
         '<div class="field"><label>Model</label><input value="' + E(it.model) + '" oninput="RatePDF.updItem(\'' + it.uid + '\',\'model\',this.value)"></div>' +
       '</div>' +
-      '<div class="field"><label>Specifications (one per line)</label>' +
-        '<textarea rows="4" oninput="RatePDF.updItem(\'' + it.uid + '\',\'specs\',this.value)">' + E(it.specs) + '</textarea></div>' +
-      '<div class="form-row">' +
+      '<div class="field"><label>Specifications <span class="hint">(one per line \u2014 prints in its own column)</span></label>' +
+        '<textarea rows="3" oninput="RatePDF.updItem(\'' + it.uid + '\',\'specs\',this.value)">' + E(it.specs) + '</textarea></div>' +
+      '<div class="form-row-4">' +
         '<div class="field"><label>Qty *</label><input type="number" min="1" value="' + (it.qty||1) + '" oninput="RatePDF.updItem(\'' + it.uid + '\',\'qty\',this.value)"></div>' +
         '<div class="field"><label>Unit</label><input value="' + E(it.unit||'Nos') + '" oninput="RatePDF.updItem(\'' + it.uid + '\',\'unit\',this.value)"></div>' +
-      '</div>' +
-      '<div class="form-row">' +
         '<div class="field"><label>Rate *</label><input type="number" step="0.01" value="' + (it.rate===''?'':it.rate) + '" oninput="RatePDF.updItem(\'' + it.uid + '\',\'rate\',this.value)"></div>' +
         '<div class="field"><label>Discount</label><input type="number" step="0.01" value="' + (it.discount===''?'':it.discount) + '" oninput="RatePDF.updItem(\'' + it.uid + '\',\'discount\',this.value)"></div>' +
       '</div>' +
       // GST field is rendered ONLY when GST is switched on for the document.
       (d.gstEnabled
         ? '<div class="field"><label>GST % for this item <span class="hint">(blank = document rate ' + this.num(d.gstRate) + '%)</span></label>' +
-          '<input type="number" step="0.01" value="' + (it.gstRate===''?'':it.gstRate) + '" oninput="RatePDF.updItem(\'' + it.uid + '\',\'gstRate\',this.value)"></div>'
+          '<input type="number" step="0.01" value="' + (it.gstRate===''?'':it.gstRate) + '" style="max-width:160px;" oninput="RatePDF.updItem(\'' + it.uid + '\',\'gstRate\',this.value)"></div>'
         : '') +
-      '<div style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;">' +
-        '<div style="flex:1;min-width:180px;">' +
-          '<div class="field" style="margin-bottom:6px;"><label>Image URL</label>' +
-            '<input value="' + E(/^data:/.test(it.imageUrl||'')?'':(it.imageUrl||'')) + '" oninput="RatePDF.updItem(\'' + it.uid + '\',\'imageUrl\',this.value)"></div>' +
-          '<label class="btn btn-outline btn-sm" style="cursor:pointer;">Upload Image' +
-            '<input type="file" accept="image/jpeg,image/png,image/webp" style="display:none;" onchange="RatePDF.onItemImage(\'' + it.uid + '\',this)"></label>' +
-          (it.imageUrl ? ' <button class="btn btn-outline btn-sm" onclick="RatePDF.updItem(\'' + it.uid + '\',\'imageUrl\',\'\');RatePDF.render()">Remove</button>' : '') +
+      '<div class="rp-item-foot">' +
+        '<div class="rp-item-image">' +
+          (it.imageUrl
+            ? '<div class="wa-imgbox rp-item-thumb"><img src="' + E(it.imageUrl) + '" alt=""></div>'
+            : '<div class="wa-imgbox rp-item-thumb"><span class="hint">No photo</span></div>') +
+          '<div>' +
+            '<label class="btn btn-outline btn-sm" style="cursor:pointer;margin:0;">' + (it.imageUrl?'Replace Photo':'Upload Photo') +
+              '<input type="file" accept="image/jpeg,image/png,image/webp" style="display:none;" onchange="RatePDF.onItemImage(\'' + it.uid + '\',this)"></label>' +
+            (it.imageUrl ? ' <button class="btn btn-outline btn-sm" onclick="RatePDF.removeItemImage(\'' + it.uid + '\')">Remove</button>' : '') +
+            '<div class="hint" style="margin-top:4px;">JPG, PNG or WEBP &middot; max 1 MB' + (it.imageSize?' &middot; ' + this.fmtBytes(it.imageSize) + ' uploaded':'') + '</div>' +
+          '</div>' +
         '</div>' +
-        (it.imageUrl ? '<div class="wa-imgbox" style="width:130px;min-height:90px;"><img src="' + E(it.imageUrl) + '" alt=""></div>' : '') +
-        '<div style="min-width:130px;text-align:right;">' +
+        '<div class="rp-item-amount">' +
           '<div class="hint">Line amount</div>' +
           '<div class="mono" style="font-size:16px;font-weight:700;">' + this.rupee(base) + '</div>' +
         '</div>' +
@@ -5204,21 +5357,27 @@ const RatePDF = {
 
   render(){
     if(!this.draft) this.draft = this.blankDraft();
+    if(this.viewMode === 'list') return this.renderList();
+    return this.renderEditor();
+  },
+  renderEditor(){
     const d = this.draft, E = Util.escapeHtml;
     const terms = Store.data.rateTerms.filter(t=>d.termIds.includes(t.id));
     const statusBadge = '<span class="badge badge-' +
       (d.status==='Final'?'green':d.status==='Generated'?'blue':'amber') + '">' + E(d.status||'Draft') + '</span>';
+    const isFinal = d.status === 'Final';
 
     document.getElementById('content').innerHTML =
+      this.switcherHTML() +
+      '<div class="rp-editor-pad">' +
       '<div class="toolbar">' +
-        '<button class="btn btn-primary btn-sm" onclick="RatePDF.newDoc()">&#65291; New Document</button>' +
-        '<button class="btn btn-outline btn-sm" onclick="RatePDF.openHistory()">&#128193; Document History (' + Store.data.rateDocs.length + ')</button>' +
         '<button class="btn btn-outline btn-sm" onclick="RatePDF.openDocTemplates()">&#128203; Document Templates (' + Store.data.rateDocTemplates.length + ')</button>' +
-        '<button class="btn btn-outline btn-sm" onclick="RatePDF.openLibrary(\'\')">&#128194; Template Library (' + Store.data.rateTemplates.length + ')</button>' +
+        '<button class="btn btn-outline btn-sm" onclick="RatePDF.openLibrary(\'\')">&#128194; Item Templates (' + Store.data.rateTemplates.length + ')</button>' +
         '<button class="btn btn-outline btn-sm" onclick="RatePDF.openTerms()">&#128220; Terms Library</button>' +
         '<div class="toolbar-spacer"></div>' +
         statusBadge + (d.docNumber ? ' <span class="mono cell-mute">' + E(d.docNumber) + '</span>' : '') +
       '</div>' +
+      (isFinal ? '<div class="hint" style="margin:-4px 0 12px;">This document is Final and locked from editing. Use Create Revision to make changes.</div>' : '') +
 
       '<div class="wa-grid">' +
       '<div>' +
@@ -5310,15 +5469,8 @@ const RatePDF = {
           '<div id="rpTotals" style="font-size:13px;">' + this.totalsHTML() + '</div>' +
           '<div id="rpErrors"></div>' +
           '<div class="toolbar" style="margin:12px 0 0;flex-wrap:wrap;">' +
-            '<button class="btn btn-primary btn-sm" onclick="RatePDF.preview()">&#128065; Preview</button>' +
-            '<button class="btn btn-primary btn-sm" onclick="RatePDF.download()">&#11015; Download PDF</button>' +
-            '<button class="btn btn-outline btn-sm" onclick="RatePDF.print()">&#128424; Print</button>' +
-          '</div>' +
-          '<div class="toolbar" style="margin:8px 0 0;flex-wrap:wrap;">' +
-            '<button class="btn btn-outline btn-sm" onclick="RatePDF.saveDraft()">&#128190; Save Draft</button>' +
             '<button class="btn btn-outline btn-sm" onclick="RatePDF.saveDocAsTemplate()">&#11088; Save as Template</button>' +
             (d.id ? '<button class="btn btn-outline btn-sm" onclick="RatePDF.createRevision()">Create Revision</button>' : '') +
-            (d.id && d.status!=='Final' ? '<button class="btn btn-outline btn-sm" onclick="RatePDF.markFinal()">Mark Final</button>' : '') +
           '</div>' +
           '<div class="hint" style="margin-top:10px;">Share the PDF over WhatsApp by downloading it and attaching it in your chat.</div>' +
         '</div>' +
@@ -5328,6 +5480,16 @@ const RatePDF = {
       '<div class="card" id="rpPreviewWrap" style="display:none;margin-top:16px;">' +
         '<div class="card-pad" style="padding-bottom:6px;"><h3 style="margin:0;font-size:14px;">PDF Preview</h3></div>' +
         '<iframe id="rpPreviewFrame" style="width:100%;height:760px;border:0;border-top:1px solid var(--border);"></iframe>' +
+      '</div>' +
+      '</div>' +
+
+      '<div class="rp-sticky-actions">' +
+        '<button class="btn btn-outline btn-sm" onclick="RatePDF.saveDraft()">&#128190; Save Draft</button>' +
+        '<button class="btn btn-outline btn-sm" onclick="RatePDF.preview()">&#128065; Preview</button>' +
+        '<button class="btn btn-primary btn-sm" onclick="RatePDF.download()">&#11015; Export PDF</button>' +
+        '<button class="icon-btn" title="Print" onclick="RatePDF.print()">&#128424;</button>' +
+        (d.id && !isFinal ? '<button class="btn btn-outline btn-sm" onclick="RatePDF.markFinal()">&#10003; Mark Final</button>' : '') +
+        '<span class="rp-status-pill">' + statusBadge + (d.docNumber ? ' ' + E(d.docNumber) : '') + '</span>' +
       '</div>';
   }
 };
