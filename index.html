@@ -1129,6 +1129,7 @@ const NAV = [
     {id:'quotations', ic:'&#128196;', label:'Quotations'},
     {id:'rate_docs', ic:'&#128196;', label:'Rate / Offer PDF'},
     {id:'orders', ic:'&#128230;', label:'Orders'},
+    {id:'oppfinder', ic:'&#128269;', label:'Project Opportunity'},
   ]},
   {sec:'Finance', items:[
     {id:'payments', ic:'&#128179;', label:'Payments Followup'},
@@ -1166,6 +1167,7 @@ const PAGE_META = {
   followupcentre:['Follow-ups','Today, tomorrow, overdue &amp; upcoming — one click away'],
   quotations:['Quotations','Create and track quotes'],
   rate_docs:['Rate / Offer PDF','Build professional rate offers and export them as PDF'],
+  oppfinder:['Project Opportunity','Panchayat/local-body project opportunities (external tool)'],
   outstanding:['Outstanding','Unpaid balances by party'],
   inventory:['Inventory','Stock levels across the product catalog'],
   bidsearch:['GeM Bid Search','Find, score and track government procurement opportunities'],
@@ -5540,6 +5542,43 @@ const RatePDF = {
 /* CustPicker invokes window[cbName] by contract. */
 function ratePdfCustomerSelected(c){ RatePDF.onCustomer(c); }
 Views.rate_docs = ()=>{ RatePDF.seedTerms().then(()=>RatePDF.render()); };
+
+/* =====================================================================
+   PROJECT OPPORTUNITY  (external tool, embedded)
+   Launches the standalone "JAYS Project Opportunity Finder PRO" app
+   (its own separate login/database, hosted on GitHub Pages) inside the
+   CRM's content area. Not a data module of its own - no new Store
+   collection, no new global besides this one Views entry - so there is
+   nothing here to duplicate or drift out of sync with the rest of the
+   CRM. Menu access is governed by the existing hasMenuAccess()/NAV
+   permission system exactly like every other menu item.
+===================================================================== */
+Views.oppfinder = function(){
+  const url = 'https://salesjaystrading-hue.github.io/oppertunity-finder/';
+  document.getElementById('content').innerHTML = `
+    <div class="card card-pad" style="margin-bottom:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+      <div style="flex:1;min-width:220px;">
+        <div class="hint">Opens the separate JAYS Project Opportunity Finder tool (its own sign-in, separate from this CRM).</div>
+      </div>
+      <a class="btn btn-outline btn-sm" href="${url}" target="_blank" rel="noopener">&#8599; Open in New Tab</a>
+    </div>
+    <div class="card" style="overflow:hidden;">
+      <iframe src="${url}" title="JAYS Project Opportunity Finder"
+        style="width:100%;height:calc(100vh - 210px);min-height:520px;border:0;display:block;"
+        onerror="OppFinder.onFrameError()"></iframe>
+    </div>
+    <div class="hint" id="oppFrameHint" style="margin-top:8px;">
+      If the page above stays blank, the site is blocking embedded view &mdash; use "Open in New Tab" instead.
+    </div>
+  `;
+};
+/* Cross-origin iframes never fire a catchable error for X-Frame-Options/
+   CSP blocks - the browser just renders them blank with no signal a
+   script can read. onFrameError only fires for the rarer network-level
+   failures; it's kept (and the visible hint + always-present "Open in
+   New Tab" button above) as the honest, achievable fallback given that
+   browser limitation. */
+const OppFinder = { onFrameError(){ UI.toast('Could not load the page here — use "Open in New Tab".'); } };
 
 const Reports = {
   render(){
