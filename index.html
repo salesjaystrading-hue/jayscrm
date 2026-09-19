@@ -726,8 +726,7 @@ const Store = {
     customers: [], products: [], quotations: [], payments: [],
     followups: [], tasks: [], notes: [], users: [], settings: {}, activityLog: [],
     gemcrac: [], orders: [], complaints: [], bids: [], waTemplates: [], waHistory: [],
-    rateTemplates: [], rateDocs: [], rateTerms: [], rateDocTemplates: [],
-    projRows: [], projTracking: {}, projProducts: [], projImportHistory: []
+    rateTemplates: [], rateDocs: [], rateTerms: [], rateDocTemplates: []
   },
   /* One-time, non-destructive lift of the old WhatsApp rate templates into
      the Rate Template Library. The source waTemplates rows are NEVER deleted
@@ -832,10 +831,6 @@ const Store = {
     this.data.rateDocs = await this.loadKey('jays_ratedocs', []);
     this.data.rateTerms = await this.loadKey('jays_rateterms', []);
     this.data.rateDocTemplates = await this.loadKey('jays_ratedoctemplates', []);
-    this.data.projRows = await this.loadKey('jays_projrows', []);
-    this.data.projTracking = await this.loadKey('jays_projtracking', {});
-    this.data.projProducts = await this.loadKey('jays_projproducts', []);
-    this.data.projImportHistory = await this.loadKey('jays_projimporthistory', []);
     await this.migrateWaTemplates();
 
     const settingsFailedBefore = false;
@@ -1131,7 +1126,6 @@ const NAV = [
     {id:'leads', ic:'&#128101;', label:'Leads'},
     {id:'customers', ic:'&#128100;', label:'Customers'},
     {id:'pipeline', ic:'&#128202;', label:'Sales Pipeline'},
-    {id:'projectfinder', ic:'&#128269;', label:'Project Opportunity Finder'},
     {id:'quotations', ic:'&#128196;', label:'Quotations'},
     {id:'rate_docs', ic:'&#128196;', label:'Rate / Offer PDF'},
     {id:'orders', ic:'&#128230;', label:'Orders'},
@@ -1169,7 +1163,6 @@ const PAGE_META = {
   leads:['Leads','Fresh enquiries not yet in active pipeline'],
   customers:['Customers','Every enquiry, tracked from first contact to close'],
   pipeline:['Sales Pipeline','Leads, quotations and orders — one funnel'],
-  projectfinder:['Project Opportunity Finder','Match local-body/panchayat project data against JAYS products'],
   followupcentre:['Follow-ups','Today, tomorrow, overdue &amp; upcoming — one click away'],
   quotations:['Quotations','Create and track quotes'],
   rate_docs:['Rate / Offer PDF','Build professional rate offers and export them as PDF'],
@@ -5548,411 +5541,6 @@ const RatePDF = {
 function ratePdfCustomerSelected(c){ RatePDF.onCustomer(c); }
 Views.rate_docs = ()=>{ RatePDF.seedTerms().then(()=>RatePDF.render()); };
 
-/* =====================================================================
-   PROJECT OPPORTUNITY FINDER  (namespace: ProjectFinder)
-   Ported from the standalone "JAYS Project Opportunity Finder PRO" tool
-   into the shared CRM architecture - same Store, same Supabase-backed
-   persistence, same permission system, same UI components.
-
-   Storage moved from browser localStorage to the shared key/value store,
-   so it now has the same RLS, backup/restore and overwrite-protection
-   as every other collection - nothing here is device-local any more:
-     Store.data.projRows           (jays_projrows)          - imported project rows + computed score/type/hits
-     Store.data.projTracking       (jays_projtracking)      - {projectKey: {priority,status,followup,staff,notes}}
-     Store.data.projProducts       (jays_projproducts)      - [{name, keywords}] simple keyword->product map
-     Store.data.projImportHistory  (jays_projimporthistory) - import log
-
-   Import (pasting bulk Excel data in) is restricted to Admins by
-   default - everyone with menu access can still search, filter and
-   track opportunities; only Admins can bulk-load new project data.
-===================================================================== */
-const PF_WASTE_WORDS = ["waste","solid waste","biodegradable","non-biodegradable","garbage","sanitation","compost","composting","haritha","haritha karma","harithakarmasena","hks","waste bin","waste bins","disposal","segregat","collection","processing","recycling","recycle","organic waste","bio bin","napkin","bottle booth","waste management","ശുചിത്വ","മാലിന്യ","ജൈവമാലിന്യ","അജൈവ","ഹരിതകർമ്മ","കമ്പോസ്റ്റ്","ബിൻ","ബിന്നുകൾ","പാഴ്വസ്തു","പാഴ്‌വസ്തു"];
-const PF_PURCHASE_WORDS = ["purchase","purchasing","procurement","supply","supplying","buy","buying","provided","distribution","materials","consumables","utensils","furniture","computer","laptop","printer","tank","uniform","medicine","medicines","vehicle","tools","net","equipment","ഉപകരണ","വാങ്ങ","വിതരണം","സാമഗ്രി","പാത്ര","ഫർണിച്ചർ","കമ്പ്യൂട്ടർ"];
-const PF_EQUIP_WORDS = ["equipment","equipments","machine","machinery","unit","bin","bins","tank","motor","tools","furniture","computer","printer","projector","laptop","vehicle","compost unit","ഉപകരണ","യൂണിറ്റ്","മെഷീൻ","ബിൻ","ടാങ്ക്"];
-const PF_CATEGORY_NAMES = {WASTE:'Waste Management', PURCHASE:'Purchase', EQUIPMENT:'Equipment / Supplies', OTHER:'Other Potential'};
-const PF_STATUSES = ['New','Researching','Contacted','Interested','Quotation','Submitted','Won','Lost'];
-const PF_FIELDS = ['Project No','Project Name Eng','Project Name Mal','LB Name','LB Type','District','Sector','Sub Sector','Status','FundTotal','Expenditure','Balance','Project Date','Closing Date'];
-
-function pfNorm(v){ return String(v==null?'':v).toLowerCase().replace(/\s+/g,' ').trim(); }
-function pfMoney(v){ const n = Number(String(v==null?'':v).replace(/[,\u20B9\s]/g,'')); return isNaN(n)?0:n; }
-function pfKeyOf(r){ return pfNorm((r['Project No']||'')+'|'+(r['LB Name']||'')); }
-function pfClassify(r){
-  const text = Object.values(r).map(pfNorm).join(' ');
-  const hitsW = PF_WASTE_WORDS.filter(x=>text.includes(pfNorm(x)));
-  const hitsP = PF_PURCHASE_WORDS.filter(x=>text.includes(pfNorm(x)));
-  const hitsE = PF_EQUIP_WORDS.filter(x=>text.includes(pfNorm(x)));
-  const score = Math.min(100, Math.min(70,hitsW.length*25) + Math.min(45,hitsP.length*12) + Math.min(30,hitsE.length*8)
-    + (pfNorm(r['Sector']).includes('waste') || pfNorm(r['Sector']).includes('\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f') ? 35 : 0)
-    + (pfNorm(r['Sub Sector']).includes('waste') || pfNorm(r['Sub Sector']).includes('\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f') ? 25 : 0));
-  const type = hitsW.length ? 'WASTE' : (hitsP.length ? 'PURCHASE' : (hitsE.length ? 'EQUIPMENT' : 'OTHER'));
-  return { score, type, hits: [...new Set([...hitsW, ...hitsP, ...hitsE])].slice(0,12) };
-}
-function pfParseTSV(txt){
-  const lines = String(txt||'').replace(/\r/g,'').split('\n').filter(x=>x.trim());
-  if(lines.length < 2) return [];
-  const headers = lines[0].split('\t').map(x=>x.trim());
-  return lines.slice(1).map(line=>{
-    const a = line.split('\t'); const r = {};
-    headers.forEach((h,i)=>r[h] = a[i]==null ? '' : a[i]);
-    return r;
-  }).filter(r=>Object.values(r).some(v=>String(v).trim()));
-}
-const ProjectFinder = {
-  tab: 'dashboard',
-  filtered: [],
-  filters: { q:'', type:'ALL', district:'', localbody:'', minscore:0, status:'', from:'', to:'' },
-
-  setTab(t){ this.tab = t; this.render(); },
-
-  /* ---------------- import (Admins only by default) ---------------- */
-  async processData(){
-    if(!Auth.isAdmin()){ UI.toast('Import is restricted to administrators'); return; }
-    const ta = document.getElementById('pfPaste');
-    const incoming = pfParseTSV(ta.value).map(r=>Object.assign({}, r, pfClassify(r)));
-    const msg = document.getElementById('pfMsg');
-    if(!incoming.length){ msg.textContent = 'No rows detected.'; return; }
-    const old = new Map(Store.data.projRows.map(r=>[pfKeyOf(r), r]));
-    let added = 0, updated = 0, dupes = 0;
-    incoming.forEach(r=>{
-      const k = pfKeyOf(r);
-      if(old.has(k)){ dupes++; old.set(k, Object.assign({}, old.get(k), r)); updated++; }
-      else { old.set(k, r); added++; }
-    });
-    Store.data.projRows = [...old.values()];
-    Store.data.projImportHistory.unshift({date:new Date().toISOString(), source:'Excel Import',
-      records:incoming.length, newCount:added, updated, duplicates:dupes});
-    Store.data.projImportHistory = Store.data.projImportHistory.slice(0,30);
-    const ok1 = await Store.save('projRows');
-    const ok2 = await Store.save('projImportHistory');
-    if(ok1 && ok2) await Activity.log('Project data imported', incoming.length+' row(s), '+added+' new, '+updated+' updated');
-    msg.textContent = `Imported ${incoming.length} rows \u2022 ${added} new \u2022 ${updated} updated \u2022 ${dupes} duplicate keys handled.`;
-    ta.value = '';
-    this.render();
-  },
-  loadSample(){
-    if(!Auth.isAdmin()) return;
-    const sample = "Project No\tProject Name Eng\tProject Name Mal\tLB Name\tDistrict\tSector\tSub Sector\tStatus\tFundTotal\tBalance\n"+
-"27\tProtective equipments to HKS\t\u0d39\u0d30\u0d3f\u0d24 \u0d15\u0d7c\u0d2e\u0d4d\u0d2e\u0d38\u0d47\u0d28\u0d15\u0d4d\u0d15\u0d4d \u0d38\u0d41\u0d30\u0d15\u0d4d\u0d37\u0d3e \u0d09\u0d2a\u0d15\u0d30\u0d23\u0d19\u0d4d\u0d19\u0d33\u0d4d\u200d\tSample Panchayat\tKozhikode\tSolid Waste Management\tProcessing\tApproved\t100000\t100000\n"+
-"336\tWASTE BINS FOR SEGREGATING WASTE AT THE COMMUNITY LEVEL\t\u0d15\u0d2e\u0d4d\u0d2e\u0d4d\u0d2f\u0d42\u0d23\u0d3f\u0d31\u0d4d\u0d31\u0d3f \u0d24\u0d32\u0d24\u0d4d\u0d24\u0d3f\u0d7d \u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d19\u0d4d\u0d19\u0d7e \u0d24\u0d30\u0d02\u0d24\u0d3f\u0d30\u0d3f\u0d15\u0d4d\u0d15\u0d41\u0d28\u0d4d\u0d28\u0d24\u0d3f\u0d28\u0d41\u0d33\u0d4d\u0d33 \u0d2c\u0d3f\u0d28\u0d4d\u0d28\u0d41\u0d15\u0d7e \u0d35\u0d3e\u0d19\u0d4d\u0d19\u0d7d\tSample Panchayat\tKozhikode\tSolid Waste Management\tCollection and Transport\tApproved\t300000\t300000";
-    document.getElementById('pfPaste').value = sample;
-    this.processData();
-  },
-  clearImportBox(){ const ta=document.getElementById('pfPaste'); if(ta) ta.value=''; },
-
-  /* ---------------- filtering ---------------- */
-  readFilters(){
-    const g = id => { const el = document.getElementById(id); return el ? el.value : ''; };
-    this.filters = {
-      q: pfNorm(g('pfSearch')), type: g('pfType')||'ALL', district: g('pfDistrict'),
-      localbody: g('pfLocalBody'), minscore: Number(g('pfMinScore')||0),
-      status: g('pfStatus'), from: g('pfFrom'), to: g('pfTo')
-    };
-  },
-  applyFilters(){
-    this.readFilters();
-    const f = this.filters;
-    this.filtered = Store.data.projRows.filter(r=>{
-      const blob = pfNorm(Object.entries(r).filter(([k])=>!['score','type','hits'].includes(k)).map(([,v])=>v).join(' '));
-      const tr = Store.data.projTracking[pfKeyOf(r)] || {};
-      const st = tr.status || 'New';
-      const dateVal = r['Project Date'] || r['Date'] || r['Created Date'] || r['Closing Date'] || '';
-      return r.score >= f.minscore && (f.type==='ALL' || r.type===f.type) &&
-        (!f.district || r['District']===f.district) && (!f.localbody || r['LB Name']===f.localbody) &&
-        (!f.q || blob.includes(f.q)) && (!f.status || st===f.status) &&
-        (!f.from || String(dateVal).slice(0,10) >= f.from) && (!f.to || String(dateVal).slice(0,10) <= f.to);
-    }).sort((a,b)=>b.score-a.score);
-  },
-  resetFilters(){
-    this.filters = { q:'', type:'ALL', district:'', localbody:'', minscore:0, status:'', from:'', to:'' };
-    this.render();
-  },
-  districtOptions(){ return [...new Set(Store.data.projRows.map(r=>r['District']).filter(Boolean))].sort(); },
-  localBodyOptions(district){
-    return [...new Set(Store.data.projRows.filter(r=>!district || r['District']===district).map(r=>r['LB Name']).filter(Boolean))].sort();
-  },
-  onDistrictChange(){
-    const d = document.getElementById('pfDistrict').value;
-    const sel = document.getElementById('pfLocalBody');
-    if(sel) sel.innerHTML = '<option value="">All Local Bodies</option>' +
-      this.localBodyOptions(d).map(x=>'<option>'+Util.escapeHtml(x)+'</option>').join('');
-    this.render();
-  },
-  quickDate(v){
-    const now = new Date(); let from = new Date(now), to = new Date(now);
-    if(v==='week') from.setDate(now.getDate()-now.getDay());
-    else if(v==='month') from.setDate(1);
-    else if(v==='30') from.setDate(now.getDate()-29);
-    else if(!v){ document.getElementById('pfFrom').value=''; document.getElementById('pfTo').value=''; this.render(); return; }
-    document.getElementById('pfFrom').value = from.toISOString().slice(0,10);
-    document.getElementById('pfTo').value = to.toISOString().slice(0,10);
-    this.render();
-  },
-
-  /* ---------------- opportunity tracking ---------------- */
-  async saveTracking(key){
-    const g = id => document.getElementById(id).value;
-    Store.data.projTracking[key] = {
-      priority: g('pfOpPriority'), status: g('pfOpStatus'), followup: g('pfOpDate'),
-      staff: g('pfOpStaff'), notes: g('pfOpNotes'), savedAt: new Date().toISOString()
-    };
-    const ok = await Store.save('projTracking');
-    if(ok) await Activity.log('Project opportunity saved', key);
-    UI.closeModal(); this.render();
-  },
-  async removeTracking(key){
-    delete Store.data.projTracking[key];
-    const ok = await Store.save('projTracking');
-    if(ok) await Activity.log('Project opportunity removed', key);
-    UI.closeModal(); this.render();
-  },
-  viewProject(key){
-    const r = Store.data.projRows.find(x=>pfKeyOf(x)===key);
-    if(!r) return;
-    const tr = Store.data.projTracking[key] || {};
-    const productMatches = Store.data.projProducts.filter(p=>
-      (p.keywords||'').split(',').some(x=>x.trim() && pfNorm(Object.values(r).join(' ')).includes(pfNorm(x)))
-    ).map(p=>p.name);
-    const E = Util.escapeHtml;
-    UI.openModal(r['Project Name Eng'] || 'Project Details',
-      '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;">' +
-        PF_FIELDS.filter(f=>r[f]!==undefined && r[f]!=='').map(f=>
-          '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">'+E(f)+'</div>'+E(r[f])+'</div>').join('') +
-        '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">Opportunity Score</div><b>'+r.score+'%</b></div>' +
-        '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">Category</div>'+E(PF_CATEGORY_NAMES[r.type])+'</div>' +
-        '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">Matched Keywords</div>'+r.hits.map(x=>'<span class="badge badge-gray">'+E(x)+'</span>').join(' ')+'</div>' +
-      '</div>' +
-      '<h3 style="margin:16px 0 8px;">\u2b50 My Opportunity</h3>' +
-      '<div class="form-row" style="grid-template-columns:1fr 1fr 1fr;">' +
-        '<div class="field"><label>Priority</label><select id="pfOpPriority">'+['Low','Medium','High'].map(p=>'<option '+(tr.priority===p?'selected':'')+'>'+p+'</option>').join('')+'</select></div>' +
-        '<div class="field"><label>Status</label><select id="pfOpStatus">'+PF_STATUSES.map(s=>'<option '+(tr.status===s?'selected':'')+'>'+s+'</option>').join('')+'</select></div>' +
-        '<div class="field"><label>Follow-up Date</label><input type="date" id="pfOpDate" value="'+E(tr.followup||'')+'"></div>' +
-      '</div>' +
-      '<div class="field"><label>Assigned Staff</label><input id="pfOpStaff" value="'+E(tr.staff||'')+'"></div>' +
-      '<div class="field"><label>Notes</label><textarea id="pfOpNotes" rows="3">'+E(tr.notes||'')+'</textarea></div>' +
-      '<h4 style="margin:10px 0 6px;">\ud83d\udce6 Potential JAYS Products</h4>' +
-      '<div>' + (productMatches.length ? productMatches.map(x=>'<span class="badge badge-blue">'+E(x)+'</span>').join(' ') :
-        '<span class="hint">Add products below to enable product matching.</span>') + '</div>',
-      '<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>' +
-      '<button class="btn btn-outline" onclick="ProjectFinder.removeTracking(\''+key+'\')">Remove from My Opportunities</button>' +
-      '<button class="btn btn-primary" onclick="ProjectFinder.saveTracking(\''+key+'\')">\u2b50 Save Opportunity</button>', true);
-  },
-  /* ---------------- keyword-matching product list (distinct from Product Master) ---------------- */
-  async addProduct(){
-    const name = document.getElementById('pfProdName').value.trim();
-    const keywords = document.getElementById('pfProdKeywords').value.trim();
-    if(!name || !keywords){ UI.toast('Enter both a name and keywords'); return; }
-    Store.data.projProducts.push({name, keywords});
-    const ok = await Store.save('projProducts');
-    if(ok) await Activity.log('Project-matching product added', name);
-    this.render();
-  },
-  async removeProduct(i){
-    const p = Store.data.projProducts[i]; if(!p) return;
-    Store.data.projProducts.splice(i,1);
-    const ok = await Store.save('projProducts');
-    if(ok) await Activity.log('Project-matching product removed', p.name);
-    this.render();
-  },
-
-  /* ---------------- export ---------------- */
-  exportCSV(onlySaved){
-    const list = onlySaved ? Store.data.projRows.filter(r=>Store.data.projTracking[pfKeyOf(r)]) :
-      (this.filtered.length ? this.filtered : Store.data.projRows);
-    if(!list.length){ UI.toast('Nothing to export'); return; }
-    const cols = ['score','type','Project No','Project Name Eng','Project Name Mal','LB Name','LB Type','District','Sector','Sub Sector','Status','FundTotal','Expenditure','Balance','hits'];
-    const out = [cols.join(',')];
-    list.forEach(r=>out.push(cols.map(c=>'"'+String(c==='hits'?r.hits.join('; '):(r[c]==null?'':r[c])).replace(/"/g,'""')+'"').join(',')));
-    const blob = new Blob([out.join('\n')], {type:'text/csv;charset=utf-8'});
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob); a.download = 'JAYS_Project_Opportunities.csv'; a.click();
-    setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
-  },
-
-  /* ---------------- render: shell + tabs ---------------- */
-  switcherHTML(){
-    const tabs = [['dashboard','&#127968; Dashboard'],['projects','&#128269; Projects'],
-      ['opportunities','&#11088; My Opportunities'],['import','&#128229; Import'],
-      ['products','&#128230; Products'],['reports','&#128202; Reports']];
-    return '<div class="rp-switcher" style="flex-wrap:wrap;">' +
-      tabs.map(([id,label])=>'<button class="'+(this.tab===id?'active':'')+'" onclick="ProjectFinder.setTab(\''+id+'\')">'+label+'</button>').join('') +
-    '</div>';
-  },
-  render(){
-    const body = this.tab==='dashboard' ? this.renderDashboard()
-      : this.tab==='projects' ? this.renderProjects()
-      : this.tab==='opportunities' ? this.renderOpportunities()
-      : this.tab==='import' ? this.renderImport()
-      : this.tab==='products' ? this.renderProducts()
-      : this.renderReports();
-    document.getElementById('content').innerHTML = this.switcherHTML() + body;
-  },
-
-  renderDashboard(){
-    const rows = Store.data.projRows;
-    const counts = {WASTE:0,PURCHASE:0,EQUIPMENT:0,OTHER:0};
-    rows.forEach(r=>counts[r.type]++);
-    const districts = {}; rows.forEach(r=>{ const d=r['District']||'Unknown'; districts[d]=(districts[d]||0)+1; });
-    const topDistricts = Object.entries(districts).sort((a,b)=>b[1]-a[1]).slice(0,8);
-    const topOpps = rows.slice().sort((a,b)=>b.score-a.score).slice(0,6);
-    const bar = (label, v, max) => '<div style="margin:8px 0;"><div style="display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:3px;"><span>'+Util.escapeHtml(label)+'</span><b>'+v+'</b></div>' +
-      '<div style="background:var(--border,#e5e7eb);border-radius:6px;height:8px;overflow:hidden;"><div style="width:'+(max?Math.round(v/max*100):0)+'%;height:100%;background:var(--orange);"></div></div></div>';
-
-    return dashboardCardsHTML('Project Opportunity Dashboard', [
-      {label:'Total Projects', value:rows.length},
-      {label:'Waste Opportunities', value:counts.WASTE, color:'var(--green,#16a34a)'},
-      {label:'Purchase Opportunities', value:counts.PURCHASE, color:'var(--blue,#2563eb)'},
-      {label:'High Priority (80%+)', value:rows.filter(r=>r.score>=80).length, color:'var(--red,#dc2626)'},
-      {label:'Saved Opportunities', value:Object.keys(Store.data.projTracking).length},
-      {label:'Total Fund Value', value:'\u20B9'+rows.reduce((s,r)=>s+pfMoney(r['FundTotal']),0).toLocaleString('en-IN')}
-    ]) +
-    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">' +
-      '<div class="card card-pad"><h3 style="margin:0 0 10px;font-size:14px;">Opportunity Overview</h3>' +
-        Object.entries(counts).map(([k,v])=>bar(PF_CATEGORY_NAMES[k], v, rows.length)).join('') + '</div>' +
-      '<div class="card card-pad"><h3 style="margin:0 0 10px;font-size:14px;">District Distribution</h3>' +
-        (topDistricts.length ? topDistricts.map(([d,v])=>bar(d, v, rows.length)).join('') : '<div class="hint">Import data to see analytics.</div>') + '</div>' +
-    '</div>' +
-    '<div class="card card-pad" style="margin-top:16px;"><h3 style="margin:0 0 10px;font-size:14px;">Top Opportunities</h3>' +
-      (topOpps.length ? '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;">' + topOpps.map(r=>
-        '<div class="card card-pad" style="padding:10px;">' +
-          '<b style="font-size:13px;">'+Util.escapeHtml(r['Project Name Eng']||r['Project Name Mal']||'Unnamed Project')+'</b>' +
-          '<div class="hint">'+Util.escapeHtml(r['LB Name']||'')+' &middot; '+Util.escapeHtml(r['District']||'')+'</div>' +
-          '<div style="margin-top:6px;"><span class="badge badge-green">'+r.score+'% match</span> <span class="badge badge-blue">'+PF_CATEGORY_NAMES[r.type]+'</span>' +
-          ' <button class="btn btn-outline btn-sm" style="float:right;" onclick="ProjectFinder.viewProject(\''+pfKeyOf(r)+'\')">View</button></div>' +
-        '</div>').join('') + '</div>' : '<div class="hint">No projects yet \u2014 use the Import tab to load data.</div>') +
-    '</div>';
-  },
-  renderProjects(){
-    this.applyFilters();
-    const f = this.filters;
-    const info = Paginate.slice('projectfinder', this.filtered);
-    const cls = s => s>=80?'var(--green,#16a34a)':s>=50?'var(--amber,#d97706)':'var(--text-mute,#6b7280)';
-    return '<div class="card card-pad" style="margin-bottom:14px;">' +
-      '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">' +
-        '<div><h3 style="margin:0;font-size:14px;">Project Search &amp; Filters</h3><span class="hint">Combine filters: District + Local Body + Category + Score + Status.</span></div>' +
-        '<button class="btn btn-outline btn-sm" onclick="ProjectFinder.resetFilters()">Reset Filters</button>' +
-      '</div>' +
-      '<div class="form-row" style="grid-template-columns:2fr 1fr 1fr 1fr 1fr;margin-top:10px;">' +
-        '<div class="field"><label>Search all project data</label><input id="pfSearch" placeholder="e.g. waste bins malappuram panchayat" value="'+Util.escapeHtml(f.q)+'" oninput="ProjectFinder.render()"></div>' +
-        '<div class="field"><label>Category</label><select id="pfType" onchange="ProjectFinder.render()">' +
-          ['ALL','WASTE','PURCHASE','EQUIPMENT','OTHER'].map(t=>'<option value="'+t+'" '+(f.type===t?'selected':'')+'>'+(t==='ALL'?'All categories':PF_CATEGORY_NAMES[t])+'</option>').join('') + '</select></div>' +
-        '<div class="field"><label>District</label><select id="pfDistrict" onchange="ProjectFinder.onDistrictChange()"><option value="">All districts</option>' +
-          this.districtOptions().map(d=>'<option '+(f.district===d?'selected':'')+'>'+Util.escapeHtml(d)+'</option>').join('') + '</select></div>' +
-        '<div class="field"><label>Local Body</label><select id="pfLocalBody" onchange="ProjectFinder.render()"><option value="">All Local Bodies</option>' +
-          this.localBodyOptions(f.district).map(l=>'<option '+(f.localbody===l?'selected':'')+'>'+Util.escapeHtml(l)+'</option>').join('') + '</select></div>' +
-        '<div class="field"><label>Minimum score</label><select id="pfMinScore" onchange="ProjectFinder.render()">' +
-          [0,40,60,80,90].map(v=>'<option value="'+v+'" '+(f.minscore===v?'selected':'')+'>'+(v?v+'+':'All')+'</option>').join('') + '</select></div>' +
-      '</div>' +
-      '<div class="form-row" style="grid-template-columns:1fr 1fr 1fr 1fr;margin-top:8px;">' +
-        '<div class="field"><label>Status</label><select id="pfStatus" onchange="ProjectFinder.render()"><option value="">All Status</option>' +
-          PF_STATUSES.map(s=>'<option '+(f.status===s?'selected':'')+'>'+s+'</option>').join('') + '</select></div>' +
-        '<div class="field"><label>From Date</label><input type="date" id="pfFrom" value="'+f.from+'" onchange="ProjectFinder.render()"></div>' +
-        '<div class="field"><label>To Date</label><input type="date" id="pfTo" value="'+f.to+'" onchange="ProjectFinder.render()"></div>' +
-        '<div class="field"><label>Quick Date</label><select onchange="ProjectFinder.quickDate(this.value)"><option value="">Select</option><option value="today">Today</option><option value="week">This Week</option><option value="month">This Month</option><option value="30">Last 30 Days</option></select></div>' +
-      '</div>' +
-      '<div class="toolbar" style="margin-top:10px;"><div class="toolbar-spacer"></div><button class="btn btn-outline btn-sm" onclick="ProjectFinder.exportCSV(false)">Export CSV</button></div>' +
-    '</div>' +
-    '<div class="card"><div class="card-pad" style="padding-bottom:0;"><span class="hint">'+this.filtered.length+' results \u2022 total value \u20B9'+this.filtered.reduce((s,r)=>s+pfMoney(r['FundTotal']),0).toLocaleString('en-IN')+'</span></div>' +
-    '<div class="table-wrap"><table><thead><tr><th class="col-actions">Actions</th><th>Score</th><th>Opportunity</th><th>Project No</th><th>Project Name</th><th>Local Body</th><th>District</th><th>Sector</th><th>Status</th><th>Fund Total</th><th>Matched Keywords</th></tr></thead><tbody>' +
-      (info.pageItems.length ? info.pageItems.map(r=>{
-        const key = pfKeyOf(r);
-        const tr = Store.data.projTracking[key] || {};
-        const name = Util.escapeHtml(r['Project Name Eng']||r['Project Name Mal']||'');
-        return '<tr>' +
-          '<td class="col-actions"><div class="row-action-btns"><button class="icon-btn" title="View" onclick="ProjectFinder.viewProject(\''+key+'\')">&#128065;</button></div></td>' +
-          '<td class="mono" style="color:'+cls(r.score)+';font-weight:700;">'+r.score+'%</td>' +
-          '<td><span class="badge badge-blue">'+PF_CATEGORY_NAMES[r.type]+'</span>'+(tr.status?' <span class="badge badge-green">'+Util.escapeHtml(tr.status)+'</span>':'')+'</td>' +
-          '<td class="cell-mute">'+Util.escapeHtml(r['Project No']||'')+'</td>' +
-          '<td class="cell-main">'+name+'</td>' +
-          '<td class="cell-mute">'+Util.escapeHtml(r['LB Name']||'')+'</td>' +
-          '<td class="cell-mute">'+Util.escapeHtml(r['District']||'')+'</td>' +
-          '<td class="cell-mute">'+Util.escapeHtml(r['Sector']||'')+'</td>' +
-          '<td class="cell-mute">'+Util.escapeHtml(tr.status||'New')+'</td>' +
-          '<td class="mono">\u20B9'+pfMoney(r['FundTotal']).toLocaleString('en-IN')+'</td>' +
-          '<td>'+r.hits.slice(0,4).map(x=>'<span class="badge badge-gray">'+Util.escapeHtml(x)+'</span>').join(' ')+'</td>' +
-        '</tr>';
-      }).join('') : '<tr><td colspan="11" class="cell-mute" style="text-align:center;padding:20px;">No matching projects found.</td></tr>') +
-    '</tbody></table></div>' + Paginate.controlsHTML('projectfinder', info, "ProjectFinder.render()") + '</div>';
-  },
-
-  renderOpportunities(){
-    const groups = {}; PF_STATUSES.forEach(s=>groups[s]=[]);
-    Object.entries(Store.data.projTracking).forEach(([k,tr])=>{
-      const r = Store.data.projRows.find(x=>pfKeyOf(x)===k);
-      if(r) (groups[tr.status||'New']||groups.New).push({r,tr});
-    });
-    return '<div class="toolbar"><div class="toolbar-spacer"></div><button class="btn btn-outline btn-sm" onclick="ProjectFinder.exportCSV(true)">Export Opportunities</button></div>' +
-      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;">' +
-      PF_STATUSES.map(s=>'<div class="card card-pad" style="background:var(--bg-soft,#faf9f7);">' +
-        '<h4 style="margin:0 0 8px;font-size:12.5px;">'+s+' <span class="hint">('+groups[s].length+')</span></h4>' +
-        groups[s].map(({r,tr})=>{
-          const key = pfKeyOf(r);
-          return '<div class="card card-pad" style="padding:9px;margin-bottom:7px;">' +
-            '<b style="font-size:12.5px;">'+Util.escapeHtml(r['Project Name Eng']||'Unnamed')+'</b>' +
-            '<div class="hint">'+Util.escapeHtml(r['LB Name']||'')+' &middot; '+r.score+'%</div>' +
-            (tr.followup ? '<div class="hint">&#128197; '+Util.escapeHtml(tr.followup)+'</div>' : '') +
-            '<button class="btn btn-outline btn-sm" style="margin-top:6px;" onclick="ProjectFinder.viewProject(\''+key+'\')">Open</button>' +
-          '</div>';
-        }).join('') +
-      '</div>').join('') + '</div>';
-  },
-
-  renderImport(){
-    if(!Auth.isAdmin()){
-      return '<div class="empty-state"><div class="ic">&#128274;</div><div class="t">Import is restricted to administrators</div>' +
-        '<div class="d">You can still search, filter and track opportunities from the other tabs.</div></div>';
-    }
-    const hist = Store.data.projImportHistory;
-    return '<div class="card card-pad" style="margin-bottom:14px;">' +
-      '<h3 style="margin-top:0;font-size:14px;">Import Project Data</h3>' +
-      '<div class="hint" style="margin-bottom:8px;">Excel \u2192 select headings + rows \u2192 Copy \u2192 Paste below. Existing projects are matched using Project No + Local Body, so re-pasting updates rather than duplicates.</div>' +
-      '<textarea id="pfPaste" rows="8" placeholder="Paste Excel tab-separated data here..." style="font-family:monospace;font-size:12px;"></textarea>' +
-      '<div class="toolbar" style="margin-top:10px;">' +
-        '<button class="btn btn-primary btn-sm" onclick="ProjectFinder.processData()">Find Opportunities</button>' +
-        '<button class="btn btn-outline btn-sm" onclick="ProjectFinder.loadSample()">Load Sample</button>' +
-        '<button class="btn btn-outline btn-sm" onclick="ProjectFinder.clearImportBox()">Clear</button>' +
-      '</div>' +
-      '<div id="pfMsg" class="hint" style="margin-top:8px;"></div>' +
-    '</div>' +
-    '<div class="card"><div class="card-pad" style="padding-bottom:0;"><h3 style="margin:0;font-size:14px;">Import History</h3></div>' +
-      '<div class="table-wrap"><table><thead><tr><th>Date</th><th>Source</th><th>Records</th><th>New</th><th>Updated</th><th>Duplicates</th></tr></thead><tbody>' +
-      (hist.length ? hist.map(h=>'<tr><td class="cell-mute">'+Util.fmtDateTime(h.date)+'</td><td>'+Util.escapeHtml(h.source)+'</td><td>'+h.records+'</td><td>'+h.newCount+'</td><td>'+h.updated+'</td><td>'+h.duplicates+'</td></tr>').join('')
-        : '<tr><td colspan="6" class="cell-mute" style="text-align:center;padding:16px;">No imports yet.</td></tr>') +
-      '</tbody></table></div></div>';
-  },
-
-  renderProducts(){
-    const list = Store.data.projProducts;
-    return '<div class="card card-pad" style="margin-bottom:14px;">' +
-      '<h3 style="margin-top:0;font-size:14px;">JAYS Product Match</h3>' +
-      '<div class="hint" style="margin-bottom:8px;">Maintain simple keyword mappings so matching projects automatically surface potential JAYS products. This is separate from the main Product Master.</div>' +
-      '<div class="form-row" style="grid-template-columns:2fr 2fr auto;align-items:end;">' +
-        '<div class="field"><label>Product Name</label><input id="pfProdName" placeholder="e.g. Twin Waste Bin"></div>' +
-        '<div class="field"><label>Keywords / Category</label><input id="pfProdKeywords" placeholder="bin, waste, segregation"></div>' +
-        '<button class="btn btn-primary btn-sm" onclick="ProjectFinder.addProduct()">Add Product</button>' +
-      '</div>' +
-    '</div>' +
-    '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;">' +
-      (list.length ? list.map((p,i)=>'<div class="card card-pad" style="padding:10px;">' +
-        '<b style="font-size:13px;">'+Util.escapeHtml(p.name)+'</b><div class="hint">'+Util.escapeHtml(p.keywords)+'</div>' +
-        '<button class="btn btn-outline btn-sm" style="margin-top:6px;" onclick="ProjectFinder.removeProduct('+i+')">Delete</button></div>').join('')
-        : '<div class="hint">No products added yet.</div>') +
-    '</div>';
-  },
-
-  renderReports(){
-    const rows = Store.data.projRows;
-    const make = obj => Object.entries(obj).sort((a,b)=>b[1]-a[1]).map(([k,v])=>
-      '<div style="display:flex;justify-content:space-between;margin:7px 0;font-size:13px;"><span>'+Util.escapeHtml(k)+'</span><b>'+v+'</b></div>').join('') || '<div class="hint">No data</div>';
-    const c = {}; rows.forEach(r=>c[PF_CATEGORY_NAMES[r.type]] = (c[PF_CATEGORY_NAMES[r.type]]||0)+1);
-    const s = {}; rows.forEach(r=>{ const st = (Store.data.projTracking[pfKeyOf(r)]||{}).status || 'New'; s[st]=(s[st]||0)+1; });
-    return '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">' +
-      '<div class="card card-pad"><h3 style="margin:0 0 8px;font-size:14px;">Projects by Category</h3>'+make(c)+'</div>' +
-      '<div class="card card-pad"><h3 style="margin:0 0 8px;font-size:14px;">Projects by Status</h3>'+make(s)+'</div>' +
-    '</div>';
-  }
-};
-Views.projectfinder = ()=>ProjectFinder.render();
-
 const Reports = {
   render(){
     const c = Store.data.customers;
@@ -6119,9 +5707,7 @@ const Backup = {
       bids: Store.data.bids,
       waTemplates: Store.data.waTemplates, waHistory: Store.data.waHistory,
       rateTemplates: Store.data.rateTemplates, rateDocs: Store.data.rateDocs, rateTerms: Store.data.rateTerms,
-      rateDocTemplates: Store.data.rateDocTemplates,
-      projRows: Store.data.projRows, projTracking: Store.data.projTracking,
-      projProducts: Store.data.projProducts, projImportHistory: Store.data.projImportHistory
+      rateDocTemplates: Store.data.rateDocTemplates
     };
   },
   downloadJSON(){
@@ -6148,10 +5734,10 @@ const Backup = {
     try{
       const text = await file.text();
       const data = JSON.parse(text);
-      ['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','projRows','projTracking','projProducts','projImportHistory'].forEach(k=>{
+      ['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates'].forEach(k=>{
         if(data[k]!==undefined) Store.data[k] = data[k];
       });
-      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','projRows','projTracking','projProducts','projImportHistory'].map(k=>Store.save(k)));
+      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates'].map(k=>Store.save(k)));
       await Activity.log('Data restored', 'Restored from backup file '+file.name);
       UI.toast('Data restored successfully');
       Router.render('backup');
@@ -6172,7 +5758,6 @@ const Backup = {
         Orders: Store.data.orders.map(o=>({ID:o.id,'Order Date':o.orderDate,'GEM Order Number':o.gemcNumber||'','Order From':o.orderFrom||'','Product Name':o.productName||'','Party Name':o.party,'Party Phone':o.phone||'','Assigned To':o.assignedTo||'','Status':o.status})),
         Complaints: Store.data.complaints.map(c=>({ID:c.id,'Complaint Date':c.complaintDate,'Complaint From':c.complaintFrom,'Product Name':c.productName||'','Complaint Note':c.note||'','Assigned To':c.assignedTo||'','Status':c.status,'Updated Date':c.updatedDate})),
         Bids: Store.data.bids.map(b=>({ID:b.id,'Bid Number':b.bidNumber||'','Title':b.title||'','Category':b.category||'','Organisation':b.organisation||'','Bid Value':b.estimatedValue||0,'End Date':b.endDate||'','Status':b.status,'Assigned To':b.assignedTo||'','Decision':b.decision||'','Result':b.status==='Won'?'Won':b.status==='Lost'?'Lost':'','Notes':b.description||''})),
-        ProjectOpportunities: Store.data.projRows.map(r=>({'Project No':r['Project No']||'','Project Name':r['Project Name Eng']||r['Project Name Mal']||'','LB Name':r['LB Name']||'','District':r['District']||'','Sector':r['Sector']||'','Score':r.score,'Category':PF_CATEGORY_NAMES[r.type]||'','Status':(Store.data.projTracking[pfKeyOf(r)]||{}).status||'New','Fund Total':r['FundTotal']||''})),
         ActivityLog: Store.data.activityLog.map(a=>({Time:a.ts,User:a.user,Action:a.action,Details:a.details}))
       };
       Object.keys(sheets).forEach(name=>{
