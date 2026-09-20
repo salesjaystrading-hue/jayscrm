@@ -632,7 +632,9 @@ const DROPDOWNS = {
   complaintStatus: ['Initiated','Pending','Solved'],
   taskStatus: ['Not Started','In Progress','Completed'],
   bidType: ['Bid','RA (Reverse Auction)'],
-  bidStatus: ['New','Saved','Under Review','Go / No-Go Decision','Documents Pending','Under Preparation','Ready for Submission','Submitted','Technical Evaluation','Financial Evaluation','Won','Lost','Cancelled','Not Participating']
+  bidStatus: ['New','Saved','Under Review','Go / No-Go Decision','Documents Pending','Under Preparation','Ready for Submission','Submitted','Technical Evaluation','Financial Evaluation','Won','Lost','Cancelled','Not Participating'],
+  leaveType: ['Casual Leave','Sick Leave','Earned Leave','Unpaid Leave','Other'],
+  attendanceStatus: ['Present','Leave','Absent']
 };
 const DEFAULT_BID_CHECKLIST = ['PAN','GST Certificate','UDYAM Certificate','Experience Certificate','Turnover Certificate','Financial Statement','Product Catalogue','Technical Specification','OEM Authorization','MAF','EMD Document'];
 const BID_TERMINAL_STATUSES = ['Won','Lost','Cancelled','Not Participating'];
@@ -726,7 +728,8 @@ const Store = {
     customers: [], products: [], quotations: [], payments: [],
     followups: [], tasks: [], notes: [], users: [], settings: {}, activityLog: [],
     gemcrac: [], orders: [], complaints: [], bids: [], waTemplates: [], waHistory: [],
-    rateTemplates: [], rateDocs: [], rateTerms: [], rateDocTemplates: []
+    rateTemplates: [], rateDocs: [], rateTerms: [], rateDocTemplates: [],
+    attendance: [], leaveRequests: []
   },
   /* One-time, non-destructive lift of the old WhatsApp rate templates into
      the Rate Template Library. The source waTemplates rows are NEVER deleted
@@ -831,6 +834,8 @@ const Store = {
     this.data.rateDocs = await this.loadKey('jays_ratedocs', []);
     this.data.rateTerms = await this.loadKey('jays_rateterms', []);
     this.data.rateDocTemplates = await this.loadKey('jays_ratedoctemplates', []);
+    this.data.attendance = await this.loadKey('jays_attendance', []);
+    this.data.leaveRequests = await this.loadKey('jays_leaverequests', []);
     await this.migrateWaTemplates();
 
     const settingsFailedBefore = false;
@@ -1070,6 +1075,7 @@ const Auth = {
     }catch(e){ console.error('tryRestore failed', e); return false; }
   },
   async logout(){
+    await Attendance.markLogoutTime();
     await Activity.log('Logout', (this.session&&this.session.username)+' signed out');
     await sb.auth.signOut();
     this.session = null;
@@ -1145,6 +1151,7 @@ const NAV = [
   {sec:'Activity', items:[
     {id:'followupcentre', ic:'&#9200;', label:'Follow-ups'},
     {id:'tasks', ic:'&#9989;', label:'Tasks &amp; To-Do'},
+    {id:'attendance', ic:'&#128197;', label:'Attendance &amp; Leave'},
     {id:'notes', ic:'&#128221;', label:'Notes'},
   ]},
   {sec:'Insights', items:[
@@ -1168,6 +1175,7 @@ const PAGE_META = {
   quotations:['Quotations','Create and track quotes'],
   rate_docs:['Rate / Offer PDF','Build professional rate offers and export them as PDF'],
   oppfinder:['Project Opportunity','Panchayat/local-body project opportunities (external tool)'],
+  attendance:['Attendance & Leave','Daily attendance, work location and leave requests'],
   outstanding:['Outstanding','Unpaid balances by party'],
   inventory:['Inventory','Stock levels across the product catalog'],
   bidsearch:['GeM Bid Search','Find, score and track government procurement opportunities'],
@@ -1230,6 +1238,9 @@ function navBadgeCount(id){
   if(id==='bidsearch'){
     return Store.data.bids.filter(b=>{ const d=bidDeadlineInfo(b.endDate).days; return d!==null && d>=0 && d<=1 && !BID_TERMINAL_STATUSES.includes(b.status); }).length;
   }
+  if(id==='attendance'){
+    return Auth.isAdmin() ? Store.data.leaveRequests.filter(l=>l.status==='Pending').length : 0;
+  }
   return 0;
 }
 
@@ -1277,6 +1288,7 @@ const App = {
     document.getElementById('userAvatar').textContent = (Auth.session.name||Auth.session.username).slice(0,1).toUpperCase();
     if(!BottomScroll.bar) BottomScroll.init();
     go('dashboard');
+    Attendance.checkFirstLoginToday();
   }
 };
 document.getElementById('loginPass').addEventListener('keydown', e=>{ if(e.key==='Enter') Auth.login(); });
@@ -5580,6 +5592,460 @@ Views.oppfinder = function(){
    browser limitation. */
 const OppFinder = { onFrameError(){ UI.toast('Could not load the page here — use "Open in New Tab".'); } };
 
+/* =====================================================================
+   ATTENDANCE & LEAVE MANAGEMENT  (namespace: Attendance)
+   Reuses the existing Store (Supabase-backed jays_crm_store), the
+   existing profiles-driven user list, the existing modal/toast system,
+   Paginate, dashboardCardsHTML and the col-actions table convention -
+   no parallel data system, no new global UI components.
+
+     Store.data.attendance     (jays_attendance)     - one row per employee per day
+     Store.data.leaveRequests  (jays_leaverequests)  - leave applications + approval state
+
+   Permissions: every signed-in user can see their own attendance/leave;
+   only Admins (Auth.isAdmin(), the same check already used for Users &
+   Settings) can see/edit everyone's records and approve/reject leave.
+===================================================================== */
+const Attendance = {
+  tab: 'today',
+  teamFilter: { userId:'', month:'', status:'' },
+
+  /* ---------------- helpers ---------------- */
+  todayRecord(userId){
+    const uid = userId || (Auth.session && Auth.session.id);
+    return Store.data.attendance.find(a=>a.userId===uid && a.date===Util.todayISO());
+  },
+  userLabel(u){ return (u && (u.name||u.username)) || 'Unknown'; },
+  daysBetween(from, to){
+    const a = new Date(from+'T00:00:00'), b = new Date(to+'T00:00:00');
+    if(isNaN(a)||isNaN(b)||b<a) return 0;
+    return Math.round((b-a)/86400000)+1;
+  },
+  eachDate(from, to){
+    const out = []; let d = new Date(from+'T00:00:00'); const end = new Date(to+'T00:00:00');
+    while(d<=end){ out.push(d.toISOString().slice(0,10)); d.setDate(d.getDate()+1); }
+    return out;
+  },
+
+  /* ---------------- first login of the day ---------------- */
+  checkFirstLoginToday(){
+    if(!Auth.session) return;
+    if(Store.data.loadFailed && Store.data.loadFailed['jays_attendance']) return;
+    if(this.todayRecord()) return;              // already recorded today - never re-ask
+    setTimeout(()=>this.promptWorkLocation(), 400);
+  },
+  promptWorkLocation(){
+    if(this.todayRecord()) return;               // e.g. an admin already logged it for them
+    UI.openModal('Where are you working today?',
+      '<div style="display:flex;gap:14px;justify-content:center;padding:10px 0 4px;">' +
+        '<button class="btn btn-primary" style="flex:1;padding:22px 10px;font-size:15px;" onclick="Attendance.markAttendance(\'Office\')">&#127970;<br>Office</button>' +
+        '<button class="btn btn-primary" style="flex:1;padding:22px 10px;font-size:15px;" onclick="Attendance.markAttendance(\'Home\')">&#127968;<br>Home</button>' +
+      '</div>' +
+      '<div class="hint" style="text-align:center;margin-top:8px;">This is asked once per day and saves your login time automatically.</div>',
+      '', false);
+    // This is the one shared close (\u00d7) button used by every modal in the
+    // app; it isn't re-created per modal, so it must be explicitly hidden
+    // here and restored the moment a choice is made (see markAttendance)
+    // rather than left hidden for whatever modal opens next.
+    const closeBtn = document.querySelector('#modalBox .modal-close');
+    if(closeBtn) closeBtn.style.display = 'none';
+  },
+  async markAttendance(location){
+    const closeBtn = document.querySelector('#modalBox .modal-close');
+    if(closeBtn) closeBtn.style.display = '';    // restore before this modal closes
+    if(this.todayRecord()){ UI.closeModal(); return; }
+    const s = Auth.session;
+    const rec = {
+      id: Util.uid('ATT', Store.data.attendance),
+      userId: s.id, username: s.username, name: s.name || s.username,
+      date: Util.todayISO(), loginTime: new Date().toISOString(), logoutTime: '',
+      location, status: 'Present', editedBy: '', notes: ''
+    };
+    Store.data.attendance.unshift(rec);
+    const ok = await Store.save('attendance');
+    if(ok) await Activity.log('Attendance marked', rec.name+' — '+location+' ('+rec.date+')');
+    UI.closeModal();
+    if(UI.currentView==='attendance') Attendance.render();
+  },
+  /* Best-effort: called from Auth.logout(). Never allowed to block or
+     break the actual sign-out, so every failure mode is swallowed here. */
+  async markLogoutTime(){
+    try{
+      const rec = this.todayRecord();
+      if(!rec || rec.logoutTime) return;
+      rec.logoutTime = new Date().toISOString();
+      await Store.save('attendance');
+    }catch(e){ console.error('markLogoutTime failed (non-blocking)', e); }
+  },
+  async manualLogout(){
+    const rec = this.todayRecord();
+    if(!rec){ UI.toast('No attendance recorded yet today'); return; }
+    if(rec.logoutTime){ UI.toast('Logout time already recorded'); return; }
+    rec.logoutTime = new Date().toISOString();
+    const ok = await Store.save('attendance');
+    if(ok) UI.toast('Logout time recorded');
+    this.render();
+  },
+  /* ---------------- leave: apply ---------------- */
+  openLeaveForm(){
+    const today = Util.todayISO();
+    UI.openModal('Apply for Leave',
+      '<div class="form-row">' +
+        '<div class="field"><label>From Date *</label><input type="date" id="lv_from" value="'+today+'"></div>' +
+        '<div class="field"><label>To Date *</label><input type="date" id="lv_to" value="'+today+'"></div>' +
+      '</div>' +
+      '<div class="field"><label>Leave Type *</label><select id="lv_type">'+DROPDOWNS.leaveType.map(t=>'<option>'+t+'</option>').join('')+'</select></div>' +
+      '<div class="field"><label>Reason *</label><textarea id="lv_reason" rows="3" placeholder="Briefly explain the reason for leave"></textarea></div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button>' +
+      '<button class="btn btn-primary" onclick="Attendance.saveLeaveRequest()">Submit Request</button>');
+  },
+  async saveLeaveRequest(){
+    const from = document.getElementById('lv_from').value;
+    const to = document.getElementById('lv_to').value;
+    const type = document.getElementById('lv_type').value;
+    const reason = document.getElementById('lv_reason').value.trim();
+    if(!from || !to){ UI.toast('Select both dates'); return; }
+    const days = this.daysBetween(from, to);
+    if(days<=0){ UI.toast('"To" date must be on or after "From" date'); return; }
+    if(!reason){ UI.toast('Enter a reason for the leave'); return; }
+    const s = Auth.session;
+    const rec = {
+      id: Util.uid('LV', Store.data.leaveRequests),
+      userId: s.id, username: s.username, name: s.name || s.username,
+      fromDate: from, toDate: to, days, leaveType: type, reason,
+      status: 'Pending', appliedAt: new Date().toISOString(),
+      decidedBy: '', decidedAt: '', decisionNote: ''
+    };
+    Store.data.leaveRequests.unshift(rec);
+    const ok = await Store.save('leaveRequests');
+    if(ok) await Activity.log('Leave applied', rec.name+' — '+type+' ('+from+' to '+to+')');
+    UI.closeModal(); this.render();
+  },
+  async deleteLeave(id){
+    const rec = Store.data.leaveRequests.find(x=>x.id===id);
+    if(!rec) return;
+    const isOwner = Auth.session && rec.userId===Auth.session.id;
+    if(!isOwner && !Auth.isAdmin()){ UI.toast("You don't have permission to remove this request"); return; }
+    if(rec.status!=='Pending' && !Auth.isAdmin()){ UI.toast('Only a pending request can be withdrawn'); return; }
+    if(!confirm('Withdraw this leave request?')) return;
+    Store.data.leaveRequests = Store.data.leaveRequests.filter(x=>x.id!==id);
+    const ok = await Store.save('leaveRequests');
+    if(ok) await Activity.log('Leave request withdrawn', rec.name);
+    this.render();
+  },
+
+  /* ---------------- leave: approve / reject (Admin only) ---------------- */
+  /* Auto-marks the approved date range as Leave in Attendance, but only
+     for dates that don't already have a record - never overwrites a day
+     someone actually logged in for, or one an admin already edited. */
+  async syncLeaveAttendance(rec, approved){
+    let changed = false;
+    if(approved){
+      this.eachDate(rec.fromDate, rec.toDate).forEach(date=>{
+        const exists = Store.data.attendance.some(a=>a.userId===rec.userId && a.date===date);
+        if(!exists){
+          Store.data.attendance.push({
+            id: Util.uid('ATT', Store.data.attendance), userId:rec.userId, username:rec.username, name:rec.name,
+            date, loginTime:'', logoutTime:'', location:'', status:'Leave',
+            editedBy:'', notes:'Auto-added from approved leave '+rec.id, fromLeave: rec.id
+          });
+          changed = true;
+        }
+      });
+    } else {
+      const before = Store.data.attendance.length;
+      Store.data.attendance = Store.data.attendance.filter(a=>a.fromLeave!==rec.id);
+      changed = Store.data.attendance.length !== before;
+    }
+    if(changed) await Store.save('attendance');
+  },
+  async decideLeave(id, decision){
+    if(!Auth.isAdmin()){ UI.toast('Only an administrator can approve or reject leave'); return; }
+    const rec = Store.data.leaveRequests.find(x=>x.id===id);
+    if(!rec) return;
+    rec.status = decision;
+    rec.decidedBy = Auth.session.name || Auth.session.username;
+    rec.decidedAt = new Date().toISOString();
+    const ok = await Store.save('leaveRequests');
+    await this.syncLeaveAttendance(rec, decision==='Approved');
+    if(ok) await Activity.log('Leave '+decision.toLowerCase(), rec.name+' — '+rec.fromDate+' to '+rec.toDate);
+    this.render();
+  },
+  /* ---------------- admin: edit / add attendance ---------------- */
+  openAttendanceForm(id){
+    if(!Auth.isAdmin()){ UI.toast('Only an administrator can edit attendance'); return; }
+    const rec = id ? Store.data.attendance.find(x=>x.id===id) : null;
+    const v = rec || {userId:'', date:Util.todayISO(), location:'Office', status:'Present', logoutTime:'', notes:''};
+    UI.openModal(rec?'Edit Attendance':'Add Attendance Record',
+      '<div class="form-row">' +
+        '<div class="field"><label>Employee *</label><select id="at_user" '+(rec?'disabled':'')+'>' +
+          '<option value="">Select...</option>' +
+          Store.data.users.map(u=>'<option value="'+u.id+'" '+(v.userId===u.id?'selected':'')+'>'+Util.escapeHtml(Attendance.userLabel(u))+'</option>').join('') +
+        '</select></div>' +
+        '<div class="field"><label>Date *</label><input type="date" id="at_date" value="'+v.date+'" '+(rec?'disabled':'')+'></div>' +
+      '</div>' +
+      '<div class="form-row">' +
+        '<div class="field"><label>Status</label><select id="at_status">'+DROPDOWNS.attendanceStatus.map(s=>'<option '+(v.status===s?'selected':'')+'>'+s+'</option>').join('')+'</select></div>' +
+        '<div class="field"><label>Work Location</label><select id="at_location"><option value="">-</option>'+['Office','Home'].map(l=>'<option '+(v.location===l?'selected':'')+'>'+l+'</option>').join('')+'</select></div>' +
+      '</div>' +
+      '<div class="field"><label>Logout Time</label><input type="time" id="at_logout" value="'+(v.logoutTime?new Date(v.logoutTime).toTimeString().slice(0,5):'')+'"></div>' +
+      '<div class="field"><label>Notes</label><textarea id="at_notes" rows="2">'+Util.escapeHtml(v.notes||'')+'</textarea></div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button>' +
+      '<button class="btn btn-primary" onclick="Attendance.saveAttendanceForm(\''+(id||'')+'\')">Save</button>');
+  },
+  async saveAttendanceForm(id){
+    const userId = document.getElementById('at_user').value;
+    const date = document.getElementById('at_date').value;
+    if(!userId || !date){ UI.toast('Select an employee and date'); return; }
+    const status = document.getElementById('at_status').value;
+    const location = document.getElementById('at_location').value;
+    const logoutTimeStr = document.getElementById('at_logout').value;
+    const notes = document.getElementById('at_notes').value;
+    const admin = Auth.session.name || Auth.session.username;
+    if(id){
+      const rec = Store.data.attendance.find(x=>x.id===id);
+      if(!rec){ UI.toast('Record not found'); return; }
+      rec.status = status; rec.location = location; rec.notes = notes; rec.editedBy = admin;
+      if(logoutTimeStr){ const d = new Date(rec.date+'T'+logoutTimeStr+':00'); rec.logoutTime = d.toISOString(); }
+    } else {
+      if(Store.data.attendance.some(a=>a.userId===userId && a.date===date)){
+        UI.toast('An attendance record already exists for that employee and date — edit it instead'); return;
+      }
+      const u = Store.data.users.find(x=>x.id===userId);
+      Store.data.attendance.unshift({
+        id: Util.uid('ATT', Store.data.attendance), userId, username: u?u.username:'', name: u?Attendance.userLabel(u):'',
+        date, loginTime:'', logoutTime: logoutTimeStr ? new Date(date+'T'+logoutTimeStr+':00').toISOString() : '',
+        location, status, editedBy: admin, notes
+      });
+    }
+    const ok = await Store.save('attendance');
+    if(ok) await Activity.log(id?'Attendance edited':'Attendance added', date+' — '+status);
+    UI.closeModal(); this.render();
+  },
+  async deleteAttendance(id){
+    if(!Auth.isAdmin()) return;
+    if(!confirm('Delete this attendance record?')) return;
+    Store.data.attendance = Store.data.attendance.filter(x=>x.id!==id);
+    const ok = await Store.save('attendance');
+    if(ok) UI.toast('Deleted');
+    this.render();
+  },
+
+  /* ---------------- monthly summary ---------------- */
+  monthlySummary(userId, monthStr){
+    const list = Store.data.attendance.filter(a=>a.userId===userId && a.date.slice(0,7)===monthStr);
+    return {
+      present: list.filter(a=>a.status==='Present').length,
+      leave: list.filter(a=>a.status==='Leave').length,
+      absent: list.filter(a=>a.status==='Absent').length,
+      office: list.filter(a=>a.location==='Office').length,
+      home: list.filter(a=>a.location==='Home').length
+    };
+  },
+
+  /* ---------------- export ---------------- */
+  exportAttendanceCSV(list){
+    if(!list.length){ UI.toast('Nothing to export'); return; }
+    Reports.download(list.map(a=>({
+      Date:a.date, Employee:a.name||a.username, Location:a.location||'', Status:a.status,
+      'Login Time': a.loginTime?Util.fmtDateTime(a.loginTime):'', 'Logout Time': a.logoutTime?Util.fmtDateTime(a.logoutTime):'',
+      Notes:a.notes||''
+    })), 'attendance');
+  },
+  exportLeaveCSV(list){
+    if(!list.length){ UI.toast('Nothing to export'); return; }
+    Reports.download(list.map(l=>({
+      Employee:l.name||l.username, From:l.fromDate, To:l.toDate, Days:l.days, Type:l.leaveType,
+      Reason:l.reason, Status:l.status, 'Applied At': l.appliedAt?Util.fmtDateTime(l.appliedAt):'', 'Decided By':l.decidedBy||''
+    })), 'leave-requests');
+  },
+  /* ---------------- render: shell + tabs ---------------- */
+  setTab(t){ this.tab = t; this.render(); },
+  switcherHTML(){
+    const tabs = [['today','&#128197; Today'],['my','&#128203; My Attendance'],['leave','&#9995; Leave']];
+    if(Auth.isAdmin()){
+      tabs.push(['team','&#128101; Team Attendance'],['approvals','&#9989; Leave Approvals'],['reports','&#128202; Reports']);
+    } else {
+      tabs.push(['reports','&#128202; My Reports']);
+    }
+    return '<div class="rp-switcher" style="flex-wrap:wrap;">' +
+      tabs.map(([id,label])=>'<button class="'+(this.tab===id?'active':'')+'" onclick="Attendance.setTab(\''+id+'\')">'+label+
+        (id==='approvals' ? (()=>{ const n=Store.data.leaveRequests.filter(l=>l.status==='Pending').length; return n?' ('+n+')':''; })() : '') +
+      '</button>').join('') +
+    '</div>';
+  },
+  render(){
+    if(this.tab==='team' || this.tab==='approvals') if(!Auth.isAdmin()) this.tab = 'today';
+    const body = this.tab==='today' ? this.renderToday()
+      : this.tab==='my' ? this.renderMy()
+      : this.tab==='leave' ? this.renderLeave()
+      : this.tab==='team' ? this.renderTeam()
+      : this.tab==='approvals' ? this.renderApprovals()
+      : this.renderReports();
+    document.getElementById('content').innerHTML = this.switcherHTML() + body;
+  },
+
+  renderToday(){
+    const rec = this.todayRecord();
+    const s = Auth.session;
+    return '<div class="card card-pad" style="max-width:480px;">' +
+      '<h3 style="margin:0 0 10px;font-size:14px;">Today &middot; '+Util.fmtDate(Util.todayISO())+'</h3>' +
+      (rec
+        ? '<div style="display:flex;flex-direction:column;gap:8px;font-size:13.5px;">' +
+            '<div><span class="hint">Status:</span> <span class="badge badge-'+(rec.status==='Present'?'green':rec.status==='Leave'?'blue':'red')+'">'+rec.status+'</span></div>' +
+            (rec.location ? '<div><span class="hint">Working from:</span> <b>'+(rec.location==='Office'?'&#127970; Office':'&#127968; Home')+'</b></div>' : '') +
+            (rec.loginTime ? '<div><span class="hint">Login Time:</span> '+Util.fmtDateTime(rec.loginTime)+'</div>' : '') +
+            '<div><span class="hint">Logout Time:</span> '+(rec.logoutTime ? Util.fmtDateTime(rec.logoutTime) : '<span class="cell-mute">Not recorded yet</span>')+'</div>' +
+            (!rec.logoutTime && rec.status==='Present' ? '<button class="btn btn-outline btn-sm" style="margin-top:6px;width:fit-content;" onclick="Attendance.manualLogout()">Record Logout Time Now</button>' : '') +
+          '</div>'
+        : '<div class="hint" style="margin-bottom:10px;">You haven\'t marked today\'s work location yet.</div>' +
+          '<button class="btn btn-primary btn-sm" onclick="Attendance.promptWorkLocation()">Mark Today\'s Attendance</button>') +
+    '</div>';
+  },
+
+  renderMy(){
+    const uid = Auth.session.id;
+    const list = Store.data.attendance.filter(a=>a.userId===uid).sort((a,b)=>b.date.localeCompare(a.date));
+    const info = Paginate.slice('attendance_my', list);
+    return '<div class="card"><div class="card-pad" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">' +
+      '<h3 style="margin:0;font-size:14px;">My Attendance</h3>' +
+      '<button class="btn btn-outline btn-sm" onclick="Attendance.exportAttendanceCSV(Store.data.attendance.filter(a=>a.userId===\''+uid+'\'))">Export</button>' +
+      '</div>' +
+      '<div class="table-wrap"><table><thead><tr><th>Date</th><th>Login Time</th><th>Logout Time</th><th>Location</th><th>Status</th></tr></thead><tbody>' +
+      (info.pageItems.length ? info.pageItems.map(a=>'<tr>' +
+        '<td class="cell-main">'+Util.fmtDate(a.date)+'</td>' +
+        '<td class="cell-mute">'+(a.loginTime?Util.fmtDateTime(a.loginTime):'-')+'</td>' +
+        '<td class="cell-mute">'+(a.logoutTime?Util.fmtDateTime(a.logoutTime):'-')+'</td>' +
+        '<td>'+(a.location||'-')+'</td>' +
+        '<td><span class="badge badge-'+(a.status==='Present'?'green':a.status==='Leave'?'blue':'red')+'">'+a.status+'</span></td>' +
+      '</tr>').join('') : '<tr><td colspan="5" class="cell-mute" style="text-align:center;padding:18px;">No attendance records yet</td></tr>') +
+      '</tbody></table></div>' + Paginate.controlsHTML('attendance_my', info, "Attendance.render()") + '</div>';
+  },
+
+  renderLeave(){
+    const uid = Auth.session.id;
+    const list = Store.data.leaveRequests.filter(l=>l.userId===uid).sort((a,b)=>String(b.appliedAt).localeCompare(String(a.appliedAt)));
+    return '<div class="toolbar"><div class="toolbar-spacer"></div><button class="btn btn-primary btn-sm" onclick="Attendance.openLeaveForm()">&#65291; Apply for Leave</button></div>' +
+      '<div class="card"><div class="card-pad" style="padding-bottom:0;"><h3 style="margin:0;font-size:14px;">My Leave History</h3></div>' +
+      '<div class="table-wrap"><table><thead><tr><th class="col-actions">Actions</th><th>From</th><th>To</th><th>Days</th><th>Type</th><th>Reason</th><th>Status</th><th>Decided By</th></tr></thead><tbody>' +
+      (list.length ? list.map(l=>'<tr>' +
+        '<td class="col-actions"><div class="row-action-btns">' +
+          (l.status==='Pending' ? '<button class="icon-btn" title="Withdraw" onclick="Attendance.deleteLeave(\''+l.id+'\')">&#128465;</button>' : '') +
+        '</div></td>' +
+        '<td class="cell-mute">'+Util.fmtDate(l.fromDate)+'</td>' +
+        '<td class="cell-mute">'+Util.fmtDate(l.toDate)+'</td>' +
+        '<td class="mono">'+l.days+'</td>' +
+        '<td>'+Util.escapeHtml(l.leaveType)+'</td>' +
+        '<td class="cell-mute" style="max-width:220px;white-space:normal;">'+Util.escapeHtml(l.reason)+'</td>' +
+        '<td><span class="badge badge-'+(l.status==='Approved'?'green':l.status==='Rejected'?'red':'amber')+'">'+l.status+'</span></td>' +
+        '<td class="cell-mute">'+Util.escapeHtml(l.decidedBy||'-')+'</td>' +
+      '</tr>').join('') : '<tr><td colspan="8" class="cell-mute" style="text-align:center;padding:18px;">No leave requests yet</td></tr>') +
+      '</tbody></table></div></div>';
+  },
+  renderTeam(){
+    const f = this.teamFilter;
+    let list = Store.data.attendance.slice();
+    if(f.userId) list = list.filter(a=>a.userId===f.userId);
+    if(f.month) list = list.filter(a=>a.date.slice(0,7)===f.month);
+    if(f.status) list = list.filter(a=>a.status===f.status);
+    list.sort((a,b)=>b.date.localeCompare(a.date));
+    const info = Paginate.slice('attendance_team', list);
+    return '<div class="card card-pad" style="margin-bottom:14px;">' +
+      '<div class="form-row" style="grid-template-columns:1fr 1fr 1fr auto;">' +
+        '<div class="field"><label>Employee</label><select onchange="Attendance.teamFilter.userId=this.value;Attendance.render()"><option value="">All Employees</option>' +
+          Store.data.users.map(u=>'<option value="'+u.id+'" '+(f.userId===u.id?'selected':'')+'>'+Util.escapeHtml(Attendance.userLabel(u))+'</option>').join('') + '</select></div>' +
+        '<div class="field"><label>Month</label><input type="month" value="'+f.month+'" onchange="Attendance.teamFilter.month=this.value;Attendance.render()"></div>' +
+        '<div class="field"><label>Status</label><select onchange="Attendance.teamFilter.status=this.value;Attendance.render()"><option value="">All Status</option>' +
+          DROPDOWNS.attendanceStatus.map(s=>'<option '+(f.status===s?'selected':'')+'>'+s+'</option>').join('') + '</select></div>' +
+        '<button class="btn btn-outline btn-sm" style="align-self:end;" onclick="Attendance.teamFilter={userId:\'\',month:\'\',status:\'\'};Attendance.render()">Reset</button>' +
+      '</div>' +
+      '<div class="toolbar" style="margin-top:10px;">' +
+        '<button class="btn btn-primary btn-sm" onclick="Attendance.openAttendanceForm(null)">&#65291; Add Record</button>' +
+        '<div class="toolbar-spacer"></div>' +
+        '<button class="btn btn-outline btn-sm" onclick="Attendance.exportAttendanceCSV(Attendance._teamFiltered())">Export Filtered</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="card"><div class="table-wrap"><table><thead><tr><th class="col-actions">Actions</th><th>Date</th><th>Employee</th><th>Login Time</th><th>Logout Time</th><th>Location</th><th>Status</th><th>Notes</th></tr></thead><tbody>' +
+      (info.pageItems.length ? info.pageItems.map(a=>'<tr>' +
+        '<td class="col-actions"><div class="row-action-btns">' +
+          '<button class="icon-btn" title="Edit" onclick="Attendance.openAttendanceForm(\''+a.id+'\')">&#9998;</button>' +
+          '<button class="icon-btn" title="Delete" onclick="Attendance.deleteAttendance(\''+a.id+'\')">&#128465;</button>' +
+        '</div></td>' +
+        '<td class="cell-main">'+Util.fmtDate(a.date)+'</td>' +
+        '<td>'+Util.escapeHtml(a.name||a.username)+'</td>' +
+        '<td class="cell-mute">'+(a.loginTime?Util.fmtDateTime(a.loginTime):'-')+'</td>' +
+        '<td class="cell-mute">'+(a.logoutTime?Util.fmtDateTime(a.logoutTime):'-')+'</td>' +
+        '<td>'+(a.location||'-')+'</td>' +
+        '<td><span class="badge badge-'+(a.status==='Present'?'green':a.status==='Leave'?'blue':'red')+'">'+a.status+'</span>'+(a.editedBy?' <span class="hint">(edited)</span>':'')+'</td>' +
+        '<td class="cell-mute" style="max-width:180px;white-space:normal;">'+Util.escapeHtml(a.notes||'')+'</td>' +
+      '</tr>').join('') : '<tr><td colspan="8" class="cell-mute" style="text-align:center;padding:18px;">No matching attendance records</td></tr>') +
+      '</tbody></table></div>' + Paginate.controlsHTML('attendance_team', info, "Attendance.render()") + '</div>';
+  },
+  _teamFiltered(){
+    const f = this.teamFilter;
+    let list = Store.data.attendance.slice();
+    if(f.userId) list = list.filter(a=>a.userId===f.userId);
+    if(f.month) list = list.filter(a=>a.date.slice(0,7)===f.month);
+    if(f.status) list = list.filter(a=>a.status===f.status);
+    return list;
+  },
+
+  renderApprovals(){
+    const list = Store.data.leaveRequests.slice().sort((a,b)=>{
+      if(a.status==='Pending' && b.status!=='Pending') return -1;
+      if(b.status==='Pending' && a.status!=='Pending') return 1;
+      return String(b.appliedAt).localeCompare(String(a.appliedAt));
+    });
+    return '<div class="toolbar"><div class="toolbar-spacer"></div><button class="btn btn-outline btn-sm" onclick="Attendance.exportLeaveCSV(Store.data.leaveRequests)">Export All</button></div>' +
+      '<div class="card"><div class="table-wrap"><table><thead><tr><th class="col-actions">Actions</th><th>Employee</th><th>From</th><th>To</th><th>Days</th><th>Type</th><th>Reason</th><th>Applied</th><th>Status</th></tr></thead><tbody>' +
+      (list.length ? list.map(l=>'<tr>' +
+        '<td class="col-actions"><div class="row-action-btns">' +
+          (l.status==='Pending'
+            ? '<button class="btn btn-primary btn-sm" onclick="Attendance.decideLeave(\''+l.id+'\',\'Approved\')">Approve</button>' +
+              '<button class="btn btn-outline btn-sm" onclick="Attendance.decideLeave(\''+l.id+'\',\'Rejected\')">Reject</button>'
+            : '<button class="icon-btn" title="Delete" onclick="Attendance.deleteLeave(\''+l.id+'\')">&#128465;</button>') +
+        '</div></td>' +
+        '<td class="cell-main">'+Util.escapeHtml(l.name||l.username)+'</td>' +
+        '<td class="cell-mute">'+Util.fmtDate(l.fromDate)+'</td>' +
+        '<td class="cell-mute">'+Util.fmtDate(l.toDate)+'</td>' +
+        '<td class="mono">'+l.days+'</td>' +
+        '<td>'+Util.escapeHtml(l.leaveType)+'</td>' +
+        '<td class="cell-mute" style="max-width:200px;white-space:normal;">'+Util.escapeHtml(l.reason)+'</td>' +
+        '<td class="cell-mute">'+(l.appliedAt?Util.fmtDateTime(l.appliedAt):'-')+'</td>' +
+        '<td><span class="badge badge-'+(l.status==='Approved'?'green':l.status==='Rejected'?'red':'amber')+'">'+l.status+'</span></td>' +
+      '</tr>').join('') : '<tr><td colspan="9" class="cell-mute" style="text-align:center;padding:18px;">No leave requests</td></tr>') +
+      '</tbody></table></div></div>';
+  },
+
+  renderReports(){
+    const month = Util.todayISO().slice(0,7);
+    if(!Auth.isAdmin()){
+      const s = this.monthlySummary(Auth.session.id, month);
+      return dashboardCardsHTML('My Summary &middot; '+month, [
+        {label:'Present', value:s.present, color:'var(--green,#16a34a)'},
+        {label:'Leave', value:s.leave, color:'var(--blue,#2563eb)'},
+        {label:'Absent', value:s.absent, color:'var(--red,#dc2626)'},
+        {label:'Office Days', value:s.office},
+        {label:'Home Days', value:s.home}
+      ]);
+    }
+    const rows = Store.data.users.map(u=>{ const s = this.monthlySummary(u.id, month); return Object.assign({user:u}, s); });
+    const totals = rows.reduce((t,r)=>({present:t.present+r.present, leave:t.leave+r.leave, absent:t.absent+r.absent, office:t.office+r.office, home:t.home+r.home}), {present:0,leave:0,absent:0,office:0,home:0});
+    return dashboardCardsHTML('Team Summary &middot; '+month, [
+      {label:'Total Present', value:totals.present, color:'var(--green,#16a34a)'},
+      {label:'Total Leave', value:totals.leave, color:'var(--blue,#2563eb)'},
+      {label:'Total Absent', value:totals.absent, color:'var(--red,#dc2626)'},
+      {label:'Office Days', value:totals.office},
+      {label:'Home Days', value:totals.home}
+    ]) +
+    '<div class="card"><div class="card-pad" style="padding-bottom:0;"><h3 style="margin:0;font-size:14px;">By Employee &mdash; '+month+'</h3></div>' +
+    '<div class="table-wrap"><table><thead><tr><th>Employee</th><th>Present</th><th>Leave</th><th>Absent</th><th>Office</th><th>Home</th></tr></thead><tbody>' +
+      rows.map(r=>'<tr><td class="cell-main">'+Util.escapeHtml(Attendance.userLabel(r.user))+'</td><td class="mono">'+r.present+'</td><td class="mono">'+r.leave+'</td><td class="mono">'+r.absent+'</td><td class="mono">'+r.office+'</td><td class="mono">'+r.home+'</td></tr>').join('') +
+    '</tbody></table></div></div>';
+  }
+};
+Views.attendance = ()=>Attendance.render();
+
 const Reports = {
   render(){
     const c = Store.data.customers;
@@ -5645,6 +6111,9 @@ const Reports = {
       rows = Store.data.orders.map(o=>({ID:o.id, 'Order Date':o.orderDate, 'GEM Order Number':o.gemcNumber||'', 'Order From':o.orderFrom||'', 'Product Name':o.productName||'', 'Party Name':o.party, 'Party Phone':o.phone||'', 'Assigned To':o.assignedTo||'', 'Status':o.status}));
     } else if(view==='complaints'){
       rows = Store.data.complaints.map(c=>({ID:c.id, 'Complaint Date':c.complaintDate, 'Complaint From':c.complaintFrom, 'Product Name':c.productName||'', 'Complaint Note':c.note||'', 'Assigned To':c.assignedTo||'', 'Status':c.status, 'Updated Date':c.updatedDate}));
+    } else if(view==='attendance'){
+      const list = Auth.isAdmin() ? Store.data.attendance : Store.data.attendance.filter(a=>a.userId===Auth.session.id);
+      rows = list.map(a=>({Date:a.date, Employee:a.name||a.username, Location:a.location||'', Status:a.status, 'Login Time':a.loginTime?Util.fmtDateTime(a.loginTime):'', 'Logout Time':a.logoutTime?Util.fmtDateTime(a.logoutTime):'', Notes:a.notes||''}));
     } else {
       rows = Store.data.customers.map(x=>({ID:x.id, Name:x.name, Phone:x.phone, Status:x.status}));
     }
@@ -5746,7 +6215,8 @@ const Backup = {
       bids: Store.data.bids,
       waTemplates: Store.data.waTemplates, waHistory: Store.data.waHistory,
       rateTemplates: Store.data.rateTemplates, rateDocs: Store.data.rateDocs, rateTerms: Store.data.rateTerms,
-      rateDocTemplates: Store.data.rateDocTemplates
+      rateDocTemplates: Store.data.rateDocTemplates,
+      attendance: Store.data.attendance, leaveRequests: Store.data.leaveRequests
     };
   },
   downloadJSON(){
@@ -5773,10 +6243,10 @@ const Backup = {
     try{
       const text = await file.text();
       const data = JSON.parse(text);
-      ['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates'].forEach(k=>{
+      ['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','attendance','leaveRequests'].forEach(k=>{
         if(data[k]!==undefined) Store.data[k] = data[k];
       });
-      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates'].map(k=>Store.save(k)));
+      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','attendance','leaveRequests'].map(k=>Store.save(k)));
       await Activity.log('Data restored', 'Restored from backup file '+file.name);
       UI.toast('Data restored successfully');
       Router.render('backup');
@@ -5797,6 +6267,8 @@ const Backup = {
         Orders: Store.data.orders.map(o=>({ID:o.id,'Order Date':o.orderDate,'GEM Order Number':o.gemcNumber||'','Order From':o.orderFrom||'','Product Name':o.productName||'','Party Name':o.party,'Party Phone':o.phone||'','Assigned To':o.assignedTo||'','Status':o.status})),
         Complaints: Store.data.complaints.map(c=>({ID:c.id,'Complaint Date':c.complaintDate,'Complaint From':c.complaintFrom,'Product Name':c.productName||'','Complaint Note':c.note||'','Assigned To':c.assignedTo||'','Status':c.status,'Updated Date':c.updatedDate})),
         Bids: Store.data.bids.map(b=>({ID:b.id,'Bid Number':b.bidNumber||'','Title':b.title||'','Category':b.category||'','Organisation':b.organisation||'','Bid Value':b.estimatedValue||0,'End Date':b.endDate||'','Status':b.status,'Assigned To':b.assignedTo||'','Decision':b.decision||'','Result':b.status==='Won'?'Won':b.status==='Lost'?'Lost':'','Notes':b.description||''})),
+        Attendance: Store.data.attendance.map(a=>({ID:a.id,Date:a.date,Employee:a.name||a.username,Location:a.location||'',Status:a.status,'Login Time':a.loginTime||'','Logout Time':a.logoutTime||'',Notes:a.notes||''})),
+        LeaveRequests: Store.data.leaveRequests.map(l=>({ID:l.id,Employee:l.name||l.username,'From':l.fromDate,'To':l.toDate,Days:l.days,Type:l.leaveType,Reason:l.reason,Status:l.status,'Applied At':l.appliedAt||'','Decided By':l.decidedBy||''})),
         ActivityLog: Store.data.activityLog.map(a=>({Time:a.ts,User:a.user,Action:a.action,Details:a.details}))
       };
       Object.keys(sheets).forEach(name=>{
