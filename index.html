@@ -2,8 +2,18 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>JAYS CRM PRO | Jays Trading and Business Solution</title>
+<!-- PWA: installable "mobile app" shell. See /pwa-notes in this repo for
+     what this does and does not do (no offline data - Supabase stays live). -->
+<link rel="manifest" href="./manifest.json">
+<meta name="theme-color" content="#EB5A28">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="JAYS CRM">
+<link rel="icon" href="./icon-192.png">
+<link rel="apple-touch-icon" href="./icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -6615,6 +6625,16 @@ const SettingsView = {
 </script>
 <script>
 App.init();
+</script>
+<script>
+/* PWA install support. Registered after load so it never delays first
+   paint, and wrapped so browsers without support (or a file:// preview)
+   just silently skip it - the CRM works exactly the same either way. */
+if('serviceWorker' in navigator){
+  window.addEventListener('load', ()=>{
+    navigator.serviceWorker.register('./sw.js').catch(err=>console.warn('Service worker not registered:', err));
+  });
+}
 </script>
 </body>
 </html>
