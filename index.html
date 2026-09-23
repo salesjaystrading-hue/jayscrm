@@ -782,7 +782,7 @@ const Store = {
     followups: [], tasks: [], notes: [], users: [], settings: {}, activityLog: [],
     gemcrac: [], orders: [], complaints: [], bids: [], waTemplates: [], waHistory: [],
     rateTemplates: [], rateDocs: [], rateTerms: [], rateDocTemplates: [],
-    oppProjects: [], oppTracking: {}, oppProducts: [], oppImportHistory: [],
+    oppProjects: [], oppTracking: {}, oppProducts: [], oppImportHistory: [], oppKeywordGroups: [],
     attendance: [], leaveRequests: []
   },
   /* One-time, non-destructive lift of the old WhatsApp rate templates into
@@ -833,6 +833,7 @@ const Store = {
       companyAddress: '', companyWebsite: '', companyGSTIN: '', companyUdyam: '',
       companyLogo: '', signatureImage: '',
       defaultGstEnabled: false, defaultGstRate: 18, defaultValidityDays: 15,
+      preferredOppDistricts: '',
       preferredBidKeywords: 'Waste Bin, Twin Bin, Outdoor Gym, Furniture, School Furniture, Water ATM, Incinerator, Raincoat, Safety Equipment',
       preferredBidStates: '', preferredBidDepartments: '', minBidValue: '', maxBidValue: '',
       lastBackupAt: ''
@@ -892,6 +893,7 @@ const Store = {
     this.data.oppTracking = await this.loadKey('jays_opptracking', {});
     this.data.oppProducts = await this.loadKey('jays_oppproducts', []);
     this.data.oppImportHistory = await this.loadKey('jays_oppimporthistory', []);
+    this.data.oppKeywordGroups = await this.loadKey('jays_oppkeywordgroups', []);
     this.data.attendance = await this.loadKey('jays_attendance', []);
     this.data.leaveRequests = await this.loadKey('jays_leaverequests', []);
     await this.migrateWaTemplates();
@@ -3722,15 +3724,25 @@ Views.pipeline = ()=>SalesPipeline.render();
 const Outstanding = {
   render(){
     const pays = Store.data.payments;
+    const today = Util.todayISO();
     const byParty = {};
+    const aging = {b0_30:0, b31_60:0, b61_90:0, b90plus:0};
     pays.forEach(p=>{
       const due = Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0), 0);
       if(due<=0) return;
       const key = p.party || '—';
-      if(!byParty[key]) byParty[key] = {party:key, due:0, overdue:0, invoices:0, phone:p.phone||p.contact||''};
+      if(!byParty[key]) byParty[key] = {party:key, due:0, overdue:0, invoices:0, phone:p.phone||p.contact||'',
+        b0_30:0, b31_60:0, b61_90:0, b90plus:0};
       byParty[key].due += due;
       byParty[key].invoices += 1;
-      if(p.followupDate && p.followupDate < Util.todayISO()) byParty[key].overdue += due;
+      if(p.followupDate && p.followupDate < today) byParty[key].overdue += due;
+      if(p.followupDate){
+        const days = Math.floor((new Date(today) - new Date(p.followupDate))/86400000);
+        if(days>=0 && days<=30){ byParty[key].b0_30+=due; aging.b0_30+=due; }
+        else if(days>30 && days<=60){ byParty[key].b31_60+=due; aging.b31_60+=due; }
+        else if(days>60 && days<=90){ byParty[key].b61_90+=due; aging.b61_90+=due; }
+        else if(days>90){ byParty[key].b90plus+=due; aging.b90plus+=due; }
+      }
     });
     const rows = Object.values(byParty).sort((a,b)=>b.due-a.due);
     const totalOutstanding = rows.reduce((s,r)=>s+r.due,0);
@@ -3742,14 +3754,23 @@ const Outstanding = {
         {label:'Overdue', value:Util.fmtMoney(totalOverdue), color:'var(--red,#dc2626)'},
         {label:'Parties with Dues', value:rows.length}
       ])}
+      ${dashboardCardsHTML('Ageing (based on payment due date)', [
+        {label:'0-30 Days', value:Util.fmtMoney(aging.b0_30), color:'var(--blue,#2563eb)'},
+        {label:'31-60 Days', value:Util.fmtMoney(aging.b31_60), color:'var(--amber,#d97706)'},
+        {label:'61-90 Days', value:Util.fmtMoney(aging.b61_90), color:'var(--orange,#ea580c)'},
+        {label:'90+ Days', value:Util.fmtMoney(aging.b90plus), color:'var(--red,#dc2626)'}
+      ])}
       <div class="card"><div class="table-wrap">
-      ${rows.length ? `<table><thead><tr><th>Party</th><th>Phone</th><th>Open Invoices</th><th>Amount Due</th><th>Overdue</th><th></th></tr></thead><tbody>
+      ${rows.length ? `<table><thead><tr><th>Party</th><th>Phone</th><th>Open Invoices</th><th>Amount Due</th><th>0-30d</th><th>31-60d</th><th>61-90d</th><th>90+d</th><th></th></tr></thead><tbody>
         ${rows.map(r=>`<tr>
           <td class="cell-main">${Util.escapeHtml(r.party)}</td>
           <td class="cell-mute">${Util.escapeHtml(r.phone)}</td>
           <td class="cell-mute">${r.invoices}</td>
           <td class="mono">${Util.fmtMoney(r.due)}</td>
-          <td class="mono" style="${r.overdue>0?'color:var(--red,#dc2626);':''}">${r.overdue>0?Util.fmtMoney(r.overdue):'—'}</td>
+          <td class="mono cell-mute">${r.b0_30>0?Util.fmtMoney(r.b0_30):'—'}</td>
+          <td class="mono" style="${r.b31_60>0?'color:var(--amber,#d97706);':''}">${r.b31_60>0?Util.fmtMoney(r.b31_60):'—'}</td>
+          <td class="mono" style="${r.b61_90>0?'color:var(--orange,#ea580c);':''}">${r.b61_90>0?Util.fmtMoney(r.b61_90):'—'}</td>
+          <td class="mono" style="${r.b90plus>0?'color:var(--red,#dc2626);font-weight:700;':''}">${r.b90plus>0?Util.fmtMoney(r.b90plus):'—'}</td>
           <td>${r.phone? `<a class="icon-btn" style="color:#25D366;text-decoration:none;" href="${Util.waLink(r.phone,'')}" target="_blank">&#128172;</a>`:''}</td>
         </tr>`).join('')}
       </tbody></table>` : `<div class="empty-state"><div class="ic">&#128176;</div><div class="t">No outstanding balances</div><div class="d">Everything is settled — nice work.</div></div>`}
@@ -6236,26 +6257,159 @@ Views.attendance = ()=>Attendance.render();
      Store.data.oppProducts      (jays_oppproducts)      - [{name, keywords}] simple keyword->product map
      Store.data.oppImportHistory (jays_oppimporthistory) - import log
 ===================================================================== */
-const OPP_WASTE_WORDS = ["waste","solid waste","biodegradable","non-biodegradable","garbage","sanitation","compost","composting","haritha","haritha karma","harithakarmasena","hks","waste bin","waste bins","disposal","segregat","collection","processing","recycling","recycle","organic waste","bio bin","napkin","bottle booth","waste management","\u0d36\u0d41\u0d1a\u0d3f\u0d24\u0d4d\u0d35","\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f","\u0d1c\u0d48\u0d35\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f","\u0d05\u0d1c\u0d48\u0d35","\u0d39\u0d30\u0d3f\u0d24\u0d15\u0d7c\u0d2e\u0d4d\u0d2e","\u0d15\u0d2e\u0d4d\u0d2a\u0d4b\u0d38\u0d4d\u0d31\u0d4d\u0d31\u0d4d","\u0d2c\u0d3f\u0d7b","\u0d2c\u0d3f\u0d28\u0d4d\u0d28\u0d41\u0d15\u0d7e","\u0d2a\u0d3e\u0d34\u0d4d\u0d35\u0d38\u0d4d\u0d24\u0d41","\u0d2a\u0d3e\u0d34\u0d4d\u200d\u0d35\u0d38\u0d4d\u0d24\u0d41"];
-const OPP_PURCHASE_WORDS = ["purchase","purchasing","procurement","supply","supplying","buy","buying","provided","distribution","materials","consumables","utensils","furniture","computer","laptop","printer","tank","uniform","medicine","medicines","vehicle","tools","net","equipment","\u0d09\u0d2a\u0d15\u0d30\u0d23","\u0d35\u0d3e\u0d19\u0d4d\u0d19","\u0d35\u0d3f\u0d24\u0d30\u0d23\u0d02","\u0d38\u0d3e\u0d2e\u0d17\u0d4d\u0d30\u0d3f","\u0d2a\u0d3e\u0d24\u0d4d\u0d30","\u0d2b\u0d7c\u0d23\u0d3f\u0d1a\u0d7c","\u0d15\u0d2e\u0d4d\u0d2a\u0d4d\u0d2f\u0d42\u0d1f\u0d7c"];
-const OPP_EQUIP_WORDS = ["equipment","equipments","machine","machinery","unit","bin","bins","tank","motor","tools","furniture","computer","printer","projector","laptop","vehicle","compost unit","\u0d09\u0d2a\u0d15\u0d30\u0d23","\u0d2f\u0d42\u0d23\u0d3f\u0d31\u0d4d\u0d31\u0d4d","\u0d2e\u0d46\u0d37\u0d40\u0d7b","\u0d2c\u0d3f\u0d7b","\u0d1f\u0d3e\u0d19\u0d4d\u0d15\u0d4d"];
-const OPP_CATEGORY_NAMES = {WASTE:'Waste Management', PURCHASE:'Purchase', EQUIPMENT:'Equipment / Supplies', OTHER:'Other Potential'};
+/* Weighted, categorized keyword groups - editable afterward via
+   Store.data.oppKeywordGroups (OppFinder > Products tab) so new
+   products/synonyms can be added without touching code. These are
+   only the SEED values, loaded once if that collection is empty.
+   Weight = how strongly a matched word counts toward the Product/
+   Keyword Match score (out of 30): an exact JAYS product name should
+   carry far more weight than a generic word like "equipment" - that
+   asymmetry is what stops a project that just happens to mention
+   "equipment" and "supply" a few times from scoring as if it were a
+   real product match. */
+const OPP_DEFAULT_KEYWORD_GROUPS = [
+  {tier:'Exact JAYS Product', weight:25, category:'WASTE', words:['twinbin','twin bin','ss304 twinbin','ss304 twin bin','bio bin','bottle booth','napkin destroyer','compost unit','ring compost','pipe compost','mud picker']},
+  {tier:'Exact JAYS Product', weight:25, category:'WATER', words:['water atm','water atm machine','water kiosk','ro plant','drinking water kiosk']},
+  {tier:'Exact JAYS Product', weight:25, category:'FITNESS', words:['open gym','outdoor gym','leg press','bench press','parallel bars','pull up bar','chin up bar','air walker']},
+  {tier:'Exact JAYS Product', weight:25, category:'ANGANWADI', words:['anganwadi kitchen','anganwadi furniture','anganwadi equipment','classroom bench','classroom desk','wooden coat']},
+  {tier:'Exact JAYS Product', weight:25, category:'IT', words:['interactive panel','pa system','smart board']},
+  {tier:'Product Synonym', weight:18, category:'WASTE', words:['waste bin','waste bins','garbage bin','garbage bins','dustbin','dustbins','litter bin','litter bins','waste container','garbage container','collection bin','segregation bin','steel bin','ss bin','stainless steel bin','hdpe bin','plastic bin','double bin','dual bin','three bin','tricycle bin','pedal bin','community bin','public bin','street bin','road side bin','compost','composting','vermicompost','vermi compost','bio compost','compost pit','compost plant','aerobic composting','anaerobic composting','household composting','community composting','pot compost']},
+  {tier:'Product Synonym', weight:18, category:'WASTE', words:['e-cart','garbage cart','waste trolley','hand cart','push cart','collection trolley','mini tipper','auto tipper','garbage vehicle','waste vehicle']},
+  {tier:'Product Synonym', weight:18, category:'HYGIENE', words:['sanitary napkin','napkin destroyer','incinerator','hand sanitizer','soap dispenser','handwash station']},
+  {tier:'Product Synonym', weight:18, category:'WATER', words:['water purifier','water dispenser','water cooler','water filter','water treatment plant']},
+  {tier:'Product Synonym', weight:18, category:'FITNESS', words:['fitness equipment','gym equipment','gymnasium equipment','exercise equipment','fitness station','playground equipment','rowing machine','elliptical','twister']},
+  {tier:'Product Synonym', weight:18, category:'ANGANWADI', words:['kitchen utensils','kitchen vessels','cooking utensils','classroom furniture','school furniture','storage cabinet','almirah','bookshelf','educational toys','learning materials']},
+  {tier:'Product Synonym', weight:18, category:'IT', words:['computer','desktop','laptop','notebook','tablet','printer','scanner','photocopier','multifunction printer','mfp','ups','server','cctv','cctv camera','surveillance','biometric device','projector','led display','speaker']},
+  {tier:'Product Synonym', weight:18, category:'FURNITURE', words:['office furniture','institutional furniture','office table','office chair','executive chair','conference table','reception desk','display rack','computer table']},
+  {tier:'Product Synonym', weight:18, category:'ELECTRICAL', words:['led light','street light','solar light','solar street light','solar panel','high mast light','inverter']},
+  {tier:'Product Synonym', weight:18, category:'DISASTER', words:['life jacket','life jackets','rescue equipment','rescue kit','flood rescue','first aid kit','emergency light']},
+  {tier:'Strong Category', weight:15, category:'WASTE', words:['waste management','solid waste management','municipal solid waste','msw','waste disposal','waste collection','waste transportation','waste processing','waste treatment','waste handling','waste segregation','waste separation','waste reduction','waste recycling','recycling','resource recovery','material recovery','mrf','material recovery facility','refuse management']},
+  {tier:'Strong Category', weight:15, category:'HYGIENE', words:['sanitation','hygiene','public health','sanitation worker','sanitation workers']},
+  {tier:'Strong Category', weight:15, category:'DISASTER', words:['disaster management','emergency response','disaster response']},
+  {tier:'Procurement Intent', weight:12, category:'PURCHASE', words:['purchase','purchasing','procurement','procure','procurement of','supply','supplying','supply of','purchase of','purchase and supply','supply and installation','supply and commissioning','supply installation commissioning','sitc','supply and delivery','providing','provision','acquisition','tender','e-tender','tendering','quotation','rate quotation','purchase order','supply order','work order','empanelment','required equipment','required items','equipment required','materials required']},
+  {tier:'Sector', weight:10, category:'HYGIENE', words:['social welfare','sanitation']},
+  {tier:'Sector', weight:10, category:'WASTE', words:['solid waste management']},
+  {tier:'Sub-sector', weight:10, category:'WASTE', words:['collection and transport','processing','disposal','segregation']},
+  {tier:'Supporting Word', weight:10, category:'EQUIPMENT', words:['equipment','equipments','machinery','machine','machines','tools','instruments','devices','apparatus','accessories','materials','supplies','infrastructure equipment','technical equipment','electrical equipment','mechanical equipment']},
+  {tier:'Supporting Word', weight:10, category:'IT', words:['networking','network equipment','switch','router']},
+  {tier:'Supporting Word', weight:10, category:'DISASTER', words:['emergency kit','emergency supplies','emergency equipment','flood equipment','flood protection','relief equipment']},
+  {tier:'Malayalam', weight:15, category:'WASTE', words:['\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d02','\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d19\u0d4d\u0d19\u0d7e','\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d38\u0d02\u0d38\u0d4d\u0d15\u0d30\u0d23\u0d02','\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f \u0d38\u0d02\u0d38\u0d4d\u0d15\u0d30\u0d23\u0d02','\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f \u0d36\u0d47\u0d16\u0d30\u0d23\u0d02','\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f \u0d35\u0d47\u0d7c\u0d24\u0d3f\u0d30\u0d3f\u0d15\u0d4d\u0d15\u0d7d','\u0d2a\u0d41\u0d28\u0d30\u0d41\u0d2a\u0d2f\u0d4b\u0d17\u0d02','\u0d2a\u0d41\u0d28\u0d03\u0d1a\u0d02\u0d15\u0d4d\u0d30\u0d2e\u0d23\u0d02','\u0d16\u0d30\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d02','\u0d1c\u0d48\u0d35\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d02','\u0d05\u0d1c\u0d48\u0d35\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d02']},
+  {tier:'Malayalam', weight:15, category:'HYGIENE', words:['\u0d39\u0d30\u0d3f\u0d24 \u0d15\u0d7c\u0d2e\u0d4d\u0d2e \u0d38\u0d47\u0d28','\u0d39\u0d30\u0d3f\u0d24\u0d15\u0d7c\u0d2e\u0d4d\u0d2e\u0d38\u0d47\u0d28','\u0d36\u0d41\u0d1a\u0d3f\u0d24\u0d4d\u0d35\u0d02','\u0d36\u0d41\u0d1a\u0d40\u0d15\u0d30\u0d23\u0d02','\u0d38\u0d02\u0d30\u0d15\u0d4d\u0d37\u0d23 \u0d09\u0d2a\u0d15\u0d30\u0d23\u0d19\u0d4d\u0d19\u0d7e','\u0d38\u0d41\u0d30\u0d15\u0d4d\u0d37\u0d3e \u0d09\u0d2a\u0d15\u0d30\u0d23\u0d19\u0d4d\u0d19\u0d7e']},
+  {tier:'Malayalam', weight:15, category:'PURCHASE', words:['\u0d35\u0d3e\u0d19\u0d4d\u0d19\u0d7d','\u0d35\u0d3f\u0d24\u0d30\u0d23\u0d02']}
+];
+const OPP_CATEGORY_NAMES = {
+  WASTE:'Waste Management', WATER:'Water Systems', FITNESS:'Open Gym / Fitness', ANGANWADI:'Anganwadi / Social Welfare',
+  IT:'IT Equipment', FURNITURE:'Furniture', ELECTRICAL:'Electrical / Solar', DISASTER:'Disaster Management',
+  HYGIENE:'Sanitation / Hygiene', EQUIPMENT:'Equipment / Supplies', PURCHASE:'Purchase', OTHER:'Unmatched'
+};
 const OPP_STATUSES = ['New','Researching','Contacted','Interested','Quotation','Submitted','Won','Lost'];
 const OPP_FIELDS = ['Project No','Impl Code','Project Name Eng','Project Name Mal','LB Name','LB Type','District','Sector','Sub Sector','Status','FundTotal','Expenditure','Balance','Project Date','Closing Date'];
 
 function oppNorm(v){ return String(v==null?'':v).toLowerCase().replace(/\s+/g,' ').trim(); }
 function oppMoney(v){ const n = Number(String(v==null?'':v).replace(/[,\u20B9\s]/g,'')); return isNaN(n)?0:n; }
 function oppKeyOf(r){ return oppNorm((r['Project No']||'')+'|'+(r['LB Name']||'')); }
+/* Smart Opportunity Score 2.0 - a weighted blend instead of raw keyword
+   counting, so the number actually reflects how promising a project is,
+   not just how many trigger words happen to appear in its text:
+     Product/keyword match   30%   Sector                15%
+     Sub-sector              10%   Procurement wording    10%
+     District preference      5%   Estimated fund value   10%
+     Deadline proximity      10%   Historical relevance   10%
+   Computed at import time (same as before) and re-runnable on demand
+   via "Recalculate All Scores" in the Import tab, since two factors
+   (district preference, historical relevance) depend on state that
+   can change after a row was first imported. */
 function oppClassify(r){
   const text = Object.values(r).map(oppNorm).join(' ');
-  const hitsW = OPP_WASTE_WORDS.filter(x=>text.includes(oppNorm(x)));
-  const hitsP = OPP_PURCHASE_WORDS.filter(x=>text.includes(oppNorm(x)));
-  const hitsE = OPP_EQUIP_WORDS.filter(x=>text.includes(oppNorm(x)));
-  const score = Math.min(100, Math.min(70,hitsW.length*25) + Math.min(45,hitsP.length*12) + Math.min(30,hitsE.length*8)
-    + (oppNorm(r['Sector']).includes('waste') || oppNorm(r['Sector']).includes('\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f') ? 35 : 0)
-    + (oppNorm(r['Sub Sector']).includes('waste') || oppNorm(r['Sub Sector']).includes('\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f') ? 25 : 0));
-  const type = hitsW.length ? 'WASTE' : (hitsP.length ? 'PURCHASE' : (hitsE.length ? 'EQUIPMENT' : 'OTHER'));
-  return { score, type, hits: [...new Set([...hitsW, ...hitsP, ...hitsE])].slice(0,12) };
+  const groups = (Store.data.oppKeywordGroups && Store.data.oppKeywordGroups.length) ? Store.data.oppKeywordGroups : OPP_DEFAULT_KEYWORD_GROUPS;
+
+  const matched = [];               // [{word, weight, tier, category}]
+  const categoryWeights = {};       // category -> summed weight, to pick the dominant type
+  groups.forEach(g=>{
+    (g.words||[]).forEach(w=>{
+      const wn = oppNorm(w);
+      if(wn && text.includes(wn)){
+        matched.push({word:w, weight:g.weight, tier:g.tier, category:g.category});
+        categoryWeights[g.category] = (categoryWeights[g.category]||0) + g.weight;
+      }
+    });
+  });
+  // Your own added keywords (Products tab) count too, at Product-Synonym weight.
+  (Store.data.oppProducts||[]).forEach(p=>{
+    String(p.keywords||'').split(',').forEach(k=>{
+      const wn = oppNorm(k);
+      if(wn && text.includes(wn)){
+        matched.push({word:k.trim(), weight:18, tier:'Your Product Keywords', category:'PRODUCT'});
+        categoryWeights.PRODUCT = (categoryWeights.PRODUCT||0) + 18;
+      }
+    });
+  });
+
+  // CRITICAL: if nothing actually matched, the project has no demonstrated
+  // relevance at all - fund value, a near deadline or "has a district" are
+  // NOT substitutes for that, so none of them get to contribute. This is
+  // what stops an unrelated project (e.g. road construction) from scoring
+  // well just because it's large and closing soon.
+  if(!matched.length){
+    return { score:0, type:'OTHER', hits:[],
+      scoreBreakdown:{product:0, sector:0, subSector:0, procurement:0, location:0, fund:0, deadline:0, history:0} };
+  }
+
+  const dominant = Object.entries(categoryWeights).sort((a,b)=>b[1]-a[1])[0];
+  const type = (dominant && dominant[0]!=='PRODUCT') ? dominant[0] : (dominant ? 'EQUIPMENT' : 'OTHER');
+  const isWasteText = t => t.includes('waste') || t.includes('\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f');
+
+  // 1) Product / keyword match - 30% cap. Summed matched weight, so one
+  //    exact-product hit (25) plus a supporting word (10) clearly outweighs
+  //    five generic "equipment"/"supply" mentions (10 each capped low).
+  const rawWeightSum = matched.reduce((s,m)=>s+m.weight,0);
+  const productScore = Math.min(30, rawWeightSum * 0.5);
+
+  // 2) Sector - 15% (only credited when it's actually a waste-type sector; no more "any text present" credit)
+  const sector = oppNorm(r['Sector']);
+  const sectorScore = isWasteText(sector) ? 15 : 0;
+
+  // 3) Sub-sector - 10%
+  const subSector = oppNorm(r['Sub Sector']);
+  const subSectorScore = isWasteText(subSector) ? 10 : 0;
+
+  // 4) Procurement wording - 10% (from matched Procurement Intent keywords specifically)
+  const procurementScore = Math.min(10, (categoryWeights.PURCHASE||0) * 0.3);
+
+  // 5) District preference - 5% (only a real match already exists, per the gate above)
+  const preferredDistricts = String(Store.data.settings.preferredOppDistricts||'').split(',').map(d=>oppNorm(d)).filter(Boolean);
+  const district = oppNorm(r['District']);
+  const locationScore = district ? (preferredDistricts.includes(district) ? 5 : 1) : 0;
+
+  // 6) Estimated fund value - 10% (log-scaled so one huge project can't dominate the score alone)
+  const fund = oppMoney(r['FundTotal']);
+  const fundScore = fund>0 ? Math.min(10, Math.log10(fund+1)*1.3) : 0;
+
+  // 7) Deadline proximity - 10% (an actionable, not-yet-closed date scores higher than one far off or already past)
+  let deadlineScore = 0;
+  const closing = r['Closing Date'] || r['Project Date'];
+  if(closing){
+    const days = Math.floor((new Date(closing) - new Date())/86400000);
+    if(days>=0 && days<=30) deadlineScore = 10;
+    else if(days>30 && days<=90) deadlineScore = 6;
+    else if(days>90) deadlineScore = 3;
+  }
+
+  // 8) Historical relevance - 10% (has this local body previously produced a Won opportunity?)
+  const lb = oppNorm(r['LB Name']);
+  const historyScore = (lb && Object.entries(Store.data.oppTracking||{}).some(([k,tr])=>tr.status==='Won' && k.split('|')[1]===lb)) ? 10 : 0;
+
+  const score = Math.round(Math.min(100,
+    productScore + sectorScore + subSectorScore + procurementScore + locationScore + fundScore + deadlineScore + historyScore));
+
+  return {
+    score, type, hits: [...new Set(matched.map(m=>m.word))].slice(0,15),
+    scoreBreakdown: {
+      product: Math.round(productScore), sector: sectorScore, subSector: subSectorScore,
+      procurement: Math.round(procurementScore), location: locationScore,
+      fund: Math.round(fundScore*10)/10, deadline: deadlineScore, history: historyScore
+    }
+  };
 }
 function oppParseTSV(txt){
   const lines = String(txt||'').replace(/\r/g,'').split('\n').filter(x=>x.trim());
@@ -6331,6 +6485,18 @@ const OppFinder = {
     this.processData();
   },
   clearImportBox(){ const ta=document.getElementById('oppPaste'); if(ta) ta.value=''; },
+  async seedKeywordGroups(){
+    if(Store.data.oppKeywordGroups.length || Store.loadFailed['jays_oppkeywordgroups']) return;
+    Store.data.oppKeywordGroups = JSON.parse(JSON.stringify(OPP_DEFAULT_KEYWORD_GROUPS));
+    await Store.save('oppKeywordGroups');
+  },
+  async recalculateScores(){
+    if(!Store.data.oppProjects.length){ UI.toast('No projects to recalculate'); return; }
+    Store.data.oppProjects = Store.data.oppProjects.map(r=>Object.assign({}, r, oppClassify(r)));
+    const ok = await Store.save('oppProjects');
+    if(ok){ await Activity.log('Project opportunity scores recalculated', Store.data.oppProjects.length+' project(s)'); UI.toast('Scores updated'); }
+    this.render();
+  },
 
   /* ---------------- filtering ---------------- */
   readFilters(){
@@ -6413,6 +6579,14 @@ const OppFinder = {
         '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">Category</div>'+E(OPP_CATEGORY_NAMES[r.type])+'</div>' +
         '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">Matched Keywords</div>'+r.hits.map(x=>'<span class="badge badge-gray">'+E(x)+'</span>').join(' ')+'</div>' +
       '</div>' +
+      (r.scoreBreakdown ? '<h4 style="margin:14px 0 6px;">Why this scored '+r.score+'%</h4>' +
+        '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;font-size:12px;">' +
+          [['Product Match',r.scoreBreakdown.product,30],['Sector',r.scoreBreakdown.sector,15],
+           ['Sub-sector',r.scoreBreakdown.subSector,10],['Procurement Wording',r.scoreBreakdown.procurement,10],
+           ['District',r.scoreBreakdown.location,5],['Fund Value',r.scoreBreakdown.fund,10],
+           ['Deadline',r.scoreBreakdown.deadline,10],['Past Success Here',r.scoreBreakdown.history,10]]
+           .map(([label,val,max])=>'<div class="card card-pad" style="padding:7px;text-align:center;"><div class="hint">'+E(label)+'</div><b>'+val+'</b><span class="hint">/'+max+'</span></div>').join('') +
+        '</div>' : '') +
       '<h3 style="margin:16px 0 8px;">\u2b50 My Opportunity</h3>' +
       '<div class="form-row" style="grid-template-columns:1fr 1fr 1fr;">' +
         '<div class="field"><label>Priority</label><select id="oppPriority">'+['Low','Medium','High'].map(p=>'<option '+(tr.priority===p?'selected':'')+'>'+p+'</option>').join('')+'</select></div>' +
@@ -6472,6 +6646,25 @@ const OppFinder = {
     if(ok) await Activity.log('Project-matching product removed', p.name);
     this.render();
   },
+  async addKeywordGroup(){
+    const tier = document.getElementById('oppKwTier').value.trim();
+    const weight = Math.max(1, Math.min(25, Number(document.getElementById('oppKwWeight').value)||0));
+    const category = document.getElementById('oppKwCategory').value.trim().toUpperCase();
+    const words = document.getElementById('oppKwWords').value.split(',').map(w=>w.trim()).filter(Boolean);
+    if(!tier || !category || !words.length){ UI.toast('Enter a tier, category and at least one word'); return; }
+    Store.data.oppKeywordGroups.push({tier, weight, category, words});
+    const ok = await Store.save('oppKeywordGroups');
+    if(ok) await Activity.log('Opportunity keyword group added', tier+' ('+words.length+' word(s))');
+    this.render();
+  },
+  async removeKeywordGroup(i){
+    const g = Store.data.oppKeywordGroups[i]; if(!g) return;
+    if(!confirm('Delete the "'+g.tier+'" group with '+g.words.length+' word(s)? This affects future scoring immediately.')) return;
+    Store.data.oppKeywordGroups.splice(i,1);
+    const ok = await Store.save('oppKeywordGroups');
+    if(ok) await Activity.log('Opportunity keyword group removed', g.tier);
+    this.render();
+  },
 
   /* ---------------- export ---------------- */
   exportCSV(onlySaved){
@@ -6507,8 +6700,9 @@ const OppFinder = {
 
   renderDashboard(){
     const rows = Store.data.oppProjects;
-    const counts = {WASTE:0,PURCHASE:0,EQUIPMENT:0,OTHER:0};
-    rows.forEach(r=>counts[r.type]++);
+    const counts = {}; Object.keys(OPP_CATEGORY_NAMES).forEach(k=>counts[k]=0);
+    rows.forEach(r=>{ counts[r.type] = (counts[r.type]||0) + 1; });
+    const unmatchedCount = counts.OTHER||0;
     const districts = {}; rows.forEach(r=>{ const d=r['District']||'Unknown'; districts[d]=(districts[d]||0)+1; });
     const topDistricts = Object.entries(districts).sort((a,b)=>b[1]-a[1]).slice(0,8);
     const topOpps = rows.slice().sort((a,b)=>b.score-a.score).slice(0,6);
@@ -6517,15 +6711,20 @@ const OppFinder = {
 
     return dashboardCardsHTML('Project Opportunity Dashboard', [
       {label:'Total Projects', value:rows.length},
-      {label:'Waste Opportunities', value:counts.WASTE, color:'var(--green,#16a34a)'},
-      {label:'Purchase Opportunities', value:counts.PURCHASE, color:'var(--blue,#2563eb)'},
+      {label:'Waste Opportunities', value:counts.WASTE||0, color:'var(--green,#16a34a)'},
+      {label:'Purchase Opportunities', value:counts.PURCHASE||0, color:'var(--blue,#2563eb)'},
       {label:'High Priority (80%+)', value:rows.filter(r=>r.score>=80).length, color:'var(--red,#dc2626)'},
+      {label:'Unmatched (no keyword)', value:unmatchedCount, color: unmatchedCount?'var(--amber,#d97706)':undefined},
       {label:'Saved Opportunities', value:Object.keys(Store.data.oppTracking).length},
       {label:'Total Fund Value', value:'\u20B9'+rows.reduce((s,r)=>s+oppMoney(r['FundTotal']),0).toLocaleString('en-IN')}
     ]) +
+    (unmatchedCount ? '<div class="card card-pad" style="margin-bottom:16px;border-left:4px solid var(--amber,#d97706);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">' +
+      '<div><b>'+unmatchedCount+' project(s) matched no keyword at all</b><div class="hint">These scored 0% and are worth a quick manual scan \u2014 you may spot a new product term to add to the keyword library.</div></div>' +
+      '<button class="btn btn-outline btn-sm" onclick="OppFinder.setTab(\'projects\');setTimeout(()=>{document.getElementById(\'oppType\').value=\'OTHER\';OppFinder.render();},0)">View Unmatched Projects</button>' +
+    '</div>' : '') +
     '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">' +
       '<div class="card card-pad"><h3 style="margin:0 0 10px;font-size:14px;">Opportunity Overview</h3>' +
-        Object.entries(counts).map(([k,v])=>bar(OPP_CATEGORY_NAMES[k], v, rows.length)).join('') + '</div>' +
+        Object.entries(counts).filter(([k,v])=>v>0).map(([k,v])=>bar(OPP_CATEGORY_NAMES[k]||k, v, rows.length)).join('') + '</div>' +
       '<div class="card card-pad"><h3 style="margin:0 0 10px;font-size:14px;">District Distribution</h3>' +
         (topDistricts.length ? topDistricts.map(([d,v])=>bar(d, v, rows.length)).join('') : '<div class="hint">Import data to see analytics.</div>') + '</div>' +
     '</div>' +
@@ -6554,7 +6753,8 @@ const OppFinder = {
       '<div class="form-row" style="grid-template-columns:2fr 1fr 1fr 1fr 1fr;margin-top:10px;">' +
         '<div class="field"><label>Search all project data</label><input id="oppSearch" placeholder="e.g. waste bins malappuram panchayat" value="'+Util.escapeHtml(f.q)+'" oninput="OppFinder.render()"></div>' +
         '<div class="field"><label>Category</label><select id="oppType" onchange="OppFinder.render()">' +
-          ['ALL','WASTE','PURCHASE','EQUIPMENT','OTHER'].map(t=>'<option value="'+t+'" '+(f.type===t?'selected':'')+'>'+(t==='ALL'?'All categories':OPP_CATEGORY_NAMES[t])+'</option>').join('') + '</select></div>' +
+          '<option value="ALL" '+(f.type==='ALL'?'selected':'')+'>All categories</option>' +
+          Object.keys(OPP_CATEGORY_NAMES).map(t=>'<option value="'+t+'" '+(f.type===t?'selected':'')+'>'+OPP_CATEGORY_NAMES[t]+'</option>').join('') + '</select></div>' +
         '<div class="field"><label>District</label><select id="oppDistrict" onchange="OppFinder.onDistrictChange()"><option value="">All districts</option>' +
           this.districtOptions().map(d=>'<option '+(f.district===d?'selected':'')+'>'+Util.escapeHtml(d)+'</option>').join('') + '</select></div>' +
         '<div class="field"><label>Local Body</label><select id="oppLocalBody" onchange="OppFinder.render()"><option value="">All Local Bodies</option>' +
@@ -6635,6 +6835,10 @@ const OppFinder = {
         '<input type="file" accept=".xlsx,.xls,.csv" onchange="OppFinder.handleExcelFile(this)"></div>' +
       '<div id="oppFileStatus" class="hint"></div>' +
       '<div id="oppMsg" class="hint" style="margin-top:8px;"></div>' +
+      '<div class="toolbar" style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;">' +
+        '<button class="btn btn-outline btn-sm" onclick="OppFinder.recalculateScores()">&#8635; Recalculate All Scores (' + Store.data.oppProjects.length + ' projects)</button>' +
+        '<span class="hint">Re-runs the matching algorithm on projects already imported \u2014 useful after adding product keywords or district preferences.</span>' +
+      '</div>' +
     '</div>' +
     '<div class="card"><div class="card-pad" style="padding-bottom:0;"><h3 style="margin:0;font-size:14px;">Import History</h3></div>' +
       '<div class="table-wrap"><table><thead><tr><th>Date</th><th>Source</th><th>Records</th><th>New</th><th>Updated</th><th>Duplicates</th></tr></thead><tbody>' +
@@ -6645,6 +6849,7 @@ const OppFinder = {
 
   renderProducts(){
     const list = Store.data.oppProducts;
+    const groups = Store.data.oppKeywordGroups;
     return '<div class="card card-pad" style="margin-bottom:14px;">' +
       '<h3 style="margin-top:0;font-size:14px;">JAYS Product Match</h3>' +
       '<div class="hint" style="margin-bottom:8px;">Maintain simple keyword mappings so matching projects automatically surface potential JAYS products. This is separate from the main Product Master.</div>' +
@@ -6654,12 +6859,35 @@ const OppFinder = {
         '<button class="btn btn-primary btn-sm" onclick="OppFinder.addProduct()">Add Product</button>' +
       '</div>' +
     '</div>' +
-    '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;">' +
+    '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;margin-bottom:16px;">' +
       (list.length ? list.map((p,i)=>'<div class="card card-pad" style="padding:10px;">' +
         '<b style="font-size:13px;">'+Util.escapeHtml(p.name)+'</b><div class="hint">'+Util.escapeHtml(p.keywords)+'</div>' +
         '<button class="btn btn-outline btn-sm" style="margin-top:6px;" onclick="OppFinder.removeProductAt('+i+')">Delete</button></div>').join('')
         : '<div class="hint">No products added yet.</div>') +
-    '</div>';
+    '</div>' +
+
+    '<div class="card card-pad" style="margin-bottom:14px;">' +
+      '<h3 style="margin-top:0;font-size:14px;">Keyword Matching Library</h3>' +
+      '<div class="hint" style="margin-bottom:8px;">Controls the Opportunity Score. Higher weight = counts more toward a match. Add new terms here any time \u2014 no code changes needed.' +
+        (Store.data.oppProjects.length ? ' After changing this list, use <b>Import &gt; Recalculate All Scores</b> to re-score projects already imported.' : '') + '</div>' +
+      '<div class="form-row" style="grid-template-columns:1.3fr 1fr 1fr 2fr auto;align-items:end;">' +
+        '<div class="field"><label>Tier</label><input id="oppKwTier" placeholder="e.g. Exact JAYS Product"></div>' +
+        '<div class="field"><label>Weight (1-25)</label><input id="oppKwWeight" type="number" min="1" max="25" value="15"></div>' +
+        '<div class="field"><label>Category</label><input id="oppKwCategory" list="oppCatList" placeholder="WASTE"><datalist id="oppCatList">' +
+          Object.keys(OPP_CATEGORY_NAMES).filter(k=>k!=='OTHER').map(k=>'<option value="'+k+'">').join('') + '</datalist></div>' +
+        '<div class="field"><label>Words (comma-separated)</label><input id="oppKwWords" placeholder="twin bin, ss304 twin bin"></div>' +
+        '<button class="btn btn-primary btn-sm" onclick="OppFinder.addKeywordGroup()">Add Group</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="card"><div class="table-wrap"><table><thead><tr><th>Tier</th><th>Weight</th><th>Category</th><th>Words</th><th></th></tr></thead><tbody>' +
+      (groups.length ? groups.map((g,i)=>'<tr>' +
+        '<td class="cell-main">'+Util.escapeHtml(g.tier)+'</td>' +
+        '<td class="mono">'+g.weight+'</td>' +
+        '<td><span class="badge badge-blue">'+Util.escapeHtml(OPP_CATEGORY_NAMES[g.category]||g.category)+'</span></td>' +
+        '<td class="cell-mute" style="white-space:normal;max-width:340px;">'+g.words.map(w=>Util.escapeHtml(w)).join(', ')+'</td>' +
+        '<td><button class="icon-btn" title="Delete group" onclick="OppFinder.removeKeywordGroup('+i+')">&#128465;</button></td>' +
+      '</tr>').join('') : '<tr><td colspan="5" class="cell-mute" style="text-align:center;padding:16px;">No keyword groups.</td></tr>') +
+    '</tbody></table></div></div>';
   },
 
   renderReports(){
@@ -6674,7 +6902,7 @@ const OppFinder = {
     '</div>';
   }
 };
-Views.oppfinder = ()=>OppFinder.render();
+Views.oppfinder = ()=>OppFinder.seedKeywordGroups().then(()=>OppFinder.render());
 
 const Reports = {
   render(){
@@ -6848,6 +7076,7 @@ const Backup = {
       rateDocTemplates: Store.data.rateDocTemplates,
       oppProjects: Store.data.oppProjects, oppTracking: Store.data.oppTracking,
       oppProducts: Store.data.oppProducts, oppImportHistory: Store.data.oppImportHistory,
+      oppKeywordGroups: Store.data.oppKeywordGroups,
       attendance: Store.data.attendance, leaveRequests: Store.data.leaveRequests
     };
   },
@@ -6875,10 +7104,10 @@ const Backup = {
     try{
       const text = await file.text();
       const data = JSON.parse(text);
-      ['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','attendance','leaveRequests'].forEach(k=>{
+      ['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests'].forEach(k=>{
         if(data[k]!==undefined) Store.data[k] = data[k];
       });
-      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','attendance','leaveRequests'].map(k=>Store.save(k)));
+      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests'].map(k=>Store.save(k)));
       await Activity.log('Data restored', 'Restored from backup file '+file.name);
       UI.toast('Data restored successfully');
       Router.render('backup');
