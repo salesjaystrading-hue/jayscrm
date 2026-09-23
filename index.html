@@ -6307,7 +6307,58 @@ const OPP_FIELDS = ['Project No','Impl Code','Project Name Eng','Project Name Ma
 
 function oppNorm(v){ return String(v==null?'':v).toLowerCase().replace(/\s+/g,' ').trim(); }
 function oppMoney(v){ const n = Number(String(v==null?'':v).replace(/[,\u20B9\s]/g,'')); return isNaN(n)?0:n; }
-function oppKeyOf(r){ return oppNorm((r['Project No']||'')+'|'+(r['LB Name']||'')); }
+/* Finds a value on a row by trying several likely header names, first
+   as an exact match, then case/punctuation-insensitively against the
+   row's ACTUAL column names. Real-world exports rarely use our exact
+   expected headers (e.g. a file might say "Project ID" or "Local Body
+   Name" instead of "Project No"/"LB Name") - without this, every row
+   in such a file would read as blank on both fields. */
+function oppFindField(r, patterns){
+  for(const pat of patterns){
+    if(r[pat] !== undefined && String(r[pat]).trim()) return String(r[pat]).trim();
+  }
+  const normPatterns = patterns.map(p=>p.toLowerCase().replace(/[^a-z0-9]/g,''));
+  for(const k of Object.keys(r)){
+    const nk = k.toLowerCase().replace(/[^a-z0-9]/g,'');
+    if(normPatterns.some(np=>nk===np || nk.includes(np)) && String(r[k]).trim()) return String(r[k]).trim();
+  }
+  return '';
+}
+const OPP_PROJECT_NO_ALIASES = ['Project No','Project No.','ProjectNo','Project ID','ProjectID','Sl No','SlNo','S.No','Sl.No','Serial No','Scheme No','Scheme ID'];
+const OPP_LB_NAME_ALIASES = ['LB Name','LB','Local Body','Local Body Name','LocalBody','Panchayat','Panchayath','Panchayat Name','Municipality','Grama Panchayat','Local Self Government'];
+/* Writes the detected identifying fields back onto the row under our
+   canonical keys ('Project No', 'LB Name') so every other part of the
+   UI - table columns, filters, CSV export, scoring - keeps working
+   unchanged regardless of what the source file actually called them. */
+function oppNormalizeRow(r){
+  const out = Object.assign({}, r);
+  if(!String(out['Project No']||'').trim()){
+    const v = oppFindField(r, OPP_PROJECT_NO_ALIASES);
+    if(v) out['Project No'] = v;
+  }
+  if(!String(out['LB Name']||'').trim()){
+    const v = oppFindField(r, OPP_LB_NAME_ALIASES);
+    if(v) out['LB Name'] = v;
+  }
+  return out;
+}
+/* CRITICAL: this key must never collapse many distinct rows onto one
+   value, or an import silently merges/overwrites thousands of records
+   into a single one (exactly the failure this fallback chain exists to
+   prevent). Falls back through Project No/LB Name -> project name +
+   district + fund value -> a hash of the whole row, so two genuinely
+   different rows are never treated as the same record just because
+   their identifying columns happen to both be blank. */
+function oppKeyOf(r){
+  const projectNo = String(r['Project No']||'').trim();
+  const lbName = String(r['LB Name']||'').trim();
+  if(projectNo || lbName) return oppNorm(projectNo+'|'+lbName);
+  const name = String(r['Project Name Eng']||r['Project Name Mal']||'').trim();
+  const district = String(r['District']||'').trim();
+  const fund = String(r['FundTotal']||'').trim();
+  if(name) return oppNorm(name+'|'+district+'|'+fund);
+  return oppNorm(JSON.stringify(r)).slice(0,120);
+}
 /* Smart Opportunity Score 2.0 - a weighted blend instead of raw keyword
    counting, so the number actually reflects how promising a project is,
    not just how many trigger words happen to appear in its text:
@@ -6450,11 +6501,83 @@ const OppFinder = {
     this.render();
     return true;
   },
-  async processData(){
+  /* Preview-before-save: nothing touches the database until the user
+     explicitly clicks "Import & Save Projects" on the summary shown
+     here. this.pendingImport / this.pendingSource hold the parsed rows
+     in memory between preview and save. */
+  pendingImport: null,
+  pendingSource: '',
+  previewImport(){
     const ta = document.getElementById('oppPaste');
-    const incoming = oppParseTSV(ta.value).map(r=>Object.assign({}, r, oppClassify(r)));
-    const ok = await this.importIncoming(incoming, 'Pasted TSV');
-    if(ok) ta.value = '';
+    const raw = oppParseTSV(ta.value);
+    this.showPreview(raw, 'Pasted TSV');
+  },
+  showPreview(rawIn, source){
+    const box = document.getElementById('oppPreviewBox');
+    const msg = document.getElementById('oppMsg');
+    if(!rawIn.length){ if(msg) msg.textContent = 'No rows detected.'; if(box) box.innerHTML=''; return; }
+    // Normalize FIRST: detect Project No / LB Name under whatever header
+    // names the source file actually used, before anything computes a key.
+    const raw = rawIn.map(oppNormalizeRow);
+    // Invalid: no usable identifier at all (would collide on the same blank key as every other invalid row).
+    const invalid = raw.filter(r=>!String(r['Project No']||'').trim() && !String(r['LB Name']||'').trim());
+    const valid = raw.filter(r=>!invalid.includes(r));
+    const incoming = valid.map(r=>Object.assign({}, r, oppClassify(r)));
+    const existingKeys = new Set(Store.data.oppProjects.map(r=>oppKeyOf(r)));
+    const newCount = incoming.filter(r=>!existingKeys.has(oppKeyOf(r))).length;
+    const updateCount = incoming.length - newCount;
+
+    // Collision guard: if a large fraction of THIS batch's rows share a
+    // key with each other, they would silently overwrite one another
+    // during save - the exact failure mode that caused "11,931 updated"
+    // out of a single real import. Surface it loudly instead of saving
+    // it quietly.
+    const batchKeys = incoming.map(r=>oppKeyOf(r));
+    const uniqueBatchKeys = new Set(batchKeys).size;
+    const collisionRatio = incoming.length>10 ? 1 - (uniqueBatchKeys/incoming.length) : 0;
+    const severeCollision = collisionRatio > 0.5;
+    this.pendingImport = incoming;
+    this.pendingSource = source;
+    this.pendingSevereCollision = severeCollision;
+
+    const headerSample = Object.keys(rawIn[0]||{}).slice(0,10);
+    if(box) box.innerHTML =
+      '<div class="card card-pad" style="margin-top:12px;background:var(--bg-soft,#faf9f7);">' +
+        '<h4 style="margin:0 0 10px;">Import Preview</h4>' +
+        '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;text-align:center;">' +
+          '<div><div style="font-size:19px;font-weight:700;">'+raw.length+'</div><div class="hint">Total Rows</div></div>' +
+          '<div><div style="font-size:19px;font-weight:700;color:var(--green,#16a34a);">'+newCount+'</div><div class="hint">New</div></div>' +
+          '<div><div style="font-size:19px;font-weight:700;color:var(--blue,#2563eb);">'+updateCount+'</div><div class="hint">Updates</div></div>' +
+          '<div><div style="font-size:19px;font-weight:700;">'+uniqueBatchKeys+'</div><div class="hint">Unique Records Detected</div></div>' +
+          '<div><div style="font-size:19px;font-weight:700;'+(invalid.length?'color:var(--red,#dc2626);':'')+'">'+invalid.length+'</div><div class="hint">Invalid (no ID)</div></div>' +
+        '</div>' +
+        (invalid.length ? '<div class="hint" style="margin-top:8px;">Invalid rows have neither a Project No nor an LB Name, so they can\'t be safely matched against existing records \u2014 they will be skipped.</div>' : '') +
+        (severeCollision ? '<div class="card card-pad" style="margin-top:10px;border-left:4px solid var(--red,#dc2626);">' +
+          '<b style="color:var(--red,#dc2626);">&#9888; '+incoming.length+' rows only produced '+uniqueBatchKeys+' unique record(s).</b>' +
+          '<div class="hint" style="margin-top:4px;">This usually means your file\'s Project No / Local Body columns use different header names than expected, so rows are being treated as the same record. Detected columns in your file: <b>'+headerSample.map(h=>Util.escapeHtml(h)).join(', ')+'</b>. Check these match an actual project/local-body identifier before saving \u2014 otherwise most of your rows will overwrite each other.</div>' +
+        '</div>' : '') +
+        '<div class="toolbar" style="margin-top:12px;">' +
+          '<button class="btn '+(severeCollision?'btn-outline':'btn-primary')+' btn-sm" onclick="OppFinder.confirmImportSave()">&#128190; '+(severeCollision?'Save Anyway (Not Recommended)':'Import &amp; Save Projects')+'</button>' +
+          '<button class="btn btn-outline btn-sm" onclick="OppFinder.cancelPreview()">Cancel</button>' +
+        '</div>' +
+      '</div>';
+  },
+  cancelPreview(){
+    this.pendingImport = null;
+    this.pendingSevereCollision = false;
+    const box = document.getElementById('oppPreviewBox'); if(box) box.innerHTML='';
+  },
+  async confirmImportSave(){
+    if(!this.pendingImport || !this.pendingImport.length){ UI.toast('Nothing to save \u2014 preview an import first'); return; }
+    if(this.pendingSevereCollision && !confirm('Most of these rows share the same detected Project No / Local Body, which usually means they will overwrite each other and you\'ll end up with far fewer saved records than you expect. Save anyway?')) return;
+    const box = document.getElementById('oppPreviewBox');
+    if(box) box.innerHTML = '<div class="hint" style="margin-top:12px;">Saving to database\u2026</div>';
+    const ok = await this.importIncoming(this.pendingImport, this.pendingSource);
+    if(ok){
+      const ta = document.getElementById('oppPaste'); if(ta) ta.value='';
+      this.pendingImport = null;
+      this.pendingSevereCollision = false;
+    }
   },
   async handleExcelFile(input){
     const f = input.files && input.files[0];
@@ -6467,9 +6590,8 @@ const OppFinder = {
       const sheetName = wb.SheetNames[0];
       const raw = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {defval:'', raw:false});
       if(!raw.length){ if(statusEl) statusEl.textContent = 'No rows found in ' + f.name + ' (sheet: ' + sheetName + ').'; input.value=''; return; }
-      const incoming = raw.map(r=>Object.assign({}, r, oppClassify(r)));
-      const ok = await this.importIncoming(incoming, 'Excel: ' + f.name);
-      if(statusEl) statusEl.textContent = ok ? ('\u2713 Imported ' + incoming.length + ' rows from ' + f.name + '.') : 'Import failed \u2014 see message above.';
+      this.showPreview(raw, 'Excel: ' + f.name);
+      if(statusEl) statusEl.textContent = '\u2713 Parsed ' + raw.length + ' rows from ' + f.name + ' \u2014 review the preview below, then Import & Save.';
     }catch(e){
       console.error(e);
       if(statusEl) statusEl.textContent = 'Could not read file: ' + (e.message||e);
@@ -6482,7 +6604,7 @@ const OppFinder = {
 "27\tIC-27\tProtective equipments to HKS\t\u0d39\u0d30\u0d3f\u0d24 \u0d15\u0d7c\u0d2e\u0d4d\u0d2e\u0d38\u0d47\u0d28\u0d15\u0d4d\u0d15\u0d4d \u0d38\u0d41\u0d30\u0d15\u0d4d\u0d37\u0d3e \u0d09\u0d2a\u0d15\u0d30\u0d23\u0d19\u0d4d\u0d19\u0d33\u0d4d\u200d\tSample Panchayat\tKozhikode\tSolid Waste Management\tProcessing\tApproved\t100000\t100000\n"+
 "336\tIC-336\tWASTE BINS FOR SEGREGATING WASTE AT THE COMMUNITY LEVEL\t\u0d15\u0d2e\u0d4d\u0d2e\u0d4d\u0d2f\u0d42\u0d23\u0d3f\u0d31\u0d4d\u0d31\u0d3f \u0d24\u0d32\u0d24\u0d4d\u0d24\u0d3f\u0d7d \u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d19\u0d4d\u0d19\u0d7e \u0d24\u0d30\u0d02\u0d24\u0d3f\u0d30\u0d3f\u0d15\u0d4d\u0d15\u0d41\u0d28\u0d4d\u0d28\u0d24\u0d3f\u0d28\u0d41\u0d33\u0d4d\u0d33 \u0d2c\u0d3f\u0d28\u0d4d\u0d28\u0d41\u0d15\u0d7e \u0d35\u0d3e\u0d19\u0d4d\u0d19\u0d7d\tSample Panchayat\tKozhikode\tSolid Waste Management\tCollection and Transport\tApproved\t300000\t300000";
     document.getElementById('oppPaste').value = sample;
-    this.processData();
+    this.previewImport();
   },
   clearImportBox(){ const ta=document.getElementById('oppPaste'); if(ta) ta.value=''; },
   async seedKeywordGroups(){
@@ -6495,6 +6617,22 @@ const OppFinder = {
     Store.data.oppProjects = Store.data.oppProjects.map(r=>Object.assign({}, r, oppClassify(r)));
     const ok = await Store.save('oppProjects');
     if(ok){ await Activity.log('Project opportunity scores recalculated', Store.data.oppProjects.length+' project(s)'); UI.toast('Scores updated'); }
+    this.render();
+  },
+  /* Forces a fresh fetch straight from Supabase, bypassing whatever is
+     cached in this browser tab - the honest way to answer "how many
+     records are really in the database right now" without trusting
+     in-memory state. */
+  async reloadFromDatabase(){
+    UI.toast('Reloading from database\u2026');
+    const fresh = await Store.loadKey('jays_oppprojects', []);
+    if(Store.loadFailed['jays_oppprojects']){
+      UI.toast('Could not reach the database \u2014 check your connection and try again.');
+      return;
+    }
+    Store.data.oppProjects = fresh;
+    await Activity.log('Project data reloaded from database', fresh.length+' record(s)');
+    UI.toast('Reloaded '+fresh.length+' record(s) from the database');
     this.render();
   },
 
@@ -6822,12 +6960,14 @@ const OppFinder = {
 
   renderImport(){
     const hist = Store.data.oppImportHistory;
+    const dbCount = Store.data.oppProjects.length;
+    const invalidCount = Store.data.oppProjects.filter(r=>!r['Project No'] && !r['LB Name']).length;
     return '<div class="card card-pad" style="margin-bottom:14px;">' +
       '<h3 style="margin-top:0;font-size:14px;">Import Project Data</h3>' +
-      '<div class="hint" style="margin-bottom:8px;">Excel \u2192 select headings + rows \u2192 Copy \u2192 Paste below, or upload the file directly. Existing projects are matched using Project No + Local Body, so re-importing updates rather than duplicates.</div>' +
+      '<div class="hint" style="margin-bottom:8px;">Excel \u2192 select headings + rows \u2192 Copy \u2192 Paste below, or upload the file directly. Nothing is saved until you review the preview and click Import &amp; Save.</div>' +
       '<textarea id="oppPaste" rows="7" placeholder="Paste Excel tab-separated data here..." style="font-family:monospace;font-size:12px;"></textarea>' +
       '<div class="toolbar" style="margin-top:10px;">' +
-        '<button class="btn btn-primary btn-sm" onclick="OppFinder.processData()">Find Opportunities</button>' +
+        '<button class="btn btn-primary btn-sm" onclick="OppFinder.previewImport()">&#128065; Preview Import</button>' +
         '<button class="btn btn-outline btn-sm" onclick="OppFinder.loadSample()">Load Sample</button>' +
         '<button class="btn btn-outline btn-sm" onclick="OppFinder.clearImportBox()">Clear</button>' +
       '</div>' +
@@ -6835,11 +6975,27 @@ const OppFinder = {
         '<input type="file" accept=".xlsx,.xls,.csv" onchange="OppFinder.handleExcelFile(this)"></div>' +
       '<div id="oppFileStatus" class="hint"></div>' +
       '<div id="oppMsg" class="hint" style="margin-top:8px;"></div>' +
+      '<div id="oppPreviewBox"></div>' +
       '<div class="toolbar" style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;">' +
-        '<button class="btn btn-outline btn-sm" onclick="OppFinder.recalculateScores()">&#8635; Recalculate All Scores (' + Store.data.oppProjects.length + ' projects)</button>' +
+        '<button class="btn btn-outline btn-sm" onclick="OppFinder.recalculateScores()">&#8635; Recalculate All Scores (' + dbCount + ' projects)</button>' +
         '<span class="hint">Re-runs the matching algorithm on projects already imported \u2014 useful after adding product keywords or district preferences.</span>' +
       '</div>' +
     '</div>' +
+
+    '<div class="card card-pad" style="margin-bottom:14px;">' +
+      '<h3 style="margin:0 0 10px;font-size:14px;">Project Data Health</h3>' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;">' +
+        '<div class="card card-pad" style="text-align:center;"><div style="font-size:20px;font-weight:700;">'+dbCount+'</div><div class="hint">Database Records</div></div>' +
+        '<div class="card card-pad" style="text-align:center;"><div style="font-size:20px;font-weight:700;">'+dbCount+'</div><div class="hint">Loaded in this Session</div></div>' +
+        '<div class="card card-pad" style="text-align:center;"><div style="font-size:20px;font-weight:700;'+(invalidCount?'color:var(--amber,#d97706);':'')+'">'+invalidCount+'</div><div class="hint">Missing Project No &amp; LB Name</div></div>' +
+        '<div class="card card-pad" style="text-align:center;"><div style="font-size:13px;font-weight:700;">'+(hist.length?Util.fmtDateTime(hist[0].date):'Never')+'</div><div class="hint">Last Import</div></div>' +
+      '</div>' +
+      '<div class="toolbar" style="margin-top:10px;">' +
+        '<button class="btn btn-outline btn-sm" onclick="OppFinder.reloadFromDatabase()">&#8635; Reload from Database</button>' +
+        '<span class="hint">Forces a fresh fetch from Supabase, bypassing anything cached in this browser tab \u2014 use this any time you want to double-check the real record count.</span>' +
+      '</div>' +
+    '</div>' +
+
     '<div class="card"><div class="card-pad" style="padding-bottom:0;"><h3 style="margin:0;font-size:14px;">Import History</h3></div>' +
       '<div class="table-wrap"><table><thead><tr><th>Date</th><th>Source</th><th>Records</th><th>New</th><th>Updated</th><th>Duplicates</th></tr></thead><tbody>' +
       (hist.length ? hist.map(h=>'<tr><td class="cell-mute">'+Util.fmtDateTime(h.date)+'</td><td>'+Util.escapeHtml(h.source)+'</td><td>'+h.records+'</td><td>'+h.newCount+'</td><td>'+h.updated+'</td><td>'+h.duplicates+'</td></tr>').join('')
