@@ -6370,8 +6370,17 @@ function oppKeyOf(r){
    via "Recalculate All Scores" in the Import tab, since two factors
    (district preference, historical relevance) depend on state that
    can change after a row was first imported. */
+/* Fields never included in the matching text - metadata, computed
+   scoring results, and any raw/original-row JSON blob some sources
+   attach (e.g. a "raw_data" column holding the full row as a string).
+   Without this exclusion, a blob field's own JSON KEY NAMES (not their
+   values) can accidentally match a keyword - e.g. a tree-plantation
+   project got classified as Disaster Management purely because a blank
+   "Disaster Management" key existed inside its raw_data dump. */
+const OPP_NON_CONTENT_FIELDS = new Set(['id','score','type','hits','scoreBreakdown','opportunity_score','opportunity_type',
+  'matched_keywords','raw_data','updated_at','created_at','source_status']);
 function oppClassify(r){
-  const text = Object.values(r).map(oppNorm).join(' ');
+  const text = Object.entries(r).filter(([k])=>!OPP_NON_CONTENT_FIELDS.has(k)).map(([,v])=>oppNorm(v)).join(' ');
   const groups = (Store.data.oppKeywordGroups && Store.data.oppKeywordGroups.length) ? Store.data.oppKeywordGroups : OPP_DEFAULT_KEYWORD_GROUPS;
 
   const matched = [];               // [{word, weight, tier, category}]
