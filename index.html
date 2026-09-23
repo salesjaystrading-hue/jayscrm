@@ -6303,7 +6303,25 @@ const OPP_CATEGORY_NAMES = {
   HYGIENE:'Sanitation / Hygiene', EQUIPMENT:'Equipment / Supplies', PURCHASE:'Purchase', OTHER:'Unmatched'
 };
 const OPP_STATUSES = ['New','Researching','Contacted','Interested','Quotation','Submitted','Won','Lost'];
-const OPP_FIELDS = ['Project No','Impl Code','Project Name Eng','Project Name Mal','LB Name','LB Type','District','Sector','Sub Sector','Status','FundTotal','Expenditure','Balance','Project Date','Closing Date'];
+/* Canonical schema, taken directly from the official Excel template -
+   this is now the authoritative column set for Project Opportunity
+   data end to end (detail view, CSV export, template download). */
+const OPP_FIELDS = ['Project No','Project Name Mal','Project Name Eng','LB Name','LB Type','District',
+  'Impl Code','Impl Officer Name','Project Type','Project Category','Sector Type','Sector','Sub Sector',
+  'Impl mode','Agency','State Sponsored Scheme','Central Sponsored Scheme','Total Benificiaries','Status',
+  'Fund Description','FundTotal','Expenditure Description','Expenditure','Balance','Project Category1',
+  'Disaster Management',
+  '\u0d24\u0d28\u0d4d\u200d\u0d35\u0d7c\u0d37 \u0d2c\u0d1c\u0d31\u0d4d\u0d31\u0d3f\u0d32\u0d4d\u200d \u0d09\u0d33\u0d4d\u200d\u0d2a\u0d4d\u0d2a\u0d46\u0d1f\u0d41\u0d24\u0d4d\u0d24\u0d41\u0d28\u0d4d\u0d28 \u0d38\u0d4d\u0d2a\u0d3f\u0d32\u0d4d\u200d \u0d13\u0d35\u0d7c \u0d2a\u0d4d\u0d30\u0d4b\u0d1c\u0d15\u0d4d\u0d1f\u0d4d \u0d06\u0d23\u0d4b',
+  '\u0d38\u0d4d\u0d2a\u0d3f\u0d32\u0d4d\u200d \u0d13\u0d35\u0d7c \u0d05\u0d27\u0d3f\u0d15\u0d35\u0d3f\u0d39\u0d3f\u0d24\u0d24\u0d4d\u0d24\u0d3f\u0d7d \u0d09\u0d33\u0d4d\u200d\u0d2a\u0d4d\u0d2a\u0d46\u0d1f\u0d41\u0d24\u0d4d\u0d24\u0d3f\u0d2f\u0d3f\u0d1f\u0d4d\u0d1f\u0d41\u0d33\u0d4d\u0d33 \u0d2a\u0d41\u0d24\u0d3f\u0d2f \u0d2a\u0d4d\u0d30\u0d4b\u0d1c\u0d15\u0d4d\u0d1f\u0d4d \u0d06\u0d23\u0d4b',
+  'Project Date','Closing Date'];
+/* Column order for the downloadable Excel template - the 26 named
+   fields (the two long Malayalam question-columns are included via
+   OPP_FIELDS for display/detail purposes but are unusual to hand-fill
+   in a blank template, so the template offers the standard 26). */
+const OPP_TEMPLATE_COLUMNS = ['Project No','Project Name Mal','Project Name Eng','LB Name','LB Type','District',
+  'Impl Code','Impl Officer Name','Project Type','Project Category','Sector Type','Sector','Sub Sector',
+  'Impl mode','Agency','State Sponsored Scheme','Central Sponsored Scheme','Total Benificiaries','Status',
+  'Fund Description','FundTotal','Expenditure Description','Expenditure','Balance','Project Category1','Disaster Management'];
 
 function oppNorm(v){ return String(v==null?'':v).toLowerCase().replace(/\s+/g,' ').trim(); }
 function oppMoney(v){ const n = Number(String(v==null?'':v).replace(/[,\u20B9\s]/g,'')); return isNaN(n)?0:n; }
@@ -6608,6 +6626,14 @@ const OppFinder = {
     }
     input.value = '';
   },
+  downloadTemplate(){
+    try{
+      const ws = XLSX.utils.aoa_to_sheet([OPP_TEMPLATE_COLUMNS]);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Projects');
+      XLSX.writeFile(wb, 'JAYS_Project_Opportunity_Template.xlsx');
+    }catch(e){ console.error(e); UI.toast('Could not generate the template file'); }
+  },
   loadSample(){
     const sample = "Project No\tImpl Code\tProject Name Eng\tProject Name Mal\tLB Name\tDistrict\tSector\tSub Sector\tStatus\tFundTotal\tBalance\n"+
 "27\tIC-27\tProtective equipments to HKS\t\u0d39\u0d30\u0d3f\u0d24 \u0d15\u0d7c\u0d2e\u0d4d\u0d2e\u0d38\u0d47\u0d28\u0d15\u0d4d\u0d15\u0d4d \u0d38\u0d41\u0d30\u0d15\u0d4d\u0d37\u0d3e \u0d09\u0d2a\u0d15\u0d30\u0d23\u0d19\u0d4d\u0d19\u0d33\u0d4d\u200d\tSample Panchayat\tKozhikode\tSolid Waste Management\tProcessing\tApproved\t100000\t100000\n"+
@@ -6818,7 +6844,7 @@ const OppFinder = {
     const list = onlySaved ? Store.data.oppProjects.filter(r=>Store.data.oppTracking[oppKeyOf(r)]) :
       (this.filtered.length ? this.filtered : Store.data.oppProjects);
     if(!list.length){ UI.toast('Nothing to export'); return; }
-    const cols = ['score','type','Project No','Impl Code','Project Name Eng','Project Name Mal','LB Name','LB Type','District','Sector','Sub Sector','Status','FundTotal','Expenditure','Balance','hits'];
+    const cols = ['score','type',...OPP_TEMPLATE_COLUMNS,'hits'];
     const out = [cols.join(',')];
     list.forEach(r=>out.push(cols.map(c=>'"'+String(c==='hits'?r.hits.join('; '):(r[c]==null?'':r[c])).replace(/"/g,'""')+'"').join(',')));
     const blob = new Blob([out.join('\n')], {type:'text/csv;charset=utf-8'});
@@ -6973,14 +6999,18 @@ const OppFinder = {
     const invalidCount = Store.data.oppProjects.filter(r=>!r['Project No'] && !r['LB Name']).length;
     return '<div class="card card-pad" style="margin-bottom:14px;">' +
       '<h3 style="margin-top:0;font-size:14px;">Import Project Data</h3>' +
-      '<div class="hint" style="margin-bottom:8px;">Excel \u2192 select headings + rows \u2192 Copy \u2192 Paste below, or upload the file directly. Nothing is saved until you review the preview and click Import &amp; Save.</div>' +
-      '<textarea id="oppPaste" rows="7" placeholder="Paste Excel tab-separated data here..." style="font-family:monospace;font-size:12px;"></textarea>' +
+      '<div class="hint" style="margin-bottom:8px;">Use the official template for best results \u2014 download it, fill it in Excel, then upload it back. Nothing is saved until you review the preview and click Save.</div>' +
+      '<div class="toolbar" style="margin:0 0 12px;">' +
+        '<button class="btn btn-outline btn-sm" onclick="OppFinder.downloadTemplate()">&#11015; Download Excel Template</button>' +
+      '</div>' +
+      '<textarea id="oppPaste" rows="7" placeholder="Or paste Excel tab-separated data here..." style="font-family:monospace;font-size:12px;"></textarea>' +
       '<div class="toolbar" style="margin-top:10px;">' +
         '<button class="btn btn-primary btn-sm" onclick="OppFinder.previewImport()">&#128065; Preview Import</button>' +
+        '<button class="btn btn-primary btn-sm" onclick="OppFinder.confirmImportSave()">&#128190; Save</button>' +
         '<button class="btn btn-outline btn-sm" onclick="OppFinder.loadSample()">Load Sample</button>' +
         '<button class="btn btn-outline btn-sm" onclick="OppFinder.clearImportBox()">Clear</button>' +
       '</div>' +
-      '<div class="field" style="margin-top:12px;"><label>Or upload an Excel file directly (first sheet, first row = headers)</label>' +
+      '<div class="field" style="margin-top:12px;"><label>Or upload the filled-in template directly (first sheet, first row = headers)</label>' +
         '<input type="file" accept=".xlsx,.xls,.csv" onchange="OppFinder.handleExcelFile(this)"></div>' +
       '<div id="oppFileStatus" class="hint"></div>' +
       '<div id="oppMsg" class="hint" style="margin-top:8px;"></div>' +
@@ -7562,9 +7592,25 @@ Views.settings = function(){
       </div>
       <button class="btn btn-primary" onclick="SettingsView.saveBidPrefs()">Save Bid Preferences</button>
     </div>
+    <div class="card card-pad" style="max-width:520px;margin-top:16px;border-left:4px solid var(--red,#dc2626);">
+      <h3 style="margin:0 0 4px;font-size:14px;">Project Opportunity Data</h3>
+      <div class="hint" style="margin-bottom:12px;">Currently <b>${Store.data.oppProjects.length} project record(s)</b> saved. This only removes imported project rows and the import log \u2014 your saved "My Opportunities" tracking, product keyword list, and the keyword matching library are not affected.</div>
+      <button class="btn btn-outline" style="color:var(--red,#dc2626);border-color:var(--red,#dc2626);" onclick="SettingsView.deleteAllProjectRecords()">&#128465; Delete All Saved Project Records</button>
+    </div>
   `;
 };
 const SettingsView = {
+  async deleteAllProjectRecords(){
+    const n = Store.data.oppProjects.length;
+    if(!n){ UI.toast('There are no project records to delete'); return; }
+    if(!confirm('Delete all '+n+' saved project record(s)? This cannot be undone. Your "My Opportunities" tracking, product keywords and keyword library will NOT be affected.')) return;
+    Store.data.oppProjects = [];
+    Store.data.oppImportHistory = [];
+    const ok1 = await Store.save('oppProjects');
+    const ok2 = await Store.save('oppImportHistory');
+    if(ok1 && ok2){ await Activity.log('All project opportunity records deleted', n+' record(s)'); UI.toast('Deleted '+n+' record(s)'); }
+    Router.render('settings');
+  },
   async save(){
     Store.data.settings.companyName = document.getElementById('s_companyName').value.trim();
     Store.data.settings.companyPhone = document.getElementById('s_companyPhone').value.trim();
