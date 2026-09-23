@@ -173,6 +173,17 @@
   .topbar h2{font-size:16px;margin:0;font-weight:800;letter-spacing:-0.2px;}
   .topbar .sub{font-size:11.5px;color:var(--text-mute);margin-top:1px;}
   .topbar-right{display:flex;align-items:center;gap:10px;}
+  .gs-wrap{position:relative;}
+  .gs-input{width:280px;padding:8px 12px;border:1.5px solid var(--border);border-radius:9px;font-size:12.5px;font-family:inherit;}
+  .gs-input:focus{outline:none;border-color:var(--orange);}
+  @media(max-width:880px){.gs-input{width:150px;}}
+  .gs-results{position:absolute;top:calc(100% + 6px);right:0;width:360px;max-height:440px;overflow:auto;
+    background:#fff;border:1px solid var(--border);border-radius:10px;box-shadow:0 12px 30px rgba(0,0,0,.15);z-index:300;padding:6px;}
+  .gs-group{font-size:10.5px;font-weight:700;text-transform:uppercase;color:var(--text-mute,#6b7280);padding:8px 8px 4px;}
+  .gs-item{padding:8px;border-radius:7px;cursor:pointer;}
+  .gs-item:hover{background:var(--bg-soft,#faf9f7);}
+  .gs-item .gs-label{font-size:13px;font-weight:600;}
+  .gs-item .gs-sub{font-size:11.5px;color:var(--text-mute,#6b7280);}
   .content{flex:1;overflow-y:auto;padding:22px;}
 
   /* ---------- CARDS / GRID ---------- */
@@ -233,6 +244,24 @@
   .bottom-scrollbar-thumb:hover{background:#7C8CA3;}
   .bottom-scrollbar.dragging .bottom-scrollbar-thumb{background:var(--orange);cursor:grabbing;}
   @media(max-width:880px){ .bottom-scrollbar{left:0;height:22px;} .bottom-scrollbar-thumb{top:4px;height:14px;} }
+
+  /* Mobile bottom navigation - hidden on desktop, since the sidebar
+     already covers navigation there. Reuses the existing sidebar
+     toggle for "More" rather than building a second menu system. */
+  .mobile-bottom-nav{display:none;}
+  @media(max-width:880px){
+    .mobile-bottom-nav{
+      display:flex;position:fixed;left:0;right:0;bottom:0;height:58px;
+      background:#fff;border-top:1px solid var(--border);z-index:190;
+      box-shadow:0 -6px 16px rgba(11,20,36,0.08);
+      padding-bottom:env(safe-area-inset-bottom,0px);
+    }
+    .mbn-item{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+      gap:2px;font-size:10px;color:var(--text-mute,#6b7280);cursor:pointer;font-weight:600;}
+    .mbn-item .ic{font-size:18px;line-height:1;}
+    .mbn-item.active{color:var(--orange);}
+    .content{padding-bottom:76px;}
+  }
   table{width:100%;border-collapse:collapse;font-size:13px;}
   thead th{
     text-align:left;padding:10px 14px;font-size:10.5px;text-transform:uppercase;letter-spacing:0.5px;
@@ -512,6 +541,12 @@
           </div>
         </div>
         <div class="topbar-right">
+          <div class="gs-wrap">
+            <input id="globalSearchInput" class="gs-input" placeholder="&#128269; Search customers, quotations, orders, bids..."
+              oninput="GlobalSearch.search(this.value)" onfocus="GlobalSearch.search(this.value)"
+              onkeydown="if(event.key==='Escape')GlobalSearch.close()">
+            <div id="globalSearchResults" class="gs-results" style="display:none;"></div>
+          </div>
           <button class="btn btn-outline btn-sm" onclick="UI.exportCurrentView()">&#128228; Export</button>
         </div>
       </div>
@@ -539,6 +574,14 @@
 <div class="toast" id="toast"></div>
 <div id="printArea" class="print-only"></div>
 <div class="bottom-scrollbar" id="bottomScrollbar"><div class="bottom-scrollbar-thumb" id="bottomScrollbarThumb"></div></div>
+
+<div class="mobile-bottom-nav" id="mobileBottomNav">
+  <div class="mbn-item" data-view="dashboard" onclick="go('dashboard')"><span class="ic">&#127968;</span><span>Home</span></div>
+  <div class="mbn-item" data-view="customers" onclick="go('customers')"><span class="ic">&#128101;</span><span>Leads</span></div>
+  <div class="mbn-item" data-view="tasks" onclick="go('tasks')"><span class="ic">&#9989;</span><span>Tasks</span></div>
+  <div class="mbn-item" data-view="notifications" onclick="go('notifications')"><span class="ic">&#128276;</span><span>Alerts</span></div>
+  <div class="mbn-item" onclick="UI.toggleSidebar()"><span class="ic">&#8942;</span><span>More</span></div>
+</div>
 
 <script>
 /* =====================================================================
@@ -739,6 +782,7 @@ const Store = {
     followups: [], tasks: [], notes: [], users: [], settings: {}, activityLog: [],
     gemcrac: [], orders: [], complaints: [], bids: [], waTemplates: [], waHistory: [],
     rateTemplates: [], rateDocs: [], rateTerms: [], rateDocTemplates: [],
+    oppProjects: [], oppTracking: {}, oppProducts: [], oppImportHistory: [],
     attendance: [], leaveRequests: []
   },
   /* One-time, non-destructive lift of the old WhatsApp rate templates into
@@ -844,6 +888,10 @@ const Store = {
     this.data.rateDocs = await this.loadKey('jays_ratedocs', []);
     this.data.rateTerms = await this.loadKey('jays_rateterms', []);
     this.data.rateDocTemplates = await this.loadKey('jays_ratedoctemplates', []);
+    this.data.oppProjects = await this.loadKey('jays_oppprojects', []);
+    this.data.oppTracking = await this.loadKey('jays_opptracking', {});
+    this.data.oppProducts = await this.loadKey('jays_oppproducts', []);
+    this.data.oppImportHistory = await this.loadKey('jays_oppimporthistory', []);
     this.data.attendance = await this.loadKey('jays_attendance', []);
     this.data.leaveRequests = await this.loadKey('jays_leaverequests', []);
     await this.migrateWaTemplates();
@@ -1135,40 +1183,42 @@ const UI = {
    NAV
 ===================================================================== */
 const NAV = [
-  {sec:'Overview', items:[
+  {sec:'Workspace', items:[
     {id:'dashboard', ic:'&#127968;', label:'Dashboard'},
+    {id:'notifications', ic:'&#128276;', label:'Notifications'},
   ]},
   {sec:'Sales', items:[
     {id:'leads', ic:'&#128101;', label:'Leads'},
     {id:'customers', ic:'&#128100;', label:'Customers'},
     {id:'pipeline', ic:'&#128202;', label:'Sales Pipeline'},
+    {id:'followupcentre', ic:'&#9200;', label:'Follow-ups'},
     {id:'quotations', ic:'&#128196;', label:'Quotations'},
     {id:'rate_docs', ic:'&#128196;', label:'Rate / Offer PDF'},
     {id:'orders', ic:'&#128230;', label:'Orders'},
-    {id:'oppfinder', ic:'&#128269;', label:'Project Opportunity'},
   ]},
-  {sec:'Finance', items:[
-    {id:'payments', ic:'&#128179;', label:'Payments Followup'},
-    {id:'outstanding', ic:'&#128176;', label:'Outstanding'},
+  {sec:'Accounts', items:[
+    {id:'payments', ic:'&#128176;', label:'Payments Followup'},
+    {id:'outstanding', ic:'&#9888;', label:'Outstanding'},
+  ]},
+  {sec:'Products', items:[
+    {id:'products', ic:'&#128230;', label:'Product Master'},
+    {id:'inventory', ic:'&#127974;', label:'Inventory'},
+  ]},
+  {sec:'Government Business', items:[
+    {id:'oppfinder', ic:'&#127963;', label:'Project Opportunities'},
+    {id:'bidsearch', ic:'&#128269;', label:'GeM Bid Search'},
+    {id:'gemcrac', ic:'&#128203;', label:'GEM CRAC'},
   ]},
   {sec:'Operations', items:[
-    {id:'products', ic:'&#128230;', label:'Products'},
-    {id:'inventory', ic:'&#128202;', label:'Inventory'},
-    {id:'bidsearch', ic:'&#128269;', label:'GeM Bid Search'},
-    {id:'gemcrac', ic:'&#127963;', label:'GEM CRAC'},
-    {id:'complaints', ic:'&#9888;', label:'Complaints'},
-  ]},
-  {sec:'Activity', items:[
-    {id:'followupcentre', ic:'&#9200;', label:'Follow-ups'},
+    {id:'complaints', ic:'&#128736;', label:'Complaints'},
     {id:'tasks', ic:'&#9989;', label:'Tasks &amp; To-Do'},
-    {id:'attendance', ic:'&#128197;', label:'Attendance &amp; Leave'},
+    {id:'attendance', ic:'&#128343;', label:'Attendance &amp; Leave'},
     {id:'notes', ic:'&#128221;', label:'Notes'},
   ]},
-  {sec:'Insights', items:[
+  {sec:'Analytics', items:[
     {id:'reports', ic:'&#128200;', label:'Reports'},
   ]},
   {sec:'System', items:[
-    {id:'notifications', ic:'&#128276;', label:'Notifications'},
     {id:'backup', ic:'&#9729;', label:'Backup &amp; Restore'},
   ]},
   {sec:'Admin', adminOnly:true, items:[
@@ -1184,7 +1234,7 @@ const PAGE_META = {
   followupcentre:['Follow-ups','Today, tomorrow, overdue &amp; upcoming — one click away'],
   quotations:['Quotations','Create and track quotes'],
   rate_docs:['Rate / Offer PDF','Build professional rate offers and export them as PDF'],
-  oppfinder:['Project Opportunity','Panchayat/local-body project opportunities (external tool)'],
+  oppfinder:['Project Opportunity','Match panchayat/local-body project data against JAYS products'],
   attendance:['Attendance & Leave','Daily attendance, work location and leave requests'],
   outstanding:['Outstanding','Unpaid balances by party'],
   inventory:['Inventory','Stock levels across the product catalog'],
@@ -1270,6 +1320,7 @@ function renderNav(){
     });
   });
   box.innerHTML = html;
+  updateMobileNav();
 }
 function go(view){
   if(!hasMenuAccess(view)){ UI.toast("You don't have access to this menu"); return; }
@@ -1280,6 +1331,11 @@ function go(view){
   document.getElementById('pageSub').innerHTML = meta[1];
   renderNav();
   Router.render(view);
+}
+function updateMobileNav(){
+  document.querySelectorAll('.mbn-item[data-view]').forEach(el=>{
+    el.classList.toggle('active', el.getAttribute('data-view')===UI.currentView);
+  });
 }
 
 /* =====================================================================
@@ -1443,55 +1499,99 @@ const Chart = {
 Views.dashboard = function(){
   const c = Store.data.customers;
   const today = Util.todayISO();
+  const me = (Auth.session && (Auth.session.name||Auth.session.username)) || '';
+
   const totalPending = Store.data.payments.filter(p=>p.status==='Pending').reduce((s,p)=>s+Number(p.amount||0),0);
   const totalPaid = Store.data.payments.filter(p=>p.status==='Paid').reduce((s,p)=>s+Number(p.amount||0),0);
   const fuToday = Store.data.followups.filter(f=>f.date===today && f.status!=='Done').length;
-  const fuOverdue = Store.data.followups.filter(f=>f.status!=='Done' && f.date && f.date<today).length;
-  const newLeads = c.filter(x=>x.status==='New Lead').length;
+  const overdueFollowups = Store.data.followups.filter(f=>f.status!=='Done' && f.date && f.date<today);
+  const newLeadsToday = c.filter(x=>x.createdDate===today).length;
   const converted = c.filter(x=>x.status==='Converted Customer').length;
+  const quotationsAwaiting = Store.data.quotations.filter(q=>q.status==='Sent').length;
+  const paymentsDue = Store.data.payments.filter(p=>p.status==='Pending' && p.followupDate && p.followupDate<=today);
+  const openComplaints = Store.data.complaints.filter(x=>x.status!=='Solved');
+  const bidsClosingSoon = (Store.data.bids||[]).filter(b=>{
+    const d = bidDeadlineInfo(b.endDate).days;
+    return d!==null && d>=0 && d<=3 && !BID_TERMINAL_STATUSES.includes(b.status);
+  });
+  const oppNeedingAction = (Store.data.oppProjects||[]).filter(r=>r.score>=80 && !Store.data.oppTracking[oppKeyOf(r)]);
+  const ordersInProgress = Store.data.orders.filter(o=>o.status==='In Progress');
+  const todaysTasks = Store.data.tasks.filter(t=>t.date===today && t.status!=='Completed');
+  const overdueTasks = Store.data.tasks.filter(t=>t.status!=='Completed' && t.date && t.date<today);
+  const pendingLeave = (Store.data.leaveRequests||[]).filter(l=>l.status==='Pending');
+  const attToday = (Store.data.attendance||[]).filter(a=>a.date===today);
+  const attCounts = {Office:0, Home:0, Leave:0, Absent:0};
+  attToday.forEach(a=>{ if(a.status==='Leave') attCounts.Leave++; else if(a.location==='Home') attCounts.Home++; else if(a.location==='Office') attCounts.Office++; else attCounts.Absent++; });
+
+  /* "My Action Required" - scoped to the signed-in user's own assigned
+     records where that module tracks an assignee, otherwise shown
+     org-wide (payments/bids-closing/leave approval are whole-team
+     concerns regardless of who is logged in). */
+  const myOverdueFU = overdueFollowups.filter(f=>{ const cust=c.find(x=>x.id===f.customerId); return !cust || !cust.assignedTo || cust.assignedTo===me; });
+  const myOverdueTasks = overdueTasks.filter(t=>!t.assignedTo || t.assignedTo===me);
+  const myComplaints = openComplaints.filter(x=>!x.assignedTo || x.assignedTo===me);
+  const actionItems = [];
+  myOverdueFU.forEach(f=>actionItems.push({icon:'&#9200;', color:'var(--red,#dc2626)', text:'Overdue follow-up: '+(f.customerName||'')+(f.purpose?' \u2014 '+f.purpose:''), view:'followupcentre'}));
+  myOverdueTasks.forEach(t=>actionItems.push({icon:'&#9989;', color:'var(--red,#dc2626)', text:'Overdue task: '+(t.todo||''), view:'tasks'}));
+  paymentsDue.forEach(p=>actionItems.push({icon:'&#128179;', color:'var(--amber,#d97706)', text:'Payment due: '+(p.party||'')+' \u2014 '+Util.fmtMoney(p.amount), view:'payments'}));
+  myComplaints.forEach(x=>actionItems.push({icon:'&#9888;', color:'var(--amber,#d97706)', text:'Open complaint: '+(x.complaintFrom||''), view:'complaints'}));
+  bidsClosingSoon.forEach(b=>actionItems.push({icon:'&#127963;', color:'var(--red,#dc2626)', text:'GeM bid closing soon: '+(b.title||b.bidNumber||''), view:'bidsearch'}));
+  oppNeedingAction.forEach(r=>actionItems.push({icon:'&#128269;', color:'var(--blue,#2563eb)', text:'High-match project opportunity: '+(r['Project Name Eng']||r['LB Name']||''), view:'oppfinder'}));
+  if(Auth.isAdmin()) pendingLeave.forEach(l=>actionItems.push({icon:'&#128197;', color:'var(--violet,#7c3aed)', text:'Leave approval pending: '+(l.name||l.username||''), view:'attendance'}));
 
   const byStatus = {};
   c.forEach(x=>{ const k=x.status||'New Lead'; byStatus[k]=(byStatus[k]||0)+1; });
   const statusData = Object.keys(byStatus).map(k=>({label:k, value:byStatus[k]}));
-
   const byAssigned = {};
   c.forEach(x=>{ const k=x.assignedTo||'Unassigned'; byAssigned[k]=(byAssigned[k]||0)+1; });
   const assignedData = Object.keys(byAssigned).map(k=>({label:k, value:byAssigned[k]}));
-
-  const recentCustomers = c.slice().sort((a,b)=>(b.createdDate||'').localeCompare(a.createdDate||'')).slice(0,6);
-  const recentActivity = Store.data.activityLog.slice(0,8);
+  const recentActivity = Store.data.activityLog.slice(0,6);
 
   document.getElementById('content').innerHTML = `
-    <div class="grid grid-4" style="margin-bottom:16px;">
-      <div class="card stat-card"><div class="bar bar-orange"></div><span class="ic">&#128101;</span><div class="lbl">Total Leads &amp; Customers</div><div class="val">${c.length}</div><div class="delta">${newLeads} new lead(s) awaiting first contact</div></div>
-      <div class="card stat-card"><div class="bar bar-blue"></div><span class="ic">&#9200;</span><div class="lbl">Follow-ups Today</div><div class="val">${fuToday}</div><div class="delta">${fuOverdue} overdue — visit Follow-up Centre</div></div>
-      <div class="card stat-card"><div class="bar bar-amber"></div><span class="ic">&#128179;</span><div class="lbl">Payments Pending</div><div class="val">${Util.fmtMoney(totalPending)}</div><div class="delta">Collected so far: ${Util.fmtMoney(totalPaid)}</div></div>
-      <div class="card stat-card"><div class="bar bar-green"></div><span class="ic">&#127942;</span><div class="lbl">Converted Customers</div><div class="val">${converted}</div><div class="delta">${Store.data.quotations.length} quotation(s) sent</div></div>
+    <div class="card card-pad" style="margin-bottom:16px;border-left:4px solid var(--orange);">
+      <h3 style="margin:0 0 10px;font-size:14px;">&#128204; My Action Required ${actionItems.length?('<span class="badge badge-red">'+actionItems.length+'</span>'):''}</h3>
+      ${actionItems.length ? `<div style="display:flex;flex-direction:column;gap:2px;max-height:260px;overflow:auto;">
+        ${actionItems.slice(0,25).map(a=>`<div style="display:flex;align-items:center;gap:10px;padding:7px 4px;border-bottom:1px solid #F3F5F8;cursor:pointer;" onclick="go('${a.view}')">
+          <span style="font-size:15px;">${a.icon}</span>
+          <span style="flex:1;font-size:12.8px;color:${a.color};font-weight:600;">${Util.escapeHtml(a.text)}</span>
+          <span class="hint">&rarr;</span>
+        </div>`).join('')}
+      </div>` : `<div class="empty-state" style="padding:16px;"><div class="ic">&#9989;</div><div class="d">Nothing urgent right now &mdash; nice work!</div></div>`}
     </div>
 
-    <div class="grid grid-2" style="margin-bottom:16px;align-items:start;">
-      <div class="card">
-        <div class="card-head"><h3>Recent Leads &amp; Customers</h3><span class="hint" style="cursor:pointer;" onclick="go('customers')">View all &rarr;</span></div>
-        <div class="table-wrap">
-          ${recentCustomers.length ? `<table><thead><tr><th>Name</th><th>Phone</th><th>Status</th><th>Last Contact</th></tr></thead><tbody>
-          ${recentCustomers.map(x=>`<tr>
-            <td class="cell-main" onclick="Customers.openDetail('${x.id}')">${Util.escapeHtml(x.name)}</td>
-            <td class="mono cell-mute">${Util.escapeHtml(x.phone)}</td>
-            <td>${statusBadge(x.status)}</td>
-            <td class="cell-mute">${Util.fmtDate(x.lastContact)}</td>
-          </tr>`).join('')}</tbody></table>` : `<div class="empty-state"><div class="ic">&#128101;</div><div class="t">No leads yet</div><div class="d">Add your first lead to get started.</div><button class="btn btn-primary btn-sm" onclick="go('customers')">&#65291; Add Lead</button></div>`}
-        </div>
-      </div>
-      <div class="card card-pad">
-        <h3 style="margin:0 0 6px;font-size:14px;">Pipeline by Status</h3>
-        ${Chart.donut(statusData, 168)}
-      </div>
+    <div class="toolbar" style="margin-bottom:16px;flex-wrap:wrap;">
+      <button class="btn btn-primary btn-sm" onclick="go('customers');Customers.openForm(null);">&#65291; New Lead</button>
+      <button class="btn btn-outline btn-sm" onclick="go('quotations');Quotations.openForm(null);">&#65291; Quotation</button>
+      <button class="btn btn-outline btn-sm" onclick="go('followupcentre');Followups.openForm(null,null);">&#65291; Follow-up</button>
+      <button class="btn btn-outline btn-sm" onclick="go('payments');Payments.openForm(null);">&#65291; Payment</button>
+      <button class="btn btn-outline btn-sm" onclick="go('oppfinder');OppFinder.setTab('projects');">&#128269; Project Opportunity</button>
+      <button class="btn btn-outline btn-sm" onclick="go('bidsearch');BidSearch.openForm(null);">&#65291; GEM Bid</button>
+    </div>
+
+    ${dashboardCardsHTML('Today at a Glance', [
+      {label:'Follow-ups Today', value:fuToday},
+      {label:'Overdue Follow-ups', value:overdueFollowups.length, color: overdueFollowups.length?'var(--red,#dc2626)':undefined},
+      {label:'New Leads Today', value:newLeadsToday, color:'var(--blue,#2563eb)'},
+      {label:'Quotations Awaiting Response', value:quotationsAwaiting, color:'var(--amber,#d97706)'},
+      {label:'Payments Due', value:paymentsDue.length, color: paymentsDue.length?'var(--red,#dc2626)':undefined},
+      {label:'Open Complaints', value:openComplaints.length, color: openComplaints.length?'var(--amber,#d97706)':undefined},
+      {label:'GeM Bids Closing Soon', value:bidsClosingSoon.length, color: bidsClosingSoon.length?'var(--red,#dc2626)':undefined},
+      {label:'Project Opportunities Needing Action', value:oppNeedingAction.length, color:'var(--blue,#2563eb)'},
+      {label:'Orders In Progress', value:ordersInProgress.length},
+      {label:'Tasks Due Today', value:todaysTasks.length}
+    ])}
+
+    <div class="grid grid-4" style="margin-bottom:16px;">
+      <div class="card stat-card"><div class="bar bar-orange"></div><span class="ic">&#128101;</span><div class="lbl">Total Leads &amp; Customers</div><div class="val">${c.length}</div><div class="delta">${converted} converted</div></div>
+      <div class="card stat-card"><div class="bar bar-blue"></div><span class="ic">&#128179;</span><div class="lbl">Payments Pending</div><div class="val">${Util.fmtMoney(totalPending)}</div><div class="delta">Collected so far: ${Util.fmtMoney(totalPaid)}</div></div>
+      <div class="card stat-card"><div class="bar bar-green"></div><span class="ic">&#128100;</span><div class="lbl">Staff Attendance Today</div><div class="val">${attCounts.Office+attCounts.Home}</div><div class="delta">Office ${attCounts.Office} &middot; Home ${attCounts.Home} &middot; Leave ${attCounts.Leave}</div></div>
+      <div class="card stat-card"><div class="bar bar-amber"></div><span class="ic">&#127942;</span><div class="lbl">Quotations Sent</div><div class="val">${Store.data.quotations.length}</div><div class="delta">${converted} converted to customer</div></div>
     </div>
 
     <div class="grid grid-2">
       <div class="card card-pad">
-        <h3 style="margin:0 0 10px;font-size:14px;">Leads by Assigned To</h3>
-        ${assignedData.length? Chart.bars(assignedData, 150) : '<div class="empty-state"><div class="d">No data yet</div></div>'}
+        <h3 style="margin:0 0 6px;font-size:14px;">Pipeline by Status</h3>
+        ${Chart.donut(statusData, 168)}
       </div>
       <div class="card">
         <div class="card-head"><h3>Recent Activity</h3><span class="hint" style="cursor:pointer;" onclick="go('backup')">Full log &rarr;</span></div>
@@ -1536,6 +1636,92 @@ function statusBadge(status){
   const cls = STATUS_COLOR[status] || 'gray';
   return `<span class="badge badge-${cls}"><span class="dot"></span>${Util.escapeHtml(status)}</span>`;
 }
+
+/* =====================================================================
+   GLOBAL SEARCH (header search bar)
+   Reads across existing collections only - no new Store data, no new
+   Supabase writes. Each result carries its own go() closure that
+   navigates via the existing go(view) router and, where a module
+   already has a detail view, opens straight to that record.
+===================================================================== */
+const GlobalSearch = {
+  results: [],
+  search(q){
+    q = String(q||'').trim().toLowerCase();
+    const box = document.getElementById('globalSearchResults');
+    if(!box) return;
+    if(q.length < 2){ box.style.display = 'none'; this.results = []; return; }
+    const out = [];
+    Store.data.customers.forEach(c=>{
+      if((c.name||'').toLowerCase().includes(q) || (c.phone||'').includes(q) || (c.district||'').toLowerCase().includes(q))
+        out.push({group:'Customers & Leads', label:c.name, sub:[c.phone,c.district].filter(Boolean).join(' \u2022 '),
+          go(){ go('customers'); if(Customers.openDetail) Customers.openDetail(c.id); }});
+    });
+    Store.data.quotations.forEach(qt=>{
+      const blob = ((qt.id||'')+' '+(qt.customerName||qt.party||'')+' '+(qt.product||'')).toLowerCase();
+      if(blob.includes(q)) out.push({group:'Quotations', label:qt.id||'Quotation', sub:qt.customerName||qt.party||'',
+        go(){ go('quotations'); }});
+    });
+    Store.data.orders.forEach(o=>{
+      const blob = ((o.party||'')+' '+(o.gemcNumber||'')+' '+(o.productName||'')).toLowerCase();
+      if(blob.includes(q)) out.push({group:'Orders', label:o.party||o.gemcNumber||'Order', sub:o.productName||'',
+        go(){ go('orders'); }});
+    });
+    Store.data.payments.forEach(p=>{
+      const blob = ((p.party||'')+' '+(p.invoiceNumber||'')).toLowerCase();
+      if(blob.includes(q)) out.push({group:'Payments', label:p.invoiceNumber||p.party||'Payment', sub:p.party||'',
+        go(){ go('payments'); }});
+    });
+    Store.data.products.forEach(p=>{
+      if((p.name||'').toLowerCase().includes(q) || (p.category||'').toLowerCase().includes(q))
+        out.push({group:'Products', label:p.name, sub:p.category||'', go(){ go('products'); }});
+    });
+    (Store.data.bids||[]).forEach(b=>{
+      const blob = ((b.title||'')+' '+(b.bidNumber||'')+' '+(b.organisation||'')).toLowerCase();
+      if(blob.includes(q)) out.push({group:'GeM Bids', label:b.title||b.bidNumber||'Bid', sub:b.organisation||'',
+        go(){ go('bidsearch'); if(BidSearch.openDetail) BidSearch.openDetail(b.id); }});
+    });
+    Store.data.complaints.forEach(c=>{
+      const blob = ((c.complaintFrom||'')+' '+(c.productName||'')).toLowerCase();
+      if(blob.includes(q)) out.push({group:'Complaints', label:c.complaintFrom||'Complaint', sub:c.productName||'',
+        go(){ go('complaints'); }});
+    });
+    (Store.data.oppProjects||[]).forEach(r=>{
+      const blob = ((r['Project Name Eng']||'')+' '+(r['LB Name']||'')+' '+(r['District']||'')).toLowerCase();
+      if(blob.includes(q)) out.push({group:'Project Opportunities', label:r['Project Name Eng']||r['LB Name']||'Project', sub:r['District']||'',
+        go(){ go('oppfinder'); OppFinder.setTab('projects'); }});
+    });
+    this.results = out.slice(0,30);
+    this.renderResults();
+  },
+  renderResults(){
+    const box = document.getElementById('globalSearchResults');
+    if(!box) return;
+    if(!this.results.length){ box.innerHTML = '<div class="gs-item cell-mute">No matches</div>'; box.style.display = 'block'; return; }
+    let html = '', lastGroup = '';
+    this.results.forEach((r,i)=>{
+      if(r.group !== lastGroup){ html += '<div class="gs-group">'+Util.escapeHtml(r.group)+'</div>'; lastGroup = r.group; }
+      html += '<div class="gs-item" onclick="GlobalSearch.goResult('+i+')"><div class="gs-label">'+Util.escapeHtml(r.label||'')+'</div>' +
+        (r.sub ? '<div class="gs-sub">'+Util.escapeHtml(r.sub)+'</div>' : '') + '</div>';
+    });
+    box.innerHTML = html; box.style.display = 'block';
+  },
+  goResult(i){
+    const r = this.results[i]; if(!r) return;
+    try{ r.go(); }catch(e){ console.error('Global search navigation failed', e); }
+    this.close();
+  },
+  close(){
+    const box = document.getElementById('globalSearchResults'); if(box) box.style.display = 'none';
+    const inp = document.getElementById('globalSearchInput'); if(inp) inp.value = '';
+  }
+};
+document.addEventListener('click', function(e){
+  if(e.target.closest && e.target.closest('.gs-wrap')) return;
+  const box = document.getElementById('globalSearchResults');
+  if(box) box.style.display = 'none';
+});
+
 
 /* =====================================================================
    LEADS & CUSTOMERS (merged single module with timeline)
@@ -2127,8 +2313,9 @@ const Quotations = {
           <td class="col-actions"><div class="row-action-btns">
             <button class="icon-btn" title="Print" onclick="Quotations.print('${q.id}')">&#128424;</button>
             <a class="icon-btn" style="color:#25D366;text-decoration:none;" title="WhatsApp" href="${Util.waLink(q.phone, Quotations.waSummary(q))}" target="_blank">&#128172;</a>
-            <button class="icon-btn" onclick="Quotations.openForm('${q.id}')">&#9998;</button>
-            <button class="icon-btn" onclick="Quotations.remove('${q.id}')">&#128465;</button>
+            <button class="icon-btn" title="Edit" onclick="Quotations.openForm('${q.id}')">&#9998;</button>
+            <button class="icon-btn" title="Duplicate" onclick="Quotations.duplicate('${q.id}')">&#128203;</button>
+            <button class="icon-btn" title="Delete" onclick="Quotations.remove('${q.id}')">&#128465;</button>
           </div></td>
           <td class="mono cell-main">${q.id}</td>
           <td class="cell-mute">${Util.fmtDate(q.date)}</td>
@@ -2229,6 +2416,21 @@ const Quotations = {
     if(!confirm('Delete this quotation?')) return;
     Store.data.quotations = Store.data.quotations.filter(x=>x.id!==id);
     await Store.save('quotations'); UI.toast('Deleted'); Router.render('quotations');
+  },
+  async duplicate(id){
+    const src = Store.data.quotations.find(x=>x.id===id);
+    if(!src) return;
+    const copy = JSON.parse(JSON.stringify(src));
+    copy.id = (Store.data.settings.quoPrefix||'Q-') + String(Store.data.settings.quoNext||1).padStart(4,'0');
+    copy.date = Util.todayISO();
+    copy.status = 'Draft';
+    Store.data.quotations.unshift(copy);
+    Store.data.settings.quoNext = (Store.data.settings.quoNext||1) + 1;
+    const ok1 = await Store.save('quotations');
+    const ok2 = await Store.save('settings');
+    if(ok1 && ok2) await Activity.log('Quotation duplicated', src.id+' \u2192 '+copy.id);
+    UI.toast('Duplicated as '+copy.id);
+    Router.render('quotations');
   },
   print(id){
     const q = Store.data.quotations.find(x=>x.id===id);
@@ -5566,43 +5768,6 @@ function ratePdfCustomerSelected(c){ RatePDF.onCustomer(c); }
 Views.rate_docs = ()=>{ RatePDF.seedTerms().then(()=>RatePDF.render()); };
 
 /* =====================================================================
-   PROJECT OPPORTUNITY  (external tool, embedded)
-   Launches the standalone "JAYS Project Opportunity Finder PRO" app
-   (its own separate login/database, hosted on GitHub Pages) inside the
-   CRM's content area. Not a data module of its own - no new Store
-   collection, no new global besides this one Views entry - so there is
-   nothing here to duplicate or drift out of sync with the rest of the
-   CRM. Menu access is governed by the existing hasMenuAccess()/NAV
-   permission system exactly like every other menu item.
-===================================================================== */
-Views.oppfinder = function(){
-  const url = 'https://salesjaystrading-hue.github.io/oppertunity-finder/';
-  document.getElementById('content').innerHTML = `
-    <div class="card card-pad" style="margin-bottom:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-      <div style="flex:1;min-width:220px;">
-        <div class="hint">Opens the separate JAYS Project Opportunity Finder tool (its own sign-in, separate from this CRM).</div>
-      </div>
-      <a class="btn btn-outline btn-sm" href="${url}" target="_blank" rel="noopener">&#8599; Open in New Tab</a>
-    </div>
-    <div class="card" style="overflow:hidden;">
-      <iframe src="${url}" title="JAYS Project Opportunity Finder"
-        style="width:100%;height:calc(100vh - 210px);min-height:520px;border:0;display:block;"
-        onerror="OppFinder.onFrameError()"></iframe>
-    </div>
-    <div class="hint" id="oppFrameHint" style="margin-top:8px;">
-      If the page above stays blank, the site is blocking embedded view &mdash; use "Open in New Tab" instead.
-    </div>
-  `;
-};
-/* Cross-origin iframes never fire a catchable error for X-Frame-Options/
-   CSP blocks - the browser just renders them blank with no signal a
-   script can read. onFrameError only fires for the rarer network-level
-   failures; it's kept (and the visible hint + always-present "Open in
-   New Tab" button above) as the honest, achievable fallback given that
-   browser limitation. */
-const OppFinder = { onFrameError(){ UI.toast('Could not load the page here — use "Open in New Tab".'); } };
-
-/* =====================================================================
    ATTENDANCE & LEAVE MANAGEMENT  (namespace: Attendance)
    Reuses the existing Store (Supabase-backed jays_crm_store), the
    existing profiles-driven user list, the existing modal/toast system,
@@ -6056,6 +6221,461 @@ const Attendance = {
 };
 Views.attendance = ()=>Attendance.render();
 
+/* =====================================================================
+   PROJECT OPPORTUNITY FINDER  (namespace: OppFinder)
+   Ported from the standalone "JAYS Project Opportunity Finder PRO" tool
+   directly into the CRM's own architecture - same Store, same
+   Supabase-backed persistence (Store.data.oppProjects/oppTracking/
+   oppProducts/oppImportHistory), same per-user Auth and menu
+   permissions. The standalone tool's separate Supabase project and
+   shared team-password login are NOT used here - everyone who already
+   has access to this CRM menu uses it under their own account, exactly
+   like every other module.
+     Store.data.oppProjects      (jays_oppprojects)      - imported project rows + computed score/type/hits
+     Store.data.oppTracking      (jays_opptracking)      - {projectKey: {priority,status,followup,staff,notes}}
+     Store.data.oppProducts      (jays_oppproducts)      - [{name, keywords}] simple keyword->product map
+     Store.data.oppImportHistory (jays_oppimporthistory) - import log
+===================================================================== */
+const OPP_WASTE_WORDS = ["waste","solid waste","biodegradable","non-biodegradable","garbage","sanitation","compost","composting","haritha","haritha karma","harithakarmasena","hks","waste bin","waste bins","disposal","segregat","collection","processing","recycling","recycle","organic waste","bio bin","napkin","bottle booth","waste management","\u0d36\u0d41\u0d1a\u0d3f\u0d24\u0d4d\u0d35","\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f","\u0d1c\u0d48\u0d35\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f","\u0d05\u0d1c\u0d48\u0d35","\u0d39\u0d30\u0d3f\u0d24\u0d15\u0d7c\u0d2e\u0d4d\u0d2e","\u0d15\u0d2e\u0d4d\u0d2a\u0d4b\u0d38\u0d4d\u0d31\u0d4d\u0d31\u0d4d","\u0d2c\u0d3f\u0d7b","\u0d2c\u0d3f\u0d28\u0d4d\u0d28\u0d41\u0d15\u0d7e","\u0d2a\u0d3e\u0d34\u0d4d\u0d35\u0d38\u0d4d\u0d24\u0d41","\u0d2a\u0d3e\u0d34\u0d4d\u200d\u0d35\u0d38\u0d4d\u0d24\u0d41"];
+const OPP_PURCHASE_WORDS = ["purchase","purchasing","procurement","supply","supplying","buy","buying","provided","distribution","materials","consumables","utensils","furniture","computer","laptop","printer","tank","uniform","medicine","medicines","vehicle","tools","net","equipment","\u0d09\u0d2a\u0d15\u0d30\u0d23","\u0d35\u0d3e\u0d19\u0d4d\u0d19","\u0d35\u0d3f\u0d24\u0d30\u0d23\u0d02","\u0d38\u0d3e\u0d2e\u0d17\u0d4d\u0d30\u0d3f","\u0d2a\u0d3e\u0d24\u0d4d\u0d30","\u0d2b\u0d7c\u0d23\u0d3f\u0d1a\u0d7c","\u0d15\u0d2e\u0d4d\u0d2a\u0d4d\u0d2f\u0d42\u0d1f\u0d7c"];
+const OPP_EQUIP_WORDS = ["equipment","equipments","machine","machinery","unit","bin","bins","tank","motor","tools","furniture","computer","printer","projector","laptop","vehicle","compost unit","\u0d09\u0d2a\u0d15\u0d30\u0d23","\u0d2f\u0d42\u0d23\u0d3f\u0d31\u0d4d\u0d31\u0d4d","\u0d2e\u0d46\u0d37\u0d40\u0d7b","\u0d2c\u0d3f\u0d7b","\u0d1f\u0d3e\u0d19\u0d4d\u0d15\u0d4d"];
+const OPP_CATEGORY_NAMES = {WASTE:'Waste Management', PURCHASE:'Purchase', EQUIPMENT:'Equipment / Supplies', OTHER:'Other Potential'};
+const OPP_STATUSES = ['New','Researching','Contacted','Interested','Quotation','Submitted','Won','Lost'];
+const OPP_FIELDS = ['Project No','Impl Code','Project Name Eng','Project Name Mal','LB Name','LB Type','District','Sector','Sub Sector','Status','FundTotal','Expenditure','Balance','Project Date','Closing Date'];
+
+function oppNorm(v){ return String(v==null?'':v).toLowerCase().replace(/\s+/g,' ').trim(); }
+function oppMoney(v){ const n = Number(String(v==null?'':v).replace(/[,\u20B9\s]/g,'')); return isNaN(n)?0:n; }
+function oppKeyOf(r){ return oppNorm((r['Project No']||'')+'|'+(r['LB Name']||'')); }
+function oppClassify(r){
+  const text = Object.values(r).map(oppNorm).join(' ');
+  const hitsW = OPP_WASTE_WORDS.filter(x=>text.includes(oppNorm(x)));
+  const hitsP = OPP_PURCHASE_WORDS.filter(x=>text.includes(oppNorm(x)));
+  const hitsE = OPP_EQUIP_WORDS.filter(x=>text.includes(oppNorm(x)));
+  const score = Math.min(100, Math.min(70,hitsW.length*25) + Math.min(45,hitsP.length*12) + Math.min(30,hitsE.length*8)
+    + (oppNorm(r['Sector']).includes('waste') || oppNorm(r['Sector']).includes('\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f') ? 35 : 0)
+    + (oppNorm(r['Sub Sector']).includes('waste') || oppNorm(r['Sub Sector']).includes('\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f') ? 25 : 0));
+  const type = hitsW.length ? 'WASTE' : (hitsP.length ? 'PURCHASE' : (hitsE.length ? 'EQUIPMENT' : 'OTHER'));
+  return { score, type, hits: [...new Set([...hitsW, ...hitsP, ...hitsE])].slice(0,12) };
+}
+function oppParseTSV(txt){
+  const lines = String(txt||'').replace(/\r/g,'').split('\n').filter(x=>x.trim());
+  if(lines.length < 2) return [];
+  const headers = lines[0].split('\t').map(x=>x.trim());
+  return lines.slice(1).map(line=>{
+    const a = line.split('\t'); const r = {};
+    headers.forEach((h,i)=>r[h] = a[i]==null ? '' : a[i]);
+    return r;
+  }).filter(r=>Object.values(r).some(v=>String(v).trim()));
+}
+const OppFinder = {
+  tab: 'dashboard',
+  filtered: [],
+  filters: { q:'', type:'ALL', district:'', localbody:'', minscore:0, status:'', from:'', to:'' },
+
+  setTab(t){ this.tab = t; this.render(); },
+
+  /* ---------------- import: paste TSV or upload an Excel file ---------------- */
+  async importIncoming(incoming, source){
+    const msg = document.getElementById('oppMsg');
+    if(!incoming.length){ if(msg) msg.textContent = 'No rows detected.'; return false; }
+    const old = new Map(Store.data.oppProjects.map(r=>[oppKeyOf(r), r]));
+    let added = 0, updated = 0, dupes = 0;
+    incoming.forEach(r=>{
+      const k = oppKeyOf(r);
+      if(old.has(k)){ dupes++; old.set(k, Object.assign({}, old.get(k), r)); updated++; }
+      else { old.set(k, r); added++; }
+    });
+    Store.data.oppProjects = [...old.values()];
+    Store.data.oppImportHistory.unshift({date:new Date().toISOString(), source:source||'Excel Import',
+      records:incoming.length, newCount:added, updated, duplicates:dupes});
+    Store.data.oppImportHistory = Store.data.oppImportHistory.slice(0,30);
+    const ok1 = await Store.save('oppProjects');
+    const ok2 = await Store.save('oppImportHistory');
+    if(ok1 && ok2) await Activity.log('Project opportunity data imported', incoming.length+' row(s), '+added+' new, '+updated+' updated');
+    if(msg) msg.textContent = `Imported ${incoming.length} rows \u2022 ${added} new \u2022 ${updated} updated \u2022 ${dupes} duplicate keys handled.`;
+    this.render();
+    return true;
+  },
+  async processData(){
+    const ta = document.getElementById('oppPaste');
+    const incoming = oppParseTSV(ta.value).map(r=>Object.assign({}, r, oppClassify(r)));
+    const ok = await this.importIncoming(incoming, 'Pasted TSV');
+    if(ok) ta.value = '';
+  },
+  async handleExcelFile(input){
+    const f = input.files && input.files[0];
+    const statusEl = document.getElementById('oppFileStatus');
+    if(!f) return;
+    if(statusEl) statusEl.textContent = 'Reading ' + f.name + '\u2026';
+    try{
+      const buf = await f.arrayBuffer();
+      const wb = XLSX.read(buf, {type:'array'});
+      const sheetName = wb.SheetNames[0];
+      const raw = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {defval:'', raw:false});
+      if(!raw.length){ if(statusEl) statusEl.textContent = 'No rows found in ' + f.name + ' (sheet: ' + sheetName + ').'; input.value=''; return; }
+      const incoming = raw.map(r=>Object.assign({}, r, oppClassify(r)));
+      const ok = await this.importIncoming(incoming, 'Excel: ' + f.name);
+      if(statusEl) statusEl.textContent = ok ? ('\u2713 Imported ' + incoming.length + ' rows from ' + f.name + '.') : 'Import failed \u2014 see message above.';
+    }catch(e){
+      console.error(e);
+      if(statusEl) statusEl.textContent = 'Could not read file: ' + (e.message||e);
+      UI.toast('Could not read that Excel file');
+    }
+    input.value = '';
+  },
+  loadSample(){
+    const sample = "Project No\tImpl Code\tProject Name Eng\tProject Name Mal\tLB Name\tDistrict\tSector\tSub Sector\tStatus\tFundTotal\tBalance\n"+
+"27\tIC-27\tProtective equipments to HKS\t\u0d39\u0d30\u0d3f\u0d24 \u0d15\u0d7c\u0d2e\u0d4d\u0d2e\u0d38\u0d47\u0d28\u0d15\u0d4d\u0d15\u0d4d \u0d38\u0d41\u0d30\u0d15\u0d4d\u0d37\u0d3e \u0d09\u0d2a\u0d15\u0d30\u0d23\u0d19\u0d4d\u0d19\u0d33\u0d4d\u200d\tSample Panchayat\tKozhikode\tSolid Waste Management\tProcessing\tApproved\t100000\t100000\n"+
+"336\tIC-336\tWASTE BINS FOR SEGREGATING WASTE AT THE COMMUNITY LEVEL\t\u0d15\u0d2e\u0d4d\u0d2e\u0d4d\u0d2f\u0d42\u0d23\u0d3f\u0d31\u0d4d\u0d31\u0d3f \u0d24\u0d32\u0d24\u0d4d\u0d24\u0d3f\u0d7d \u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d19\u0d4d\u0d19\u0d7e \u0d24\u0d30\u0d02\u0d24\u0d3f\u0d30\u0d3f\u0d15\u0d4d\u0d15\u0d41\u0d28\u0d4d\u0d28\u0d24\u0d3f\u0d28\u0d41\u0d33\u0d4d\u0d33 \u0d2c\u0d3f\u0d28\u0d4d\u0d28\u0d41\u0d15\u0d7e \u0d35\u0d3e\u0d19\u0d4d\u0d19\u0d7d\tSample Panchayat\tKozhikode\tSolid Waste Management\tCollection and Transport\tApproved\t300000\t300000";
+    document.getElementById('oppPaste').value = sample;
+    this.processData();
+  },
+  clearImportBox(){ const ta=document.getElementById('oppPaste'); if(ta) ta.value=''; },
+
+  /* ---------------- filtering ---------------- */
+  readFilters(){
+    const g = id => { const el = document.getElementById(id); return el ? el.value : ''; };
+    this.filters = {
+      q: oppNorm(g('oppSearch')), type: g('oppType')||'ALL', district: g('oppDistrict'),
+      localbody: g('oppLocalBody'), minscore: Number(g('oppMinScore')||0),
+      status: g('oppStatus'), from: g('oppFrom'), to: g('oppTo')
+    };
+  },
+  applyFilters(){
+    this.readFilters();
+    const f = this.filters;
+    this.filtered = Store.data.oppProjects.filter(r=>{
+      const blob = oppNorm(Object.entries(r).filter(([k])=>!['score','type','hits'].includes(k)).map(([,v])=>v).join(' '));
+      const tr = Store.data.oppTracking[oppKeyOf(r)] || {};
+      const st = tr.status || 'New';
+      const dateVal = r['Project Date'] || r['Date'] || r['Created Date'] || r['Closing Date'] || '';
+      return r.score >= f.minscore && (f.type==='ALL' || r.type===f.type) &&
+        (!f.district || r['District']===f.district) && (!f.localbody || r['LB Name']===f.localbody) &&
+        (!f.q || blob.includes(f.q)) && (!f.status || st===f.status) &&
+        (!f.from || String(dateVal).slice(0,10) >= f.from) && (!f.to || String(dateVal).slice(0,10) <= f.to);
+    }).sort((a,b)=>b.score-a.score);
+  },
+  resetFilters(){
+    this.filters = { q:'', type:'ALL', district:'', localbody:'', minscore:0, status:'', from:'', to:'' };
+    this.render();
+  },
+  districtOptions(){ return [...new Set(Store.data.oppProjects.map(r=>r['District']).filter(Boolean))].sort(); },
+  localBodyOptions(district){
+    return [...new Set(Store.data.oppProjects.filter(r=>!district || r['District']===district).map(r=>r['LB Name']).filter(Boolean))].sort();
+  },
+  onDistrictChange(){
+    const d = document.getElementById('oppDistrict').value;
+    const sel = document.getElementById('oppLocalBody');
+    if(sel) sel.innerHTML = '<option value="">All Local Bodies</option>' +
+      this.localBodyOptions(d).map(x=>'<option>'+Util.escapeHtml(x)+'</option>').join('');
+    this.render();
+  },
+  quickDate(v){
+    const now = new Date(); let from = new Date(now), to = new Date(now);
+    if(v==='week') from.setDate(now.getDate()-now.getDay());
+    else if(v==='month') from.setDate(1);
+    else if(v==='30') from.setDate(now.getDate()-29);
+    else if(!v){ document.getElementById('oppFrom').value=''; document.getElementById('oppTo').value=''; this.render(); return; }
+    document.getElementById('oppFrom').value = from.toISOString().slice(0,10);
+    document.getElementById('oppTo').value = to.toISOString().slice(0,10);
+    this.render();
+  },
+  /* ---------------- opportunity tracking ---------------- */
+  async saveTracking(key){
+    const g = id => document.getElementById(id).value;
+    Store.data.oppTracking[key] = {
+      priority: g('oppPriority'), status: g('oppStatusField'), followup: g('oppFollowupDate'),
+      staff: g('oppStaff'), notes: g('oppNotes'), savedAt: new Date().toISOString()
+    };
+    const ok = await Store.save('oppTracking');
+    if(ok) await Activity.log('Project opportunity saved', key);
+    UI.closeModal(); this.render();
+  },
+  async removeTracking(key){
+    delete Store.data.oppTracking[key];
+    const ok = await Store.save('oppTracking');
+    if(ok) await Activity.log('Project opportunity removed', key);
+    UI.closeModal(); this.render();
+  },
+  viewProject(key){
+    const r = Store.data.oppProjects.find(x=>oppKeyOf(x)===key);
+    if(!r) return;
+    const tr = Store.data.oppTracking[key] || {};
+    const productMatches = Store.data.oppProducts.filter(p=>
+      (p.keywords||'').split(',').some(x=>x.trim() && oppNorm(Object.values(r).join(' ')).includes(oppNorm(x)))
+    ).map(p=>p.name);
+    const E = Util.escapeHtml;
+    UI.openModal(r['Project Name Eng'] || 'Project Details',
+      '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;">' +
+        OPP_FIELDS.filter(f=>r[f]!==undefined && r[f]!=='').map(f=>
+          '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">'+E(f)+'</div>'+E(r[f])+'</div>').join('') +
+        '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">Opportunity Score</div><b>'+r.score+'%</b></div>' +
+        '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">Category</div>'+E(OPP_CATEGORY_NAMES[r.type])+'</div>' +
+        '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">Matched Keywords</div>'+r.hits.map(x=>'<span class="badge badge-gray">'+E(x)+'</span>').join(' ')+'</div>' +
+      '</div>' +
+      '<h3 style="margin:16px 0 8px;">\u2b50 My Opportunity</h3>' +
+      '<div class="form-row" style="grid-template-columns:1fr 1fr 1fr;">' +
+        '<div class="field"><label>Priority</label><select id="oppPriority">'+['Low','Medium','High'].map(p=>'<option '+(tr.priority===p?'selected':'')+'>'+p+'</option>').join('')+'</select></div>' +
+        '<div class="field"><label>Status</label><select id="oppStatusField">'+OPP_STATUSES.map(s=>'<option '+(tr.status===s?'selected':'')+'>'+s+'</option>').join('')+'</select></div>' +
+        '<div class="field"><label>Follow-up Date</label><input type="date" id="oppFollowupDate" value="'+E(tr.followup||'')+'"></div>' +
+      '</div>' +
+      '<div class="field"><label>Assigned Staff</label><input id="oppStaff" value="'+E(tr.staff||'')+'"></div>' +
+      '<div class="field"><label>Notes</label><textarea id="oppNotes" rows="3">'+E(tr.notes||'')+'</textarea></div>' +
+      '<h4 style="margin:10px 0 6px;">\ud83d\udce6 Potential JAYS Products</h4>' +
+      '<div>' + (productMatches.length ? productMatches.map(x=>'<span class="badge badge-blue">'+E(x)+'</span>').join(' ') :
+        '<span class="hint">Add products below to enable product matching.</span>') + '</div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>' +
+      '<button class="btn btn-outline" onclick="OppFinder.removeTracking(\''+key+'\')">Remove from My Opportunities</button>' +
+      '<button class="btn btn-outline" onclick="OppFinder.convertToLead(\''+key+'\')">&#8594; Convert to Lead</button>' +
+      '<button class="btn btn-primary" onclick="OppFinder.saveTracking(\''+key+'\')">\u2b50 Save Opportunity</button>', true);
+  },
+  /* Creates a real record in the existing Customer Master (not a
+     parallel lead list) - project name, district, local body, score
+     and category get carried into the lead's first timeline entry so
+     the sales team has context without leaving the CRM. */
+  async convertToLead(key){
+    const r = Store.data.oppProjects.find(x=>oppKeyOf(x)===key);
+    if(!r) return;
+    const name = r['LB Name'] || r['Project Name Eng'] || 'Project Opportunity Lead';
+    const by = (Auth.session && (Auth.session.name||Auth.session.username)) || 'System';
+    const rec = {
+      id: Util.uid('C', Store.data.customers), name, phone:'', email:'',
+      district: r['District']||'', panchayath: r['LB Name']||'',
+      assignedTo: by, status:'New Lead', lastContact: Util.todayISO(), createdDate: Util.todayISO(),
+      timeline:[{id:'T'+Date.now(), date:Util.todayISO(), stage:'First Contact',
+        note:'Converted from Project Opportunity: '+(r['Project Name Eng']||r['Project Name Mal']||'')+' ('+r.score+'% match, '+OPP_CATEGORY_NAMES[r.type]+')',
+        by}]
+    };
+    Store.data.customers.unshift(rec);
+    const ok = await Store.save('customers');
+    if(ok) await Activity.log('Lead created from Project Opportunity', name);
+    UI.closeModal();
+    UI.toast('Lead created \u2014 opening Customers');
+    go('customers');
+    if(Customers.openDetail) Customers.openDetail(rec.id);
+  },
+
+  /* ---------------- keyword-matching product list (distinct from Product Master) ---------------- */
+  async addProduct(){
+    const name = document.getElementById('oppProdName').value.trim();
+    const keywords = document.getElementById('oppProdKeywords').value.trim();
+    if(!name || !keywords){ UI.toast('Enter both a name and keywords'); return; }
+    Store.data.oppProducts.push({name, keywords});
+    const ok = await Store.save('oppProducts');
+    if(ok) await Activity.log('Project-matching product added', name);
+    this.render();
+  },
+  async removeProductAt(i){
+    const p = Store.data.oppProducts[i]; if(!p) return;
+    Store.data.oppProducts.splice(i,1);
+    const ok = await Store.save('oppProducts');
+    if(ok) await Activity.log('Project-matching product removed', p.name);
+    this.render();
+  },
+
+  /* ---------------- export ---------------- */
+  exportCSV(onlySaved){
+    const list = onlySaved ? Store.data.oppProjects.filter(r=>Store.data.oppTracking[oppKeyOf(r)]) :
+      (this.filtered.length ? this.filtered : Store.data.oppProjects);
+    if(!list.length){ UI.toast('Nothing to export'); return; }
+    const cols = ['score','type','Project No','Impl Code','Project Name Eng','Project Name Mal','LB Name','LB Type','District','Sector','Sub Sector','Status','FundTotal','Expenditure','Balance','hits'];
+    const out = [cols.join(',')];
+    list.forEach(r=>out.push(cols.map(c=>'"'+String(c==='hits'?r.hits.join('; '):(r[c]==null?'':r[c])).replace(/"/g,'""')+'"').join(',')));
+    const blob = new Blob([out.join('\n')], {type:'text/csv;charset=utf-8'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'JAYS_Project_Opportunities.csv'; a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
+  },
+  /* ---------------- render: shell + tabs ---------------- */
+  switcherHTML(){
+    const tabs = [['dashboard','&#127968; Dashboard'],['projects','&#128269; Projects'],
+      ['opportunities','&#11088; My Opportunities'],['import','&#128229; Import'],
+      ['products','&#128230; Products'],['reports','&#128202; Reports']];
+    return '<div class="rp-switcher" style="flex-wrap:wrap;">' +
+      tabs.map(([id,label])=>'<button class="'+(this.tab===id?'active':'')+'" onclick="OppFinder.setTab(\''+id+'\')">'+label+'</button>').join('') +
+    '</div>';
+  },
+  render(){
+    const body = this.tab==='dashboard' ? this.renderDashboard()
+      : this.tab==='projects' ? this.renderProjects()
+      : this.tab==='opportunities' ? this.renderOpportunities()
+      : this.tab==='import' ? this.renderImport()
+      : this.tab==='products' ? this.renderProducts()
+      : this.renderReports();
+    document.getElementById('content').innerHTML = this.switcherHTML() + body;
+  },
+
+  renderDashboard(){
+    const rows = Store.data.oppProjects;
+    const counts = {WASTE:0,PURCHASE:0,EQUIPMENT:0,OTHER:0};
+    rows.forEach(r=>counts[r.type]++);
+    const districts = {}; rows.forEach(r=>{ const d=r['District']||'Unknown'; districts[d]=(districts[d]||0)+1; });
+    const topDistricts = Object.entries(districts).sort((a,b)=>b[1]-a[1]).slice(0,8);
+    const topOpps = rows.slice().sort((a,b)=>b.score-a.score).slice(0,6);
+    const bar = (label, v, max) => '<div style="margin:8px 0;"><div style="display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:3px;"><span>'+Util.escapeHtml(label)+'</span><b>'+v+'</b></div>' +
+      '<div style="background:var(--border,#e5e7eb);border-radius:6px;height:8px;overflow:hidden;"><div style="width:'+(max?Math.round(v/max*100):0)+'%;height:100%;background:var(--orange);"></div></div></div>';
+
+    return dashboardCardsHTML('Project Opportunity Dashboard', [
+      {label:'Total Projects', value:rows.length},
+      {label:'Waste Opportunities', value:counts.WASTE, color:'var(--green,#16a34a)'},
+      {label:'Purchase Opportunities', value:counts.PURCHASE, color:'var(--blue,#2563eb)'},
+      {label:'High Priority (80%+)', value:rows.filter(r=>r.score>=80).length, color:'var(--red,#dc2626)'},
+      {label:'Saved Opportunities', value:Object.keys(Store.data.oppTracking).length},
+      {label:'Total Fund Value', value:'\u20B9'+rows.reduce((s,r)=>s+oppMoney(r['FundTotal']),0).toLocaleString('en-IN')}
+    ]) +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">' +
+      '<div class="card card-pad"><h3 style="margin:0 0 10px;font-size:14px;">Opportunity Overview</h3>' +
+        Object.entries(counts).map(([k,v])=>bar(OPP_CATEGORY_NAMES[k], v, rows.length)).join('') + '</div>' +
+      '<div class="card card-pad"><h3 style="margin:0 0 10px;font-size:14px;">District Distribution</h3>' +
+        (topDistricts.length ? topDistricts.map(([d,v])=>bar(d, v, rows.length)).join('') : '<div class="hint">Import data to see analytics.</div>') + '</div>' +
+    '</div>' +
+    '<div class="card card-pad" style="margin-top:16px;"><h3 style="margin:0 0 10px;font-size:14px;">Top Opportunities</h3>' +
+      (topOpps.length ? '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;">' + topOpps.map(r=>
+        '<div class="card card-pad" style="padding:10px;">' +
+          '<b style="font-size:13px;">'+Util.escapeHtml(r['Project Name Eng']||r['Project Name Mal']||'Unnamed Project')+'</b>' +
+          '<div class="hint">'+Util.escapeHtml(r['LB Name']||'')+' &middot; '+Util.escapeHtml(r['District']||'')+'</div>' +
+          '<div style="background:var(--border,#e5e7eb);border-radius:6px;height:6px;margin-top:8px;overflow:hidden;"><div style="width:'+r.score+'%;height:100%;background:var(--green,#16a34a);"></div></div>' +
+          '<div style="margin-top:6px;"><span class="badge badge-green">'+r.score+'% match</span> <span class="badge badge-blue">'+OPP_CATEGORY_NAMES[r.type]+'</span>' +
+          ' <button class="btn btn-outline btn-sm" style="float:right;" onclick="OppFinder.viewProject(\''+oppKeyOf(r)+'\')">View</button></div>' +
+        '</div>').join('') + '</div>' : '<div class="hint">No projects yet \u2014 use the Import tab to load data.</div>') +
+    '</div>';
+  },
+
+  renderProjects(){
+    this.applyFilters();
+    const f = this.filters;
+    const info = Paginate.slice('oppfinder', this.filtered);
+    const cls = s => s>=80?'var(--green,#16a34a)':s>=50?'var(--amber,#d97706)':'var(--text-mute,#6b7280)';
+    return '<div class="card card-pad" style="margin-bottom:14px;">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">' +
+        '<div><h3 style="margin:0;font-size:14px;">Project Search &amp; Filters</h3><span class="hint">Combine filters: District + Local Body + Category + Score + Status.</span></div>' +
+        '<button class="btn btn-outline btn-sm" onclick="OppFinder.resetFilters()">Reset Filters</button>' +
+      '</div>' +
+      '<div class="form-row" style="grid-template-columns:2fr 1fr 1fr 1fr 1fr;margin-top:10px;">' +
+        '<div class="field"><label>Search all project data</label><input id="oppSearch" placeholder="e.g. waste bins malappuram panchayat" value="'+Util.escapeHtml(f.q)+'" oninput="OppFinder.render()"></div>' +
+        '<div class="field"><label>Category</label><select id="oppType" onchange="OppFinder.render()">' +
+          ['ALL','WASTE','PURCHASE','EQUIPMENT','OTHER'].map(t=>'<option value="'+t+'" '+(f.type===t?'selected':'')+'>'+(t==='ALL'?'All categories':OPP_CATEGORY_NAMES[t])+'</option>').join('') + '</select></div>' +
+        '<div class="field"><label>District</label><select id="oppDistrict" onchange="OppFinder.onDistrictChange()"><option value="">All districts</option>' +
+          this.districtOptions().map(d=>'<option '+(f.district===d?'selected':'')+'>'+Util.escapeHtml(d)+'</option>').join('') + '</select></div>' +
+        '<div class="field"><label>Local Body</label><select id="oppLocalBody" onchange="OppFinder.render()"><option value="">All Local Bodies</option>' +
+          this.localBodyOptions(f.district).map(l=>'<option '+(f.localbody===l?'selected':'')+'>'+Util.escapeHtml(l)+'</option>').join('') + '</select></div>' +
+        '<div class="field"><label>Minimum score</label><select id="oppMinScore" onchange="OppFinder.render()">' +
+          [0,40,60,80,90].map(v=>'<option value="'+v+'" '+(f.minscore===v?'selected':'')+'>'+(v?v+'+':'All')+'</option>').join('') + '</select></div>' +
+      '</div>' +
+      '<div class="form-row" style="grid-template-columns:1fr 1fr 1fr 1fr;margin-top:8px;">' +
+        '<div class="field"><label>Status</label><select id="oppStatus" onchange="OppFinder.render()"><option value="">All Status</option>' +
+          OPP_STATUSES.map(s=>'<option '+(f.status===s?'selected':'')+'>'+s+'</option>').join('') + '</select></div>' +
+        '<div class="field"><label>From Date</label><input type="date" id="oppFrom" value="'+f.from+'" onchange="OppFinder.render()"></div>' +
+        '<div class="field"><label>To Date</label><input type="date" id="oppTo" value="'+f.to+'" onchange="OppFinder.render()"></div>' +
+        '<div class="field"><label>Quick Date</label><select onchange="OppFinder.quickDate(this.value)"><option value="">Select</option><option value="today">Today</option><option value="week">This Week</option><option value="month">This Month</option><option value="30">Last 30 Days</option></select></div>' +
+      '</div>' +
+      '<div class="toolbar" style="margin-top:10px;"><div class="toolbar-spacer"></div><button class="btn btn-outline btn-sm" onclick="OppFinder.exportCSV(false)">Export CSV</button></div>' +
+    '</div>' +
+    '<div class="card"><div class="card-pad" style="padding-bottom:0;"><span class="hint">'+this.filtered.length+' results \u2022 total value \u20B9'+this.filtered.reduce((s,r)=>s+oppMoney(r['FundTotal']),0).toLocaleString('en-IN')+'</span></div>' +
+    '<div class="table-wrap"><table><thead><tr><th class="col-actions">Actions</th><th>Score</th><th>Opportunity</th><th>Project No</th><th>Impl Code</th><th>Project Name</th><th>Local Body</th><th>District</th><th>Sector</th><th>Status</th><th>Fund Total</th><th>Matched Keywords</th></tr></thead><tbody>' +
+      (info.pageItems.length ? info.pageItems.map(r=>{
+        const key = oppKeyOf(r);
+        const tr = Store.data.oppTracking[key] || {};
+        const name = Util.escapeHtml(r['Project Name Eng']||r['Project Name Mal']||'');
+        return '<tr>' +
+          '<td class="col-actions"><div class="row-action-btns"><button class="icon-btn" title="View" onclick="OppFinder.viewProject(\''+key+'\')">&#128065;</button></div></td>' +
+          '<td class="mono" style="min-width:70px;">' +
+            '<div style="color:'+cls(r.score)+';font-weight:700;">'+r.score+'%</div>' +
+            '<div style="background:var(--border,#e5e7eb);border-radius:6px;height:5px;margin-top:3px;overflow:hidden;"><div style="width:'+r.score+'%;height:100%;background:'+cls(r.score)+';"></div></div>' +
+          '</td>' +
+          '<td><span class="badge badge-blue">'+OPP_CATEGORY_NAMES[r.type]+'</span>'+(tr.status?' <span class="badge badge-green">'+Util.escapeHtml(tr.status)+'</span>':'')+'</td>' +
+          '<td class="cell-mute">'+Util.escapeHtml(r['Project No']||'')+'</td>' +
+          '<td class="cell-mute">'+Util.escapeHtml(r['Impl Code']||'')+'</td>' +
+          '<td class="cell-main">'+name+'</td>' +
+          '<td class="cell-mute">'+Util.escapeHtml(r['LB Name']||'')+'</td>' +
+          '<td class="cell-mute">'+Util.escapeHtml(r['District']||'')+'</td>' +
+          '<td class="cell-mute">'+Util.escapeHtml(r['Sector']||'')+'</td>' +
+          '<td class="cell-mute">'+Util.escapeHtml(tr.status||'New')+'</td>' +
+          '<td class="mono">\u20B9'+oppMoney(r['FundTotal']).toLocaleString('en-IN')+'</td>' +
+          '<td>'+r.hits.slice(0,4).map(x=>'<span class="badge badge-gray">'+Util.escapeHtml(x)+'</span>').join(' ')+'</td>' +
+        '</tr>';
+      }).join('') : '<tr><td colspan="12" class="cell-mute" style="text-align:center;padding:20px;">No matching projects found.</td></tr>') +
+    '</tbody></table></div>' + Paginate.controlsHTML('oppfinder', info, "OppFinder.render()") + '</div>';
+  },
+
+  renderOpportunities(){
+    const groups = {}; OPP_STATUSES.forEach(s=>groups[s]=[]);
+    Object.entries(Store.data.oppTracking).forEach(([k,tr])=>{
+      const r = Store.data.oppProjects.find(x=>oppKeyOf(x)===k);
+      if(r) (groups[tr.status||'New']||groups.New).push({r,tr});
+    });
+    return '<div class="toolbar"><div class="toolbar-spacer"></div><button class="btn btn-outline btn-sm" onclick="OppFinder.exportCSV(true)">Export Opportunities</button></div>' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;">' +
+      OPP_STATUSES.map(s=>'<div class="card card-pad" style="background:var(--bg-soft,#faf9f7);">' +
+        '<h4 style="margin:0 0 8px;font-size:12.5px;">'+s+' <span class="hint">('+groups[s].length+')</span></h4>' +
+        groups[s].map(({r,tr})=>{
+          const key = oppKeyOf(r);
+          return '<div class="card card-pad" style="padding:9px;margin-bottom:7px;">' +
+            '<b style="font-size:12.5px;">'+Util.escapeHtml(r['Project Name Eng']||'Unnamed')+'</b>' +
+            '<div class="hint">'+Util.escapeHtml(r['LB Name']||'')+' &middot; '+r.score+'%</div>' +
+            (tr.followup ? '<div class="hint">&#128197; '+Util.escapeHtml(tr.followup)+'</div>' : '') +
+            '<button class="btn btn-outline btn-sm" style="margin-top:6px;" onclick="OppFinder.viewProject(\''+key+'\')">Open</button>' +
+          '</div>';
+        }).join('') +
+      '</div>').join('') + '</div>';
+  },
+
+  renderImport(){
+    const hist = Store.data.oppImportHistory;
+    return '<div class="card card-pad" style="margin-bottom:14px;">' +
+      '<h3 style="margin-top:0;font-size:14px;">Import Project Data</h3>' +
+      '<div class="hint" style="margin-bottom:8px;">Excel \u2192 select headings + rows \u2192 Copy \u2192 Paste below, or upload the file directly. Existing projects are matched using Project No + Local Body, so re-importing updates rather than duplicates.</div>' +
+      '<textarea id="oppPaste" rows="7" placeholder="Paste Excel tab-separated data here..." style="font-family:monospace;font-size:12px;"></textarea>' +
+      '<div class="toolbar" style="margin-top:10px;">' +
+        '<button class="btn btn-primary btn-sm" onclick="OppFinder.processData()">Find Opportunities</button>' +
+        '<button class="btn btn-outline btn-sm" onclick="OppFinder.loadSample()">Load Sample</button>' +
+        '<button class="btn btn-outline btn-sm" onclick="OppFinder.clearImportBox()">Clear</button>' +
+      '</div>' +
+      '<div class="field" style="margin-top:12px;"><label>Or upload an Excel file directly (first sheet, first row = headers)</label>' +
+        '<input type="file" accept=".xlsx,.xls,.csv" onchange="OppFinder.handleExcelFile(this)"></div>' +
+      '<div id="oppFileStatus" class="hint"></div>' +
+      '<div id="oppMsg" class="hint" style="margin-top:8px;"></div>' +
+    '</div>' +
+    '<div class="card"><div class="card-pad" style="padding-bottom:0;"><h3 style="margin:0;font-size:14px;">Import History</h3></div>' +
+      '<div class="table-wrap"><table><thead><tr><th>Date</th><th>Source</th><th>Records</th><th>New</th><th>Updated</th><th>Duplicates</th></tr></thead><tbody>' +
+      (hist.length ? hist.map(h=>'<tr><td class="cell-mute">'+Util.fmtDateTime(h.date)+'</td><td>'+Util.escapeHtml(h.source)+'</td><td>'+h.records+'</td><td>'+h.newCount+'</td><td>'+h.updated+'</td><td>'+h.duplicates+'</td></tr>').join('')
+        : '<tr><td colspan="6" class="cell-mute" style="text-align:center;padding:16px;">No imports yet.</td></tr>') +
+      '</tbody></table></div></div>';
+  },
+
+  renderProducts(){
+    const list = Store.data.oppProducts;
+    return '<div class="card card-pad" style="margin-bottom:14px;">' +
+      '<h3 style="margin-top:0;font-size:14px;">JAYS Product Match</h3>' +
+      '<div class="hint" style="margin-bottom:8px;">Maintain simple keyword mappings so matching projects automatically surface potential JAYS products. This is separate from the main Product Master.</div>' +
+      '<div class="form-row" style="grid-template-columns:2fr 2fr auto;align-items:end;">' +
+        '<div class="field"><label>Product Name</label><input id="oppProdName" placeholder="e.g. Twin Waste Bin"></div>' +
+        '<div class="field"><label>Keywords / Category</label><input id="oppProdKeywords" placeholder="bin, waste, segregation"></div>' +
+        '<button class="btn btn-primary btn-sm" onclick="OppFinder.addProduct()">Add Product</button>' +
+      '</div>' +
+    '</div>' +
+    '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;">' +
+      (list.length ? list.map((p,i)=>'<div class="card card-pad" style="padding:10px;">' +
+        '<b style="font-size:13px;">'+Util.escapeHtml(p.name)+'</b><div class="hint">'+Util.escapeHtml(p.keywords)+'</div>' +
+        '<button class="btn btn-outline btn-sm" style="margin-top:6px;" onclick="OppFinder.removeProductAt('+i+')">Delete</button></div>').join('')
+        : '<div class="hint">No products added yet.</div>') +
+    '</div>';
+  },
+
+  renderReports(){
+    const rows = Store.data.oppProjects;
+    const make = obj => Object.entries(obj).sort((a,b)=>b[1]-a[1]).map(([k,v])=>
+      '<div style="display:flex;justify-content:space-between;margin:7px 0;font-size:13px;"><span>'+Util.escapeHtml(k)+'</span><b>'+v+'</b></div>').join('') || '<div class="hint">No data</div>';
+    const c = {}; rows.forEach(r=>c[OPP_CATEGORY_NAMES[r.type]] = (c[OPP_CATEGORY_NAMES[r.type]]||0)+1);
+    const s = {}; rows.forEach(r=>{ const st = (Store.data.oppTracking[oppKeyOf(r)]||{}).status || 'New'; s[st]=(s[st]||0)+1; });
+    return '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">' +
+      '<div class="card card-pad"><h3 style="margin:0 0 8px;font-size:14px;">Projects by Category</h3>'+make(c)+'</div>' +
+      '<div class="card card-pad"><h3 style="margin:0 0 8px;font-size:14px;">Projects by Status</h3>'+make(s)+'</div>' +
+    '</div>';
+  }
+};
+Views.oppfinder = ()=>OppFinder.render();
+
 const Reports = {
   render(){
     const c = Store.data.customers;
@@ -6226,6 +6846,8 @@ const Backup = {
       waTemplates: Store.data.waTemplates, waHistory: Store.data.waHistory,
       rateTemplates: Store.data.rateTemplates, rateDocs: Store.data.rateDocs, rateTerms: Store.data.rateTerms,
       rateDocTemplates: Store.data.rateDocTemplates,
+      oppProjects: Store.data.oppProjects, oppTracking: Store.data.oppTracking,
+      oppProducts: Store.data.oppProducts, oppImportHistory: Store.data.oppImportHistory,
       attendance: Store.data.attendance, leaveRequests: Store.data.leaveRequests
     };
   },
@@ -6253,10 +6875,10 @@ const Backup = {
     try{
       const text = await file.text();
       const data = JSON.parse(text);
-      ['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','attendance','leaveRequests'].forEach(k=>{
+      ['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','attendance','leaveRequests'].forEach(k=>{
         if(data[k]!==undefined) Store.data[k] = data[k];
       });
-      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','attendance','leaveRequests'].map(k=>Store.save(k)));
+      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','attendance','leaveRequests'].map(k=>Store.save(k)));
       await Activity.log('Data restored', 'Restored from backup file '+file.name);
       UI.toast('Data restored successfully');
       Router.render('backup');
@@ -6279,6 +6901,7 @@ const Backup = {
         Bids: Store.data.bids.map(b=>({ID:b.id,'Bid Number':b.bidNumber||'','Title':b.title||'','Category':b.category||'','Organisation':b.organisation||'','Bid Value':b.estimatedValue||0,'End Date':b.endDate||'','Status':b.status,'Assigned To':b.assignedTo||'','Decision':b.decision||'','Result':b.status==='Won'?'Won':b.status==='Lost'?'Lost':'','Notes':b.description||''})),
         Attendance: Store.data.attendance.map(a=>({ID:a.id,Date:a.date,Employee:a.name||a.username,Location:a.location||'',Status:a.status,'Login Time':a.loginTime||'','Logout Time':a.logoutTime||'',Notes:a.notes||''})),
         LeaveRequests: Store.data.leaveRequests.map(l=>({ID:l.id,Employee:l.name||l.username,'From':l.fromDate,'To':l.toDate,Days:l.days,Type:l.leaveType,Reason:l.reason,Status:l.status,'Applied At':l.appliedAt||'','Decided By':l.decidedBy||''})),
+        ProjectOpportunities: Store.data.oppProjects.map(r=>({'Project No':r['Project No']||'','Impl Code':r['Impl Code']||'','Project Name':r['Project Name Eng']||r['Project Name Mal']||'','LB Name':r['LB Name']||'','District':r['District']||'','Sector':r['Sector']||'','Score':r.score,'Category':OPP_CATEGORY_NAMES[r.type]||'','Status':(Store.data.oppTracking[oppKeyOf(r)]||{}).status||'New','Fund Total':r['FundTotal']||''})),
         ActivityLog: Store.data.activityLog.map(a=>({Time:a.ts,User:a.user,Action:a.action,Details:a.details}))
       };
       Object.keys(sheets).forEach(name=>{
