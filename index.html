@@ -193,7 +193,9 @@
   .grid-2{grid-template-columns:2fr 1fr;}
   .grid-5{grid-template-columns:repeat(5,1fr);}
   @media(max-width:1100px){.grid-4{grid-template-columns:repeat(2,1fr);} .grid-2{grid-template-columns:1fr;} .grid-3{grid-template-columns:repeat(2,1fr);} .grid-5{grid-template-columns:repeat(2,1fr);}}
-  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);transition:box-shadow .15s ease, transform .15s ease;}
+  .card-hover{cursor:pointer;}
+  .card-hover:hover{box-shadow:0 10px 24px rgba(11,20,36,0.12);transform:translateY(-2px);}
   .card-pad{padding:18px 18px;}
   .card-head{display:flex;align-items:center;justify-content:space-between;padding:16px 18px;border-bottom:1px solid var(--border);}
   .card-head h3{margin:0;font-size:14px;font-weight:800;}
@@ -262,6 +264,23 @@
     .mbn-item.active{color:var(--orange);}
     .content{padding-bottom:76px;}
   }
+
+  /* Global Quick Create - a persistent floating action button reachable
+     from every page, desktop and mobile, without duplicating any of the
+     existing "Add" forms - it just opens the same openForm() calls each
+     module already has. */
+  .qc-wrap{position:fixed;right:22px;bottom:22px;z-index:195;display:flex;flex-direction:column;align-items:flex-end;gap:10px;}
+  @media(max-width:880px){ .qc-wrap{right:14px;bottom:74px;} }
+  .qc-fab{width:52px;height:52px;border-radius:50%;border:0;background:linear-gradient(135deg,var(--orange),var(--orange-dark,#c2410c));
+    color:#fff;font-size:24px;line-height:1;cursor:pointer;box-shadow:0 8px 20px rgba(235,90,40,0.4);
+    transition:transform .15s ease;}
+  .qc-fab:hover{transform:scale(1.06);}
+  .qc-fab.open{transform:rotate(45deg);}
+  .qc-menu{display:flex;flex-direction:column;gap:6px;background:#fff;border:1px solid var(--border);border-radius:12px;
+    padding:8px;box-shadow:0 12px 28px rgba(11,20,36,0.18);min-width:190px;}
+  .qc-menu button{display:flex;align-items:center;gap:8px;text-align:left;border:0;background:transparent;
+    padding:9px 10px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;color:var(--text,#1f2937);}
+  .qc-menu button:hover{background:var(--bg-soft,#faf9f7);color:var(--orange);}
   table{width:100%;border-collapse:collapse;font-size:13px;}
   thead th{
     text-align:left;padding:10px 14px;font-size:10.5px;text-transform:uppercase;letter-spacing:0.5px;
@@ -575,12 +594,24 @@
 <div id="printArea" class="print-only"></div>
 <div class="bottom-scrollbar" id="bottomScrollbar"><div class="bottom-scrollbar-thumb" id="bottomScrollbarThumb"></div></div>
 
-<div class="mobile-bottom-nav" id="mobileBottomNav">
+<div class="mobile-bottom-nav" id="mobileBottomNav" style="display:none;">
   <div class="mbn-item" data-view="dashboard" onclick="go('dashboard')"><span class="ic">&#127968;</span><span>Home</span></div>
   <div class="mbn-item" data-view="customers" onclick="go('customers')"><span class="ic">&#128101;</span><span>Leads</span></div>
   <div class="mbn-item" data-view="tasks" onclick="go('tasks')"><span class="ic">&#9989;</span><span>Tasks</span></div>
   <div class="mbn-item" data-view="notifications" onclick="go('notifications')"><span class="ic">&#128276;</span><span>Alerts</span></div>
   <div class="mbn-item" onclick="UI.toggleSidebar()"><span class="ic">&#8942;</span><span>More</span></div>
+</div>
+
+<div class="qc-wrap" id="qcWrap" style="display:none;">
+  <div class="qc-menu" id="qcMenu" style="display:none;">
+    <button onclick="QuickCreate.go('leadCustomer')">&#128101; Lead / Customer</button>
+    <button onclick="QuickCreate.go('rateOffer')">&#128196; Rate / Offer</button>
+    <button onclick="QuickCreate.go('quotation')">&#128196; Quotation</button>
+    <button onclick="QuickCreate.go('order')">&#128230; Order</button>
+    <button onclick="QuickCreate.go('followup')">&#9200; Follow-up</button>
+    <button onclick="QuickCreate.go('payment')">&#128176; Payment</button>
+  </div>
+  <button class="qc-fab" id="qcFab" onclick="QuickCreate.toggle()" title="Quick Create">&#65291;</button>
 </div>
 
 <script>
@@ -1140,6 +1171,8 @@ const Auth = {
     await sb.auth.signOut();
     this.session = null;
     document.getElementById('appScreen').style.display='none';
+    document.getElementById('mobileBottomNav').style.display='none';
+    document.getElementById('qcWrap').style.display='none';
     document.getElementById('loginScreen').style.display='flex';
     document.getElementById('loginUser').value='';
     document.getElementById('loginPass').value='';
@@ -1351,6 +1384,8 @@ const App = {
   boot(){
     document.getElementById('loginScreen').style.display='none';
     document.getElementById('appScreen').style.display='block';
+    document.getElementById('mobileBottomNav').style.display='';
+    document.getElementById('qcWrap').style.display='';
     document.getElementById('userName').textContent = Auth.session.name || Auth.session.username;
     document.getElementById('userRole').textContent = Auth.session.role;
     document.getElementById('userAvatar').textContent = (Auth.session.name||Auth.session.username).slice(0,1).toUpperCase();
@@ -1722,6 +1757,61 @@ document.addEventListener('click', function(e){
   if(e.target.closest && e.target.closest('.gs-wrap')) return;
   const box = document.getElementById('globalSearchResults');
   if(box) box.style.display = 'none';
+});
+
+/* Global keyboard shortcuts: Ctrl/Cmd+K focuses Global Search from
+   anywhere in the app; Escape closes whichever overlay is currently
+   open (modal takes priority over drawer, since a modal is usually
+   opened on top of a drawer, e.g. editing a follow-up from inside the
+   customer drawer). Skips the browser's own Ctrl+K reflex only when
+   we actually have a search box to focus. */
+/* Global Quick Create - reuses each module's own openForm()/newDoc(),
+   never a second creation path. */
+const QuickCreate = {
+  open: false,
+  toggle(){
+    this.open = !this.open;
+    const menu = document.getElementById('qcMenu');
+    const fab = document.getElementById('qcFab');
+    if(menu) menu.style.display = this.open ? 'flex' : 'none';
+    if(fab) fab.classList.toggle('open', this.open);
+  },
+  close(){
+    this.open = false;
+    const menu = document.getElementById('qcMenu');
+    const fab = document.getElementById('qcFab');
+    if(menu) menu.style.display = 'none';
+    if(fab) fab.classList.remove('open');
+  },
+  go(action){
+    this.close();
+    if(action==='leadCustomer'){ go('customers'); Customers.openForm(null); }
+    else if(action==='rateOffer'){ go('rate_docs'); RatePDF.newDoc(); }
+    else if(action==='quotation'){ go('quotations'); Quotations.openForm(null); }
+    else if(action==='order'){ go('orders'); OrdersMgmt.openForm(null); }
+    else if(action==='followup'){ go('followupcentre'); Followups.openForm(null,null); }
+    else if(action==='payment'){ go('payments'); Payments.openForm(null); }
+  }
+};
+document.addEventListener('click', function(e){
+  if(e.target.closest && e.target.closest('.qc-wrap')) return;
+  QuickCreate.close();
+});
+
+document.addEventListener('keydown', function(e){
+  if((e.ctrlKey || e.metaKey) && e.key.toLowerCase()==='k'){
+    const inp = document.getElementById('globalSearchInput');
+    if(inp){ e.preventDefault(); inp.focus(); inp.select(); }
+    return;
+  }
+  if(e.key === 'Escape'){
+    const modal = document.getElementById('modalOverlay');
+    const drawer = document.getElementById('drawerOverlay');
+    if(modal && modal.style.display !== 'none' && modal.style.display !== ''){ UI.closeModal(); return; }
+    if(drawer && drawer.style.display !== 'none' && drawer.style.display !== ''){ UI.closeDrawer(); return; }
+    if(QuickCreate.open){ QuickCreate.close(); return; }
+    GlobalSearch.close();
+  }
 });
 
 
@@ -5780,8 +5870,32 @@ const RatePDF = {
         '<button class="btn btn-primary btn-sm" onclick="RatePDF.download()">&#11015; Export PDF</button>' +
         '<button class="icon-btn" title="Print" onclick="RatePDF.print()">&#128424;</button>' +
         (d.id && !isFinal ? '<button class="btn btn-outline btn-sm" onclick="RatePDF.markFinal()">&#10003; Mark Final</button>' : '') +
+        (isFinal ? '<button class="btn btn-outline btn-sm" onclick="RatePDF.convertToOrder()">&#8594; Convert to Order</button>' : '') +
         '<span class="rp-status-pill">' + statusBadge + (d.docNumber ? ' ' + E(d.docNumber) : '') + '</span>' +
       '</div>';
+  },
+  /* Creates a real record in the existing Orders module (not a parallel
+     order system) - items are summarised into Orders' single product-
+     name field since Orders doesn't carry line items the way a Rate/
+     Offer does; the full item breakdown remains on the source document. */
+  async convertToOrder(){
+    const d = this.draft;
+    if(!d.customerName){ UI.toast('This document has no customer to convert'); return; }
+    const productSummary = d.items.map(it=>it.itemName).filter(Boolean).join(', ') || 'See Rate/Offer '+(d.docNumber||d.id);
+    const rec = {
+      id: (Store.data.settings.ordPrefix||'ORD-')+String(Store.data.settings.ordNext||1).padStart(4,'0'),
+      customerId: d.customerId||'', orderDate: Util.todayISO(),
+      gemcNumber:'', orderFrom: 'Rate/Offer '+(d.docNumber||d.id),
+      productName: productSummary, party: d.customerName, phone: d.phone||'',
+      assignedTo: (Auth.session && (Auth.session.name||Auth.session.username))||'', status:'In Progress'
+    };
+    Store.data.orders.unshift(rec);
+    Store.data.settings.ordNext = (Store.data.settings.ordNext||1) + 1;
+    const ok1 = await Store.save('orders');
+    const ok2 = await Store.save('settings');
+    if(ok1 && ok2) await Activity.log('Rate/Offer converted to Order', (d.docNumber||d.id)+' \u2192 '+rec.id);
+    UI.toast('Order '+rec.id+' created');
+    go('orders');
   }
 };
 /* CustPicker invokes window[cbName] by contract. */
