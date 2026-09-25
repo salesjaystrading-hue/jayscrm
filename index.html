@@ -138,6 +138,27 @@
   .sidebar{
     width:236px;flex-shrink:0;background:linear-gradient(180deg, var(--navy) 0%, #0A1220 100%);color:#cfe0ef;
     display:flex;flex-direction:column;padding:16px 12px;
+    transition:width .18s ease;
+  }
+  /* Desktop-only collapsible sidebar: icon+label -> icon-only with native
+     tooltips (via the title attribute already on each nav-item). Mobile
+     keeps its own off-canvas slide behaviour untouched (media query below
+     always wins there regardless of this class). */
+  .sidebar.collapsed{width:64px;padding-left:8px;padding-right:8px;}
+  .sidebar.collapsed .side-brand .name,
+  .sidebar.collapsed .nav-section-label,
+  .sidebar.collapsed .nav-item span:not(.ic),
+  .sidebar.collapsed .nav-item .cnt,
+  .sidebar.collapsed .user-pill .info{display:none;}
+  .sidebar.collapsed .nav-item{justify-content:center;}
+  .sidebar.collapsed .side-brand{justify-content:center;padding-left:0;padding-right:0;}
+  .sidebar.collapsed .user-pill{justify-content:center;}
+  .side-collapse-btn{background:transparent;border:1px solid rgba(255,255,255,0.15);color:#a9bdd2;
+    border-radius:7px;width:26px;height:26px;cursor:pointer;flex-shrink:0;font-size:12px;margin-left:auto;}
+  .side-collapse-btn:hover{background:var(--navy-2);color:#fff;}
+  @media(min-width:881px){
+    body.sidebar-collapsed .bottom-scrollbar{left:64px;}
+    body.sidebar-collapsed .rp-sticky-actions{left:64px;}
   }
   .side-brand{display:flex;align-items:center;gap:10px;padding:6px 6px 18px;border-bottom:1px solid rgba(255,255,255,0.08);margin-bottom:12px;}
   .side-brand .mark{width:38px;height:38px;border-radius:10px;overflow:hidden;flex-shrink:0;background:#fff;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 14px rgba(235,90,40,0.25);}
@@ -202,6 +223,38 @@
   .card-head .hint{font-size:11.5px;color:var(--text-mute);}
 
   .stat-card{padding:18px;position:relative;overflow:hidden;}
+
+  /* Dashboard header: greeting + company branding banner */
+  .dash-head{display:grid;grid-template-columns:1fr 1.3fr;gap:16px;margin-bottom:16px;align-items:stretch;}
+  @media(max-width:900px){ .dash-head{grid-template-columns:1fr;} }
+  .dash-greet{display:flex;align-items:center;gap:14px;background:var(--card);border:1px solid var(--border);
+    border-radius:var(--radius);box-shadow:var(--shadow);padding:16px 20px;}
+  .dash-greet .wave{font-size:30px;}
+  .dash-greet h2{margin:0;font-size:19px;}
+  .dash-greet .sub{color:var(--text-mute,#6b7280);font-size:12.5px;margin-top:2px;}
+  .dash-brand-banner{display:flex;align-items:center;gap:14px;background:linear-gradient(135deg,var(--navy) 0%,#0A1220 100%);
+    color:#fff;border-radius:var(--radius);box-shadow:var(--shadow);padding:16px 20px;position:relative;overflow:hidden;}
+  .dash-brand-banner::after{content:'';position:absolute;right:-30px;top:-30px;width:120px;height:120px;
+    background:var(--orange);opacity:0.18;border-radius:50%;}
+  .dash-brand-banner img{width:44px;height:44px;border-radius:9px;background:#fff;object-fit:contain;padding:3px;flex-shrink:0;}
+  .dash-brand-banner .bb-name{font-weight:800;font-size:13.5px;}
+  .dash-brand-banner .bb-slogan{font-size:11px;color:#c8d6e8;font-style:italic;margin-top:1px;}
+  .dash-brand-banner .bb-contact{font-size:10.5px;color:#9fb3cc;margin-top:5px;}
+
+  /* KPI hero row */
+  .kpi-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-bottom:16px;}
+  @media(max-width:1200px){ .kpi-grid{grid-template-columns:repeat(3,1fr);} }
+  @media(max-width:640px){ .kpi-grid{grid-template-columns:repeat(2,1fr);} }
+  .kpi-card{padding:14px;}
+  .kpi-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;}
+  .kpi-ic{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:16px;}
+  .kpi-trend{font-size:10.5px;font-weight:700;padding:2px 6px;border-radius:6px;white-space:nowrap;}
+  .kpi-trend.up{color:var(--green,#16a34a);background:var(--green-light,#dcfce7);}
+  .kpi-trend.down{color:var(--red,#dc2626);background:var(--red-light,#fee2e2);}
+  .kpi-trend.neutral{color:var(--text-mute,#6b7280);background:#F1F3F6;}
+  .kpi-label{font-size:11px;color:var(--text-mute,#6b7280);font-weight:600;margin-bottom:2px;}
+  .kpi-val{font-size:19px;font-weight:800;margin-bottom:4px;}
+  .kpi-spark{line-height:0;}
   .stat-card .lbl{font-size:11px;color:var(--text-mute);font-weight:700;text-transform:uppercase;letter-spacing:0.4px;}
   .stat-card .val{font-size:26px;font-weight:800;margin-top:6px;letter-spacing:-0.5px;}
   .stat-card .delta{font-size:11.5px;margin-top:6px;color:var(--text-mute);}
@@ -536,6 +589,7 @@
       <div class="side-brand">
         <div class="mark"><img src="data:image/png;base64,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" alt="logo"></div>
         <div class="name">JAYS CRM PRO<span>Trading &amp; Business Solution</span></div>
+        <button class="side-collapse-btn" id="sideCollapseBtn" title="Collapse sidebar" onclick="UI.toggleSidebarCollapse()">&#10094;</button>
       </div>
       <div class="nav" id="navList"></div>
       <div class="side-foot">
@@ -1186,6 +1240,25 @@ const Auth = {
 const UI = {
   currentView: 'dashboard',
   toggleSidebar(){ document.getElementById('sidebar').classList.toggle('open'); },
+  /* Desktop-only collapse (icon-only with tooltips). Remembered across
+     sessions via localStorage, restored once at boot - never touches
+     the separate mobile off-canvas slide behaviour. */
+  toggleSidebarCollapse(){
+    const collapsed = document.getElementById('sidebar').classList.toggle('collapsed');
+    document.body.classList.toggle('sidebar-collapsed', collapsed);
+    const btn = document.getElementById('sideCollapseBtn');
+    if(btn){ btn.innerHTML = collapsed ? '&#10095;' : '&#10094;'; btn.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar'; }
+    try{ localStorage.setItem('jays_sidebar_collapsed', collapsed ? '1' : '0'); }catch(e){}
+  },
+  restoreSidebarCollapse(){
+    let collapsed = false;
+    try{ collapsed = localStorage.getItem('jays_sidebar_collapsed') === '1'; }catch(e){}
+    if(!collapsed) return;
+    document.getElementById('sidebar').classList.add('collapsed');
+    document.body.classList.add('sidebar-collapsed');
+    const btn = document.getElementById('sideCollapseBtn');
+    if(btn){ btn.innerHTML = '&#10095;'; btn.title = 'Expand sidebar'; }
+  },
   toast(msg){
     const t = document.getElementById('toast');
     t.textContent = msg;
@@ -1349,7 +1422,7 @@ function renderNav(){
     html += `<div class="nav-section-label">${sec.sec}</div>`;
     visibleItems.forEach(it=>{
       const cnt = navBadgeCount(it.id);
-      html += `<div class="nav-item ${UI.currentView===it.id?'active':''}" onclick="go('${it.id}')">
+      html += `<div class="nav-item ${UI.currentView===it.id?'active':''}" onclick="go('${it.id}')" title="${it.label.replace(/&amp;/g,'&')}">
         <span class="ic">${it.ic}</span><span>${it.label}</span>${cnt?`<span class="cnt">${cnt}</span>`:''}
       </div>`;
     });
@@ -1386,6 +1459,7 @@ const App = {
     document.getElementById('appScreen').style.display='block';
     document.getElementById('mobileBottomNav').style.display='';
     document.getElementById('qcWrap').style.display='';
+    UI.restoreSidebarCollapse();
     document.getElementById('userName').textContent = Auth.session.name || Auth.session.username;
     document.getElementById('userRole').textContent = Auth.session.role;
     document.getElementById('userAvatar').textContent = (Auth.session.name||Auth.session.username).slice(0,1).toUpperCase();
@@ -1491,9 +1565,40 @@ const BottomScroll = {
 /* =====================================================================
    SMALL CHART HELPERS (pure SVG, no deps)
 ===================================================================== */
+/* Buckets real records into the last N months by a date field, summing
+   (or counting) a value - used for both KPI trend sparklines and the
+   Sales Overview chart. Never fabricated: an empty/missing dataset just
+   produces zeros for that month, not a plausible-looking fake number. */
+function monthlyAggregate(records, dateField, months, valueFn){
+  const now = new Date();
+  const buckets = [];
+  for(let i=months-1; i>=0; i--){
+    const d = new Date(now.getFullYear(), now.getMonth()-i, 1);
+    buckets.push({ y:d.getFullYear(), m:d.getMonth(), label:d.toLocaleDateString('en-IN',{month:'short'}), value:0 });
+  }
+  records.forEach(r=>{
+    const raw = r[dateField];
+    if(!raw) return;
+    const d = new Date(raw);
+    if(isNaN(d)) return;
+    const b = buckets.find(x=>x.y===d.getFullYear() && x.m===d.getMonth());
+    if(b) b.value += (valueFn ? valueFn(r) : 1);
+  });
+  return buckets;
+}
+/* This-month vs last-month % change for a monthly bucket series (last
+   two buckets of a monthlyAggregate() call). Returns null when last
+   month was zero, since a percentage against zero is meaningless. */
+function momTrend(buckets){
+  if(buckets.length<2) return null;
+  const cur = buckets[buckets.length-1].value, prev = buckets[buckets.length-2].value;
+  if(prev===0) return null;
+  return Math.round(((cur-prev)/prev)*100);
+}
+
 const Chart = {
   colors: ['#EB5A28','#0E9F76','#3B82C4','#E8A33D','#8B5CF6','#14B8A6','#F472B6','#64748B'],
-  donut(data, size){
+  donut(data, size, centerLabel){
     size = size||150;
     const total = data.reduce((s,d)=>s+d.value,0) || 1;
     const r = size/2 - 14, cx=size/2, cy=size/2, circ = 2*Math.PI*r;
@@ -1511,8 +1616,74 @@ const Chart = {
         <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#EEF1F5" stroke-width="18"/>
         ${segs}
         <text x="${cx}" y="${cy-2}" text-anchor="middle" font-size="20" font-weight="800" fill="#152234">${total}</text>
-        <text x="${cx}" y="${cy+16}" text-anchor="middle" font-size="9" fill="#66768C">TOTAL</text>
+        <text x="${cx}" y="${cy+16}" text-anchor="middle" font-size="9" fill="#66768C">${Util.escapeHtml((centerLabel||'TOTAL').toUpperCase())}</text>
       </svg>${legend}</div>`;
+  },
+  /* Tiny inline trend indicator for a KPI card - real historical values
+     in, a compact SVG polyline out. No axis, no labels - just shape. */
+  sparkline(values, color, w, h){
+    w = w||72; h = h||26;
+    if(!values || values.length<2) return `<svg width="${w}" height="${h}"></svg>`;
+    const max = Math.max(...values), min = Math.min(...values);
+    const range = (max-min) || 1;
+    const stepX = w/(values.length-1);
+    const pts = values.map((v,i)=>{
+      const x = i*stepX;
+      const y = h - 3 - ((v-min)/range)*(h-6);
+      return [x,y];
+    });
+    const line = pts.map(p=>p.join(',')).join(' ');
+    const area = `0,${h} ` + line + ` ${w},${h}`;
+    const id = 'sk'+Math.random().toString(36).slice(2,8);
+    return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+      <defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="${color}" stop-opacity="0.35"/><stop offset="100%" stop-color="${color}" stop-opacity="0"/>
+      </linearGradient></defs>
+      <polygon points="${area}" fill="url(#${id})"/>
+      <polyline points="${line}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>`;
+  },
+  /* Real monthly line/area chart (e.g. Sales Overview). data = [{label,value}].
+     Shows a tooltip-style callout on the latest point, matching the last
+     bucket being "this month so far" rather than a completed period. */
+  line(data, height){
+    height = height||190;
+    const w = 640;
+    const padL = 46, padR = 16, padT = 20, padB = 26;
+    const plotW = w - padL - padR, plotH = height - padT - padB;
+    const max = Math.max(...data.map(d=>d.value), 1);
+    const niceMax = max <= 0 ? 1 : Math.ceil(max/Math.pow(10, Math.floor(Math.log10(max))||0)) * Math.pow(10, Math.floor(Math.log10(max))||0);
+    const stepX = data.length>1 ? plotW/(data.length-1) : 0;
+    const pts = data.map((d,i)=>{
+      const x = padL + i*stepX;
+      const y = padT + plotH - (d.value/niceMax)*plotH;
+      return {x,y,...d};
+    });
+    const line = pts.map(p=>`${p.x},${p.y}`).join(' ');
+    const area = `${padL},${padT+plotH} ` + line + ` ${padL+plotW},${padT+plotH}`;
+    const fmtY = v => v>=100000 ? (v/100000).toFixed(v%100000===0?0:1)+'L' : v>=1000 ? (v/1000).toFixed(0)+'K' : String(v);
+    const gridLines = [0,0.25,0.5,0.75,1].map(f=>{
+      const y = padT + plotH - f*plotH;
+      return `<line x1="${padL}" y1="${y}" x2="${padL+plotW}" y2="${y}" stroke="#EEF1F5" stroke-width="1"/>
+        <text x="${padL-8}" y="${y+3}" text-anchor="end" font-size="9.5" fill="#8A99AC">${fmtY(niceMax*f)}</text>`;
+    }).join('');
+    const xLabels = pts.map(p=>`<text x="${p.x}" y="${height-6}" text-anchor="middle" font-size="9.5" fill="#8A99AC">${Util.escapeHtml(p.label)}</text>`).join('');
+    const last = pts[pts.length-1];
+    const dots = pts.map(p=>`<circle cx="${p.x}" cy="${p.y}" r="${p===last?4:3}" fill="#fff" stroke="var(--orange)" stroke-width="2"/>`).join('');
+    const calloutW = 84, calloutX = Math.min(Math.max(last.x - calloutW/2, padL), padL+plotW-calloutW);
+    const callout = last ? `
+      <rect x="${calloutX}" y="${Math.max(last.y-38,2)}" width="${calloutW}" height="30" rx="7" fill="#152234"/>
+      <text x="${calloutX+calloutW/2}" y="${Math.max(last.y-38,2)+13}" text-anchor="middle" font-size="9" fill="#9fb3cc">${Util.escapeHtml(last.label)}</text>
+      <text x="${calloutX+calloutW/2}" y="${Math.max(last.y-38,2)+25}" text-anchor="middle" font-size="10.5" font-weight="700" fill="#fff">${Util.fmtMoney(last.value)}</text>` : '';
+    return `<svg width="100%" height="${height}" viewBox="0 0 ${w} ${height}" preserveAspectRatio="xMidYMid meet">
+      <defs><linearGradient id="salesFill" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="var(--orange)" stop-opacity="0.28"/><stop offset="100%" stop-color="var(--orange)" stop-opacity="0"/>
+      </linearGradient></defs>
+      ${gridLines}${xLabels}
+      <polygon points="${area}" fill="url(#salesFill)"/>
+      <polyline points="${line}" fill="none" stroke="var(--orange)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+      ${dots}${callout}
+    </svg>`;
   },
   bars(data, height){
     height = height||150;
@@ -1537,16 +1708,18 @@ Views.dashboard = function(){
   const c = Store.data.customers;
   const today = Util.todayISO();
   const me = (Auth.session && (Auth.session.name||Auth.session.username)) || '';
+  const s = Store.data.settings;
 
   const totalPending = Store.data.payments.filter(p=>p.status==='Pending').reduce((s,p)=>s+Number(p.amount||0),0);
   const totalPaid = Store.data.payments.filter(p=>p.status==='Paid').reduce((s,p)=>s+Number(p.amount||0),0);
   const fuToday = Store.data.followups.filter(f=>f.date===today && f.status!=='Done').length;
   const overdueFollowups = Store.data.followups.filter(f=>f.status!=='Done' && f.date && f.date<today);
-  const newLeadsToday = c.filter(x=>x.createdDate===today).length;
+  const activeLeads = c.filter(x=>!['Converted Customer','Not Interested','Closed Lost'].includes(x.status));
   const converted = c.filter(x=>x.status==='Converted Customer').length;
-  const quotationsAwaiting = Store.data.quotations.filter(q=>q.status==='Sent').length;
+  const openQuotations = Store.data.quotations.filter(q=>q.status==='Draft'||q.status==='Sent');
   const paymentsDue = Store.data.payments.filter(p=>p.status==='Pending' && p.followupDate && p.followupDate<=today);
   const openComplaints = Store.data.complaints.filter(x=>x.status!=='Solved');
+  const lowStockProducts = Store.data.products.filter(p=>!p.stock||Number(p.stock)<5);
   const bidsClosingSoon = (Store.data.bids||[]).filter(b=>{
     const d = bidDeadlineInfo(b.endDate).days;
     return d!==null && d>=0 && d<=3 && !BID_TERMINAL_STATUSES.includes(b.status);
@@ -1559,6 +1732,19 @@ Views.dashboard = function(){
   const attToday = (Store.data.attendance||[]).filter(a=>a.date===today);
   const attCounts = {Office:0, Home:0, Leave:0, Absent:0};
   attToday.forEach(a=>{ if(a.status==='Leave') attCounts.Leave++; else if(a.location==='Home') attCounts.Home++; else if(a.location==='Office') attCounts.Office++; else attCounts.Absent++; });
+
+  /* Real monthly series, 6 months, for KPI trends/sparklines and the
+     Sales Overview chart - every number below is aggregated from actual
+     records by their real date field, never fabricated to look nice. */
+  const salesSeries = monthlyAggregate(Store.data.payments, 'invoiceDate', 6, p=>Number(p.amount||0));
+  const pendingSeries = monthlyAggregate(Store.data.payments.filter(p=>p.status==='Pending'), 'invoiceDate', 6, p=>Math.max(Number(p.amount||0)-Number(p.amountPaid||0),0));
+  const leadsSeries = monthlyAggregate(c, 'createdDate', 6, ()=>1);
+  const quoteSeries = monthlyAggregate(Store.data.quotations, 'date', 6, ()=>1);
+  const totalSalesThisMonth = salesSeries[salesSeries.length-1].value;
+  const salesTrend = momTrend(salesSeries);
+  const pendingTrend = momTrend(pendingSeries);
+  const leadsTrend = momTrend(leadsSeries);
+  const quoteTrend = momTrend(quoteSeries);
 
   /* "My Action Required" - scoped to the signed-in user's own assigned
      records where that module tracks an assignee, otherwise shown
@@ -1579,12 +1765,46 @@ Views.dashboard = function(){
   const byStatus = {};
   c.forEach(x=>{ const k=x.status||'New Lead'; byStatus[k]=(byStatus[k]||0)+1; });
   const statusData = Object.keys(byStatus).map(k=>({label:k, value:byStatus[k]}));
-  const byAssigned = {};
-  c.forEach(x=>{ const k=x.assignedTo||'Unassigned'; byAssigned[k]=(byAssigned[k]||0)+1; });
-  const assignedData = Object.keys(byAssigned).map(k=>({label:k, value:byAssigned[k]}));
   const recentActivity = Store.data.activityLog.slice(0,6);
 
+  const hour = new Date().getHours();
+  const greeting = hour<12?'Good Morning':hour<17?'Good Afternoon':'Good Evening';
+
+  /* Compact KPI card: icon, real value, real trend (or an honest neutral
+     tag when a metric is a snapshot with no meaningful "vs last month"
+     percentage), and a sparkline built from the same real series. */
+  const kpiCard = (icon, iconBg, label, value, trend, series, sparkColor)=>`
+    <div class="card card-pad kpi-card">
+      <div class="kpi-top">
+        <div class="kpi-ic" style="background:${iconBg}20;color:${iconBg};">${icon}</div>
+        ${trend!==null && trend!==undefined
+          ? `<span class="kpi-trend ${trend>=0?'up':'down'}">${trend>=0?'&#9650;':'&#9660;'} ${Math.abs(trend)}%</span>`
+          : `<span class="kpi-trend neutral">current</span>`}
+      </div>
+      <div class="kpi-label">${label}</div>
+      <div class="kpi-val">${value}</div>
+      <div class="kpi-spark">${series ? Chart.sparkline(series.map(x=>x.value), sparkColor) : ''}</div>
+    </div>`;
+
   document.getElementById('content').innerHTML = `
+    <div class="dash-head">
+      <div class="dash-greet">
+        <div class="wave">&#128075;</div>
+        <div>
+          <h2>${greeting}, ${Util.escapeHtml(me||'there')}</h2>
+          <div class="sub">Here's what's happening with your business today.</div>
+        </div>
+      </div>
+      <div class="dash-brand-banner">
+        ${s.companyLogo ? `<img src="${s.companyLogo}" alt="">` : ''}
+        <div>
+          <div class="bb-name">${Util.escapeHtml(s.companyName||'JAYS TRADING AND BUSINESS SOLUTION')}</div>
+          ${s.companySlogan ? `<div class="bb-slogan">${Util.escapeHtml(s.companySlogan)}</div>` : ''}
+          <div class="bb-contact">${[s.companyAddress, s.companyEmail, s.companyPhone].filter(Boolean).map(Util.escapeHtml).join(' &middot; ')}</div>
+        </div>
+      </div>
+    </div>
+
     <div class="card card-pad" style="margin-bottom:16px;border-left:4px solid var(--orange);">
       <h3 style="margin:0 0 10px;font-size:14px;">&#128204; My Action Required ${actionItems.length?('<span class="badge badge-red">'+actionItems.length+'</span>'):''}</h3>
       ${actionItems.length ? `<div style="display:flex;flex-direction:column;gap:2px;max-height:260px;overflow:auto;">
@@ -1605,31 +1825,41 @@ Views.dashboard = function(){
       <button class="btn btn-outline btn-sm" onclick="go('bidsearch');BidSearch.openForm(null);">&#65291; GEM Bid</button>
     </div>
 
-    ${dashboardCardsHTML('Today at a Glance', [
+    <div class="kpi-grid">
+      ${kpiCard('&#128200;', '#0E9F76', 'Total Sales', Util.fmtMoney(totalSalesThisMonth), salesTrend, salesSeries, '#0E9F76')}
+      ${kpiCard('&#128179;', '#DC2626', 'Pending Payments', Util.fmtMoney(totalPending), pendingTrend, pendingSeries, '#DC2626')}
+      ${kpiCard('&#128101;', '#3B82C4', 'Active Leads', activeLeads.length, leadsTrend, leadsSeries, '#3B82C4')}
+      ${kpiCard('&#128196;', '#8B5CF6', 'Open Quotations', openQuotations.length, quoteTrend, quoteSeries, '#8B5CF6')}
+      ${kpiCard('&#128230;', '#E8A33D', 'Low Stock', lowStockProducts.length, null, null, '#E8A33D')}
+      ${kpiCard('&#9200;', '#F472B6', 'Overdue Follow-up', overdueFollowups.length, null, null, '#F472B6')}
+    </div>
+
+    ${dashboardCardsHTML('More at a Glance', [
       {label:'Follow-ups Today', value:fuToday},
-      {label:'Overdue Follow-ups', value:overdueFollowups.length, color: overdueFollowups.length?'var(--red,#dc2626)':undefined},
-      {label:'New Leads Today', value:newLeadsToday, color:'var(--blue,#2563eb)'},
-      {label:'Quotations Awaiting Response', value:quotationsAwaiting, color:'var(--amber,#d97706)'},
-      {label:'Payments Due', value:paymentsDue.length, color: paymentsDue.length?'var(--red,#dc2626)':undefined},
       {label:'Open Complaints', value:openComplaints.length, color: openComplaints.length?'var(--amber,#d97706)':undefined},
       {label:'GeM Bids Closing Soon', value:bidsClosingSoon.length, color: bidsClosingSoon.length?'var(--red,#dc2626)':undefined},
       {label:'Project Opportunities Needing Action', value:oppNeedingAction.length, color:'var(--blue,#2563eb)'},
       {label:'Orders In Progress', value:ordersInProgress.length},
-      {label:'Tasks Due Today', value:todaysTasks.length}
+      {label:'Tasks Due Today', value:todaysTasks.length},
+      {label:'Staff In Today', value:attCounts.Office+attCounts.Home},
+      {label:'Converted Customers', value:converted, color:'var(--green,#16a34a)'}
     ])}
 
-    <div class="grid grid-4" style="margin-bottom:16px;">
-      <div class="card stat-card"><div class="bar bar-orange"></div><span class="ic">&#128101;</span><div class="lbl">Total Leads &amp; Customers</div><div class="val">${c.length}</div><div class="delta">${converted} converted</div></div>
-      <div class="card stat-card"><div class="bar bar-blue"></div><span class="ic">&#128179;</span><div class="lbl">Payments Pending</div><div class="val">${Util.fmtMoney(totalPending)}</div><div class="delta">Collected so far: ${Util.fmtMoney(totalPaid)}</div></div>
-      <div class="card stat-card"><div class="bar bar-green"></div><span class="ic">&#128100;</span><div class="lbl">Staff Attendance Today</div><div class="val">${attCounts.Office+attCounts.Home}</div><div class="delta">Office ${attCounts.Office} &middot; Home ${attCounts.Home} &middot; Leave ${attCounts.Leave}</div></div>
-      <div class="card stat-card"><div class="bar bar-amber"></div><span class="ic">&#127942;</span><div class="lbl">Quotations Sent</div><div class="val">${Store.data.quotations.length}</div><div class="delta">${converted} converted to customer</div></div>
+    <div class="grid grid-2" style="margin-bottom:16px;align-items:start;">
+      <div class="card card-pad">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+          <h3 style="margin:0;font-size:14px;">Sales Overview</h3>
+          <span class="hint">Last 6 months</span>
+        </div>
+        ${Chart.line(salesSeries, 190)}
+      </div>
+      <div class="card card-pad">
+        <h3 style="margin:0 0 6px;font-size:14px;">Pipeline by Status</h3>
+        ${Chart.donut(statusData, 168, 'Total Leads')}
+      </div>
     </div>
 
     <div class="grid grid-2">
-      <div class="card card-pad">
-        <h3 style="margin:0 0 6px;font-size:14px;">Pipeline by Status</h3>
-        ${Chart.donut(statusData, 168)}
-      </div>
       <div class="card">
         <div class="card-head"><h3>Recent Activity</h3><span class="hint" style="cursor:pointer;" onclick="go('backup')">Full log &rarr;</span></div>
         <div style="padding:14px 18px;">
@@ -1641,6 +1871,24 @@ Views.dashboard = function(){
                 <div style="font-size:11.3px;color:var(--text-mute);">${Util.escapeHtml(a.details||'')} &middot; ${Util.escapeHtml(a.user)} &middot; ${Util.fmtDateTime(a.ts)}</div>
               </div>
             </div>`).join('') : '<div class="empty-state" style="padding:20px;"><div class="d">No activity recorded yet</div></div>'}
+        </div>
+      </div>
+      <div class="card card-pad">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+          <h3 style="margin:0;font-size:14px;">Recent Rate / Offers</h3>
+          <span class="hint" style="cursor:pointer;" onclick="go('rate_docs')">View All &rarr;</span>
+        </div>
+        <div class="table-wrap">
+          ${Store.data.rateDocs.length ? `<table><thead><tr><th>Offer No.</th><th>Customer</th><th>Total</th><th>Status</th></tr></thead><tbody>
+            ${Store.data.rateDocs.slice(0,5).map(r=>{
+              const saved = RatePDF.draft; RatePDF.draft = r; const tot = RatePDF.totals().grand; RatePDF.draft = saved;
+              return `<tr style="cursor:pointer;" onclick="go('rate_docs');RatePDF.loadDoc('${r.id}');">
+                <td class="mono cell-main">${Util.escapeHtml(r.docNumber||r.id)}</td>
+                <td class="cell-mute">${Util.escapeHtml(r.customerName||'-')}</td>
+                <td class="mono">${Util.fmtMoney(tot)}</td>
+                <td>${RatePDF.docStatusBadge(r.status)}</td>
+              </tr>`;
+            }).join('')}</tbody></table>` : `<div class="empty-state"><div class="ic">&#128196;</div><div class="t">No Rate / Offers yet</div><div class="d">Create your first Rate / Offer to get started.</div><button class="btn btn-primary btn-sm" onclick="go('rate_docs')">&#65291; New Rate / Offer</button></div>`}
         </div>
       </div>
     </div>
@@ -4396,7 +4644,11 @@ Views.bidsearch = ()=>BidSearch.render();
    stored template is only written by an explicit "Update Template".
 ===================================================================== */
 const RATE_DOC_TYPES = ['Rate Offer','Commercial Offer','Budgetary Quotation','Product Proposal','Government Offer','Price Estimate'];
-const RATE_DOC_STATUSES = ['Draft','Generated','Final','Cancelled'];
+/* Extended lifecycle, added alongside (never replacing) the original
+   four statuses - existing Draft/Generated/Final/Cancelled records are
+   untouched and remain perfectly valid; documents can now also move
+   through the fuller sales-tracking states below. */
+const RATE_DOC_STATUSES = ['Draft','Generated','Sent','Viewed','Negotiation','Accepted','Rejected','Expired','Final','Cancelled'];
 const RATE_THEMES = ['Corporate','Modern','Government Procurement','Minimal','Premium'];
 const RATE_THEME_COLORS = {
   'Corporate':[194,65,12], 'Modern':[37,99,235], 'Government Procurement':[22,101,52],
@@ -5505,8 +5757,9 @@ const RatePDF = {
     return list;
   },
   docStatusBadge(st){
-    return '<span class="badge badge-' +
-      (st==='Final'?'green':st==='Generated'?'blue':st==='Cancelled'?'gray':'amber') + '">' + Util.escapeHtml(st||'Draft') + '</span>';
+    const colors = {Draft:'gray', Generated:'blue', Sent:'blue', Viewed:'violet', Negotiation:'amber',
+      Accepted:'green', Rejected:'red', Expired:'gray', Final:'green', Cancelled:'gray'};
+    return '<span class="badge badge-' + (colors[st]||'amber') + '">' + Util.escapeHtml(st||'Draft') + '</span>';
   },
   /* Runs fn against a temporary copy of a saved document without disturbing
      whatever is currently open in the editor. */
@@ -5744,8 +5997,7 @@ const RatePDF = {
   renderEditor(){
     const d = this.draft, E = Util.escapeHtml;
     const terms = Store.data.rateTerms.filter(t=>d.termIds.includes(t.id));
-    const statusBadge = '<span class="badge badge-' +
-      (d.status==='Final'?'green':d.status==='Generated'?'blue':'amber') + '">' + E(d.status||'Draft') + '</span>';
+    const statusBadge = this.docStatusBadge(d.status);
     const isFinal = d.status === 'Final';
 
     document.getElementById('content').innerHTML =
@@ -5869,10 +6121,27 @@ const RatePDF = {
         '<button class="btn btn-outline btn-sm" onclick="RatePDF.preview()">&#128065; Preview</button>' +
         '<button class="btn btn-primary btn-sm" onclick="RatePDF.download()">&#11015; Export PDF</button>' +
         '<button class="icon-btn" title="Print" onclick="RatePDF.print()">&#128424;</button>' +
+        (d.id && !isFinal ? '<select style="padding:6px 8px;font-size:12.5px;border-radius:7px;" onchange="RatePDF.setStatus(this.value)" title="Change Status">' +
+          RATE_DOC_STATUSES.filter(s=>s!=='Cancelled').map(s=>'<option ' + (s===d.status?'selected':'') + '>' + s + '</option>').join('') +
+          '<option value="Cancelled" ' + (d.status==='Cancelled'?'selected':'') + '>Cancelled</option>' +
+        '</select>' : '') +
         (d.id && !isFinal ? '<button class="btn btn-outline btn-sm" onclick="RatePDF.markFinal()">&#10003; Mark Final</button>' : '') +
         (isFinal ? '<button class="btn btn-outline btn-sm" onclick="RatePDF.convertToOrder()">&#8594; Convert to Order</button>' : '') +
         '<span class="rp-status-pill">' + statusBadge + (d.docNumber ? ' ' + E(d.docNumber) : '') + '</span>' +
       '</div>';
+  },
+  /* Any status short of Final can be changed freely (Sent/Viewed/
+     Negotiation/Accepted/Rejected/Expired/Cancelled) - only "Final"
+     keeps its existing lock, unchanged, requiring a revision instead. */
+  async setStatus(newStatus){
+    const d = this.draft;
+    if(!d.id){ UI.toast('Save the document first'); return; }
+    const rec = Store.data.rateDocs.find(x=>x.id===d.id);
+    if(!rec){ UI.toast('Could not find this document to update'); return; }
+    rec.status = newStatus; d.status = newStatus; rec.updatedAt = new Date().toISOString();
+    const ok = await Store.save('rateDocs');
+    if(ok){ await Activity.log('Rate/Offer status changed', (d.docNumber||d.id)+' \u2192 '+newStatus); UI.toast('Status: '+newStatus); }
+    this.render();
   },
   /* Creates a real record in the existing Orders module (not a parallel
      order system) - items are summarised into Orders' single product-
