@@ -4691,6 +4691,9 @@ const RatePDF = {
       gstEnabled: !!(s.defaultGstEnabled),
       gstMode:'exclusive', gstScope:'intra', gstRate: Number(s.defaultGstRate)||18,
       termIds:[], extraNotes:'',
+      // Structured "Additional Information" - dynamic on the PDF: a field
+      // only ever appears there when the user has actually filled it in.
+      paymentTerms:'', deliveryTerms:'', warranty:'', gstNote:'',
       createdBy:(Auth.session && (Auth.session.name||Auth.session.username)) || 'System',
       createdAt:'', updatedAt:''
     };
@@ -4910,7 +4913,15 @@ const RatePDF = {
           let w = img.width, h = img.height;
           if(w>max||h>max){ const s = Math.min(max/w, max/h); w=Math.round(w*s); h=Math.round(h*s); }
           const cv = document.createElement('canvas'); cv.width=w; cv.height=h;
-          cv.getContext('2d').drawImage(img,0,0,w,h);
+          const ctx = cv.getContext('2d');
+          // Fill white FIRST: a transparent PNG drawn straight onto an
+          // untouched canvas renders its transparent areas as BLACK once
+          // flattened to JPEG (no alpha channel), not white/transparent -
+          // this is what actually keeps a transparent-background logo
+          // looking correct instead of gaining a black box around it.
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, w, h);
+          ctx.drawImage(img,0,0,w,h);
           resolve(cv.toDataURL('image/jpeg', quality));
         };
         img.onerror = ()=>reject(new Error('Not a readable image'));
@@ -4995,9 +5006,19 @@ const RatePDF = {
     cLines.forEach(l=>{ doc.text(String(l), tx, hy); hy += 4; });
 
     y = Math.max(hy + 3, y + Math.max(logoH, 28));
-    doc.setDrawColor(accent[0],accent[1],accent[2]); doc.setLineWidth(0.5);
-    doc.line(M, y, PW-M, y);
-    y += 6;
+    if(!minimal){
+      // Diagonal navy/accent stripe echoing the brand's angled motif,
+      // in place of a plain horizontal rule.
+      const navy = [11,20,36], stripeH = 3.4;
+      doc.setFillColor(navy[0],navy[1],navy[2]);
+      doc.triangle(M, y+stripeH, PW-M, y, M, y, 'F');
+      doc.setFillColor(accent[0],accent[1],accent[2]);
+      doc.triangle(M, y+stripeH, PW-M, y, PW-M, y+stripeH, 'F');
+    } else {
+      doc.setDrawColor(accent[0],accent[1],accent[2]); doc.setLineWidth(0.5);
+      doc.line(M, y, PW-M, y);
+    }
+    y += 8;
 
     /* --- document title, on a soft accent banner for a more premium look --- */
     const titleH = 9;
@@ -5062,7 +5083,8 @@ const RatePDF = {
     /* --- items table. GST columns exist ONLY when gstEnabled.
        A Photo column is present only when at least one item has an image;
        didDrawCell paints the actual image (AutoTable cells can't hold
-       image data as cell text). Specifications get their own column.
+       image data as cell text). Specifications print under their own
+       "Description" column heading.
 
        FIX: column headers and column widths used to be built as two
        separate lists that had to stay in sync by hand - they didn't,
@@ -5080,8 +5102,8 @@ const RatePDF = {
       columns = [
         {header:'S.No.', width:8, halign:'center'},
         {header:'Photo', width:14, minCellHeight:14},
-        {header:'Item / Description', width:38},
-        {header:'Specifications', width:36},
+        {header:'Item', width:38},
+        {header:'Description', width:36},
         {header:'Qty', width:10, halign:'right'},
         {header:'Unit', width:12},
         {header:'Rate', width:18, halign:'right'},
@@ -5093,8 +5115,8 @@ const RatePDF = {
       columns = [
         {header:'S.No.', width:9, halign:'center'},
         {header:'Photo', width:16, minCellHeight:16},
-        {header:'Item / Description', width:36},
-        {header:'Specifications', width:36},
+        {header:'Item', width:36},
+        {header:'Description', width:36},
         {header:'Qty', width:11, halign:'right'},
         {header:'Unit', width:13},
         {header:'Rate', width:22, halign:'right'},
@@ -5104,8 +5126,8 @@ const RatePDF = {
     } else if(!hasAnyImage && gst){
       columns = [
         {header:'S.No.', width:9, halign:'center'},
-        {header:'Item / Description', width:38},
-        {header:'Specifications', width:38},
+        {header:'Item', width:38},
+        {header:'Description', width:38},
         {header:'Qty', width:11, halign:'right'},
         {header:'Unit', width:13},
         {header:'Rate', width:20, halign:'right'},
@@ -5116,8 +5138,8 @@ const RatePDF = {
     } else {
       columns = [
         {header:'S.No.', width:9, halign:'center'},
-        {header:'Item / Description', width:44},
-        {header:'Specifications', width:44},
+        {header:'Item', width:44},
+        {header:'Description', width:44},
         {header:'Qty', width:12, halign:'right'},
         {header:'Unit', width:14},
         {header:'Rate', width:24, halign:'right'},
@@ -5187,9 +5209,37 @@ const RatePDF = {
     sumRows.push(['Grand Total', this.money(t.grand)]);
 
     if(y > PH - 55){ doc.addPage(); y = 24; }
+    const summaryStartY = y;
+
+    /* --- Additional Information: fully dynamic, one row per field that
+       actually has a value - never a fixed/mandatory set of boxes. --- */
+    const infoFields = [
+      ['Payment Terms', d.paymentTerms], ['Delivery Time', d.deliveryTerms],
+      ['Warranty', d.warranty], ['GST', d.gstNote]
+    ].filter(([,v])=>String(v||'').trim());
+    if(infoFields.length){
+      const infoW = PW - M*2 - 82;
+      doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(30);
+      doc.text('ADDITIONAL INFORMATION', M, y+3);
+      let iy = y + 9;
+      const colHalf = infoW/2;
+      infoFields.forEach(([label,val], idx)=>{
+        const col = idx % 2, row = Math.floor(idx/2);
+        const bx = M + col*(colHalf+4), by = iy + row*15;
+        doc.setFillColor(accent[0],accent[1],accent[2]);
+        doc.circle(bx+3, by+2.5, 2.6, 'F');
+        doc.setFont('helvetica','bold'); doc.setFontSize(7.6); doc.setTextColor(30);
+        doc.text(String(label), bx+8, by+1.5);
+        doc.setFont('helvetica','normal'); doc.setFontSize(7.6); doc.setTextColor(80);
+        doc.splitTextToSize(String(val), colHalf-10).slice(0,2).forEach((l,li)=>doc.text(l, bx+8, by+5.5+li*3.4));
+      });
+      y = iy + Math.ceil(infoFields.length/2)*15;
+    }
+    const infoBottomY = y;
+
     const sumW = 76;
     doc.autoTable({
-      body: sumRows, startY: y, margin:{left: PW - M - sumW, right: M},
+      body: sumRows, startY: summaryStartY, margin:{left: PW - M - sumW, right: M},
       theme:'plain', tableWidth: sumW,
       styles:{fontSize:8.6, cellPadding:1.7},
       columnStyles:{0:{cellWidth:44}, 1:{cellWidth:32, halign:'right'}},
@@ -5201,7 +5251,7 @@ const RatePDF = {
         }
       }
     });
-    y = doc.lastAutoTable.finalY + 5;
+    y = Math.max(infoBottomY, doc.lastAutoTable.finalY) + 5;
 
     if(y > PH - 40){ doc.addPage(); y = 24; }
     doc.setFont('helvetica','bold'); doc.setFontSize(8.4); doc.setTextColor(40);
@@ -5247,28 +5297,151 @@ const RatePDF = {
     doc.line(sx, y+21, sx+56, y+21);
     doc.setFontSize(7.8); doc.setTextColor(90);
     doc.text('Authorised Signatory', sx, y+25);
-    y += 32;
 
-    /* --- "also on GeM" closing note, drawn once on the last page.
-       Uses a plain text wordmark, not the official GeM logo artwork -
-       we're not reproducing government branding, just naming the portal. --- */
-    if(y > PH - 34){ doc.addPage(); y = 24; }
+    /* =====================================================================
+       PAGE 2+: PRODUCT DETAILS & IMAGES
+       A card grid, one per item, auto-flowing across as many pages as the
+       item count needs - never a fixed page count. A missing image gets a
+       clean placeholder box instead of ever breaking the PDF. --- */
+    if(d.items.length){
+      doc.addPage();
+      let gy = 24;
+      doc.setFont('helvetica','bold'); doc.setFontSize(12.5); doc.setTextColor(accent[0],accent[1],accent[2]);
+      doc.text('PRODUCT DETAILS & IMAGES', M, gy);
+      doc.setDrawColor(accent[0],accent[1],accent[2]); doc.setLineWidth(0.4);
+      doc.line(M, gy+2, PW-M, gy+2);
+      gy += 10;
+
+      const cols = 3, gap = 6;
+      const cardW = (PW - M*2 - gap*(cols-1)) / cols;
+      const cardH = 62, imgH = 34;
+      const maxRowsPerPage = Math.max(1, Math.floor((PH - gy - 18) / (cardH+gap)));
+      let col = 0, row = 0;
+
+      d.items.forEach((it,i)=>{
+        if(row >= maxRowsPerPage){ doc.addPage(); gy = 24; row = 0; col = 0; }
+        const cx = M + col*(cardW+gap);
+        const cy = gy + row*(cardH+gap);
+        doc.setDrawColor(225); doc.setLineWidth(0.2);
+        doc.roundedRect(cx, cy, cardW, cardH, 1.5, 1.5, 'S');
+        let imageDrawn = false;
+        if(it.imageUrl){
+          try{ doc.addImage(it.imageUrl, 'JPEG', cx+3, cy+3, cardW-6, imgH); imageDrawn = true; }
+          catch(e){ console.warn('product gallery image skipped', e); }
+        }
+        if(!imageDrawn){
+          doc.setFillColor(246,247,249); doc.rect(cx+3, cy+3, cardW-6, imgH, 'F');
+          doc.setDrawColor(220); doc.rect(cx+3, cy+3, cardW-6, imgH, 'S');
+          doc.setFont('helvetica','normal'); doc.setFontSize(7); doc.setTextColor(170);
+          doc.text('No Image', cx+cardW/2, cy+3+imgH/2+1, {align:'center'});
+        }
+        let ty = cy + imgH + 8;
+        doc.setFont('helvetica','bold'); doc.setFontSize(7.6); doc.setTextColor(30);
+        doc.splitTextToSize(it.itemName||'Item '+(i+1), cardW-6).slice(0,1).forEach(l=>doc.text(l, cx+3, ty));
+        ty += 4;
+        const specLine = [it.brand, it.model].filter(Boolean).join(' ') || String(it.specs||'').split('\n')[0] || '';
+        if(specLine){
+          doc.setFont('helvetica','normal'); doc.setFontSize(6.6); doc.setTextColor(110);
+          doc.splitTextToSize(specLine, cardW-6).slice(0,1).forEach(l=>doc.text(l, cx+3, ty));
+        }
+        doc.setFont('helvetica','bold'); doc.setFontSize(7); doc.setTextColor(accent[0],accent[1],accent[2]);
+        doc.text('Qty: '+this.num(it.qty)+' '+(it.unit||'Nos')+'  \u2022  '+this.rupee(it.rate), cx+3, cy+cardH-3);
+        col++;
+        if(col>=cols){ col=0; row++; }
+      });
+    }
+
+    /* =====================================================================
+       FINAL PAGE: TERMS & CONDITIONS + COMPANY BRANDING
+       Always the last page, however many product-gallery pages preceded
+       it. No stock photograph - a geometric navy/orange band built from
+       the company's own real, already-configured details, so it renders
+       correctly even with zero image assets on file. --- */
+    doc.addPage();
+    let fy = 24;
+    doc.setFont('helvetica','bold'); doc.setFontSize(13); doc.setTextColor(accent[0],accent[1],accent[2]);
+    doc.text('TERMS & CONDITIONS', M, fy); fy += 3;
+    doc.setDrawColor(accent[0],accent[1],accent[2]); doc.setLineWidth(0.5);
+    doc.line(M, fy, M+50, fy); fy += 7;
+
+    doc.setFont('helvetica','normal'); doc.setFontSize(8.5); doc.setTextColor(60);
+    const closingTerms = Store.data.rateTerms.filter(x=>d.termIds.includes(x.id) && x.isActive !== false);
+    const bandH = 38;
+    if(closingTerms.length){
+      closingTerms.forEach((tm,i)=>{
+        const line = (i+1) + '. ' + tm.title + ': ' + tm.body;
+        doc.splitTextToSize(line, PW - M*2).forEach(l=>{
+          if(fy > PH-bandH-16){ doc.addPage(); fy = 24; }
+          doc.text(l, M, fy); fy += 4.3;
+        });
+      });
+    } else {
+      doc.setTextColor(140); doc.text('No specific terms selected for this offer.', M, fy); fy += 4.3;
+    }
+    fy += 5;
+
+    if(infoFields.length){
+      if(fy > PH-bandH-30){ doc.addPage(); fy = 24; }
+      doc.setFont('helvetica','bold'); doc.setFontSize(9.5); doc.setTextColor(30);
+      doc.text('Payment, Delivery & Warranty', M, fy); fy += 6;
+      doc.setFont('helvetica','normal'); doc.setFontSize(8.3);
+      infoFields.forEach(([label,val])=>{
+        if(fy > PH-bandH-10){ doc.addPage(); fy = 24; }
+        doc.setTextColor(30); doc.text(String(label)+':', M, fy);
+        doc.setTextColor(80);
+        doc.splitTextToSize(String(val), PW-M*2-42).forEach((l,li)=>doc.text(l, M+40, fy+li*4));
+        fy += 5;
+      });
+      fy += 4;
+    }
+
+    if(fy > PH-bandH-30){ doc.addPage(); fy = 24; }
+    doc.setFont('helvetica','italic'); doc.setFontSize(12); doc.setTextColor(accent[0],accent[1],accent[2]);
+    doc.text('Thank You!', M, fy); fy += 5.5;
+    doc.setFont('helvetica','normal'); doc.setFontSize(8.5); doc.setTextColor(80);
+    doc.text('We appreciate your business and look forward to serving you again.', M, fy); fy += 8;
+
+    /* "also on GeM" note - a plain text wordmark, not the official GeM
+       logo artwork; we're naming the portal, not reproducing its branding. */
+    if(fy > PH-bandH-20){ doc.addPage(); fy = 24; }
     const gemW = PW - M*2, gemH = 16;
     doc.setFillColor(minimal ? 250 : accent[0], minimal ? 250 : accent[1], minimal ? 250 : accent[2]);
-    if(minimal){ doc.setDrawColor(210); doc.rect(M, y, gemW, gemH, 'S'); }
-    else doc.roundedRect(M, y, gemW, gemH, 2, 2, 'F');
+    if(minimal){ doc.setDrawColor(210); doc.rect(M, fy, gemW, gemH, 'S'); }
+    else doc.roundedRect(M, fy, gemW, gemH, 2, 2, 'F');
     const badgeColor = minimal ? [30,30,30] : [255,255,255];
-    doc.setDrawColor(badgeColor[0],badgeColor[1],badgeColor[2]);
-    doc.setLineWidth(0.6);
-    doc.roundedRect(M+4, y+3, 20, 10, 1.5, 1.5, 'S');
-    doc.setFont('helvetica','bold'); doc.setFontSize(9);
-    doc.setTextColor(badgeColor[0],badgeColor[1],badgeColor[2]);
-    doc.text('GeM', M+14, y+9.5, {align:'center'});
-    doc.setFont('helvetica','bold'); doc.setFontSize(9);
-    doc.text('Our products are also available on GeM (Government e-Marketplace)', M+29, y+7);
+    doc.setDrawColor(badgeColor[0],badgeColor[1],badgeColor[2]); doc.setLineWidth(0.6);
+    doc.roundedRect(M+4, fy+3, 20, 10, 1.5, 1.5, 'S');
+    doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(badgeColor[0],badgeColor[1],badgeColor[2]);
+    doc.text('GeM', M+14, fy+9.5, {align:'center'});
+    doc.text('Our products are also available on GeM (Government e-Marketplace)', M+29, fy+7);
     doc.setFont('helvetica','normal'); doc.setFontSize(8);
-    doc.text('Search for us on gem.gov.in for direct government procurement', M+29, y+12.5);
-    y += gemH + 6;
+    doc.text('Search for us on gem.gov.in for direct government procurement', M+29, fy+12.5);
+
+    /* Decorative branded band, pinned to the bottom of this closing page
+       only - deliberately stops short of the universal footer zone below
+       (drawn once, after every page exists) so that footer text always
+       stays legible on a plain background on every page, including this one. */
+    if(!minimal){
+      const bandY = PH - bandH - 15;
+      doc.setFillColor(11,20,36);
+      doc.rect(0, bandY, PW, bandH, 'F');
+      doc.setFillColor(accent[0],accent[1],accent[2]);
+      doc.triangle(0, bandY, 34, bandY, 0, bandY+bandH, 'F');
+      doc.setFont('helvetica','bold'); doc.setFontSize(10); doc.setTextColor(255);
+      doc.text(String(s.companyName||'JAYS TRADING AND BUSINESS SOLUTION').toUpperCase(), M, bandY+10);
+      if(s.companySlogan){
+        doc.setFont('helvetica','italic'); doc.setFontSize(7.4); doc.setTextColor(200);
+        doc.text(String(s.companySlogan), M, bandY+15);
+      }
+      doc.setFont('helvetica','normal'); doc.setFontSize(7.2); doc.setTextColor(185);
+      const contactLine = [s.companyAddress, s.companyEmail, s.companyPhone].filter(Boolean).join('   \u2022   ');
+      doc.splitTextToSize(contactLine, PW-M*2-70).slice(0,2).forEach((l,i)=>doc.text(l, M, bandY+20+i*4));
+      doc.setFont('helvetica','bold'); doc.setFontSize(8); doc.setTextColor(255);
+      doc.text('Your Trusted Partner', PW-M, bandY+9, {align:'right'});
+      doc.text('in Business Growth', PW-M, bandY+14, {align:'right'});
+      doc.setFont('helvetica','normal'); doc.setFontSize(6.8); doc.setTextColor(220);
+      ['Quality Products','Best Prices','Reliable Support'].forEach((t,i)=>doc.text('\u2713 '+t, PW-M, bandY+20+i*4.2, {align:'right'}));
+    }
 
     /* --- footers: slim band + page numbers on every page --- */
     const pages = doc.internal.getNumberOfPages();
@@ -6083,8 +6256,21 @@ const RatePDF = {
           '<button class="btn btn-outline btn-sm" onclick="RatePDF.addItem()">&#65291; Add Item</button>' +
         '</div>' +
 
+        '<div class="card card-pad" style="margin-bottom:14px;">' +
+          '<div class="wa-step">Step 5 &middot; Additional Information</div>' +
+          '<div class="hint" style="margin-bottom:10px;">Shown on the PDF only when filled in \u2014 leave any of these blank to omit them.</div>' +
+          '<div class="form-row">' +
+            '<div class="field"><label>Payment Terms</label><input value="' + E(d.paymentTerms) + '" placeholder="e.g. 50% Advance, 50% on Delivery" oninput="RatePDF.upd(\'paymentTerms\',this.value)"></div>' +
+            '<div class="field"><label>Delivery Time</label><input value="' + E(d.deliveryTerms) + '" placeholder="e.g. 7-10 Working Days" oninput="RatePDF.upd(\'deliveryTerms\',this.value)"></div>' +
+          '</div>' +
+          '<div class="form-row">' +
+            '<div class="field"><label>Warranty</label><input value="' + E(d.warranty) + '" placeholder="e.g. As per Manufacturer" oninput="RatePDF.upd(\'warranty\',this.value)"></div>' +
+            '<div class="field"><label>GST Note</label><input value="' + E(d.gstNote) + '" placeholder="e.g. Inclusive" oninput="RatePDF.upd(\'gstNote\',this.value)"></div>' +
+          '</div>' +
+        '</div>' +
+
         '<div class="card card-pad">' +
-          '<div class="wa-step">Step 5 &middot; Terms</div>' +
+          '<div class="wa-step">Step 6 &middot; Terms</div>' +
           '<div class="toolbar" style="margin:0 0 10px;">' +
             '<button class="btn btn-outline btn-sm" onclick="RatePDF.openTerms()">Choose Terms (' + terms.length + ' selected)</button></div>' +
           (terms.length
@@ -8013,7 +8199,15 @@ const SettingsView = {
           let w = img.width, h = img.height;
           if(w>max||h>max){ const sc = Math.min(max/w, max/h); w=Math.round(w*sc); h=Math.round(h*sc); }
           const cv = document.createElement('canvas'); cv.width=w; cv.height=h;
-          cv.getContext('2d').drawImage(img,0,0,w,h);
+          const ctx = cv.getContext('2d');
+          // Fill white FIRST: a transparent PNG drawn straight onto an
+          // untouched canvas renders its transparent areas as BLACK once
+          // flattened to JPEG (no alpha channel), not white/transparent -
+          // this is what actually keeps a transparent-background logo
+          // looking correct instead of gaining a black box around it.
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, w, h);
+          ctx.drawImage(img,0,0,w,h);
           resolve(cv.toDataURL('image/jpeg', quality));
         };
         img.onerror = ()=>reject(new Error('Not a readable image'));
