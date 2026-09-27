@@ -557,6 +557,23 @@
   .bid-stage-flow .stg.active{background:var(--orange);color:#fff;}
   .bid-stage-flow .stg.done{background:var(--accent-light);color:var(--accent-dark);}
   .bid-stage-flow .arrow-sep{color:var(--text-mute);font-size:11px;}
+
+  /* ---------- BID DOCUMENTS (Government Business → Bid Documents) ---------- */
+  .bd-preview-page{background:#fff;border:1px solid var(--border);border-radius:8px;padding:22px 24px;font-size:12.3px;line-height:1.55;color:#222;}
+  .bd-preview-head{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap;}
+  .bd-preview-logo{max-height:56px;max-width:110px;object-fit:contain;}
+  .bd-preview-logo-empty{width:70px;height:50px;}
+  .bd-preview-companyblock{text-align:right;font-size:11.3px;color:#444;}
+  .bd-preview-companyname{font-weight:800;color:var(--navy);font-size:15px;margin-bottom:4px;}
+  .bd-preview-date{text-align:right;font-size:11.3px;color:#555;margin-top:8px;}
+  .bd-preview-divider{height:3px;margin:10px 0 14px;background:linear-gradient(90deg,var(--navy) 0 70%, var(--orange) 70% 100%);border-radius:2px;}
+  .bd-preview-title{text-align:center;font-weight:800;font-size:14.5px;text-decoration:underline;margin-bottom:6px;}
+  .bd-preview-subtitle{text-align:center;font-size:12px;color:#555;margin-bottom:12px;}
+  .bd-preview-body{margin-top:6px;}
+  .bd-preview-body table{width:100%;border-collapse:collapse;}
+  .bd-preview-closing{margin-top:18px;}
+  .bd-preview-sigbox{margin-top:8px;font-size:11.3px;color:#333;}
+  .bd-tpl-card{cursor:default;}
 </style>
 </head>
 <body>
@@ -868,7 +885,7 @@ const Store = {
     gemcrac: [], orders: [], complaints: [], bids: [], waTemplates: [], waHistory: [],
     rateTemplates: [], rateDocs: [], rateTerms: [], rateDocTemplates: [],
     oppProjects: [], oppTracking: {}, oppProducts: [], oppImportHistory: [], oppKeywordGroups: [],
-    attendance: [], leaveRequests: []
+    attendance: [], leaveRequests: [], bidDocs: []
   },
   /* One-time, non-destructive lift of the old WhatsApp rate templates into
      the Rate Template Library. The source waTemplates rows are NEVER deleted
@@ -915,6 +932,7 @@ const Store = {
       cmpPrefix: 'CMP-', cmpNext: 1,
       bidPrefix: 'BID-', bidNext: 1,
       ratePrefix: 'RO-', rateNext: 1,
+      bidDocPrefix: 'BD-', bidDocNext: 1,
       companyAddress: '', companyWebsite: '', companyGSTIN: '', companyUdyam: '',
       companyLogo: '', signatureImage: '',
       defaultGstEnabled: false, defaultGstRate: 18, defaultValidityDays: 15,
@@ -981,6 +999,7 @@ const Store = {
     this.data.oppKeywordGroups = await this.loadKey('jays_oppkeywordgroups', []);
     this.data.attendance = await this.loadKey('jays_attendance', []);
     this.data.leaveRequests = await this.loadKey('jays_leaverequests', []);
+    this.data.bidDocs = await this.loadKey('jays_biddocs', []);
     await this.migrateWaTemplates();
 
     const settingsFailedBefore = false;
@@ -1315,6 +1334,7 @@ const NAV = [
   {sec:'Government Business', items:[
     {id:'oppfinder', ic:'&#127963;', label:'Project Opportunities'},
     {id:'bidsearch', ic:'&#128269;', label:'GeM Bid Search'},
+    {id:'biddocs', ic:'&#128196;', label:'Bid Documents'},
     {id:'gemcrac', ic:'&#128203;', label:'GEM CRAC'},
   ]},
   {sec:'Operations', items:[
@@ -1347,6 +1367,7 @@ const PAGE_META = {
   outstanding:['Outstanding','Unpaid balances by party'],
   inventory:['Inventory','Stock levels across the product catalog'],
   bidsearch:['GeM Bid Search','Find, score and track government procurement opportunities'],
+  biddocs:['Bid Documents','Build ATC, Beneficial Ownership, Financial Standing, Make in India, OEM Authorization and other bid letters from reusable templates'],
   notifications:['Notifications','Everything that needs your attention, in one place'],
   products:['Product Master','Catalog & pricing'],
   orders:['Orders','Track orders from placement to payment'],
@@ -1408,6 +1429,9 @@ function navBadgeCount(id){
   }
   if(id==='attendance'){
     return Auth.isAdmin() ? Store.data.leaveRequests.filter(l=>l.status==='Pending').length : 0;
+  }
+  if(id==='biddocs'){
+    return Store.data.bidDocs.filter(d=>d.status==='Draft').length;
   }
   return 0;
 }
@@ -7841,7 +7865,8 @@ const Backup = {
       oppProjects: Store.data.oppProjects, oppTracking: Store.data.oppTracking,
       oppProducts: Store.data.oppProducts, oppImportHistory: Store.data.oppImportHistory,
       oppKeywordGroups: Store.data.oppKeywordGroups,
-      attendance: Store.data.attendance, leaveRequests: Store.data.leaveRequests
+      attendance: Store.data.attendance, leaveRequests: Store.data.leaveRequests,
+      bidDocs: Store.data.bidDocs
     };
   },
   downloadJSON(){
@@ -7868,10 +7893,10 @@ const Backup = {
     try{
       const text = await file.text();
       const data = JSON.parse(text);
-      ['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests'].forEach(k=>{
+      ['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs'].forEach(k=>{
         if(data[k]!==undefined) Store.data[k] = data[k];
       });
-      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests'].map(k=>Store.save(k)));
+      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs'].map(k=>Store.save(k)));
       await Activity.log('Data restored', 'Restored from backup file '+file.name);
       UI.toast('Data restored successfully');
       Router.render('backup');
@@ -7992,6 +8017,905 @@ const Backup = {
   }
 };
 Views.backup = ()=>Backup.render();
+
+/* =====================================================================
+   BID DOCUMENTS — Government Business → Bid Documents
+   Converts the JAYS reference bid-letter formats (ATC Acceptance,
+   Beneficial Ownership Declaration, Bidder Financial Standing Letter,
+   Make in India Declaration, OEM Authorization Letter, Bid Covering
+   Letter, and a blank Custom Bid Letter) into reusable, fully editable
+   templates. This is NOT a document-upload feature — users pick a
+   template, edit structured fields/sections, preview, save and
+   download/print a PDF. Company details default from Settings but are
+   edited only on the document (Settings itself is never touched here).
+   Store.data.bidDocs (jays_biddocs) holds every saved/drafted document.
+===================================================================== */
+function bdSection(key,label,kind,data){
+  return {id:'S'+Math.random().toString(36).slice(2,9), key, label, kind, visible:true, data};
+}
+const BIDDOC_STATUSES = ['Draft','Completed'];
+const BIDDOC_TEMPLATES = {
+  atc: {
+    label:'ATC Acceptance', short:'ATC',
+    desc:'Additional Terms & Conditions acceptance letter for a GeM bid.',
+    title:'TO WHOM IT MAY CONCERN', subtitle:'',
+    sections:()=>[
+      bdSection('body','Acceptance Body','lines',[
+        'We, M/s {{companyName}}, hereby acknowledge and accept all the additional terms and conditions associated with the above mentioned GeM Bid No. {{bidNumber}}, as specified by the buyer in the bid documentation. We understand that these additional terms and conditions are an integral part of the bidding process and are essential for the successful execution of the contract.',
+        'By submitting our bid for the aforementioned GeM Bid, we affirm our commitment to comply with and abide by all the additional terms and conditions outlined by the buyer. We fully understand that failure to adhere to these terms and conditions may result in disqualification or termination of the contract.',
+        'We hereby affix our signature to this undertaking as a testament to our acceptance and commitment to comply with all the additional terms and conditions of the GeM Bid.'
+      ])
+    ]
+  },
+  boi: {
+    label:'Beneficial Ownership Declaration', short:'BOI',
+    desc:'Land-border-restriction / beneficial ownership self-declaration for GeM.',
+    title:'BENEFICIAL OWNERSHIP DECLARATION', subtitle:'',
+    sections:()=>[
+      bdSection('entity','Entity','fields',[{label:'Name of the Entity / Seller / Service Provider', value:'{{companyName}}'}]),
+      bdSection('declarations','Declarations','numbered',[
+        {text:'I hereby declare that I have read and understood clause 26 of GeM GTC regarding Compliance of Restrictions under Rule 144 (xi) of GFR 2017 which places restrictions on procurement from a bidder of a country which shares a land border with India. I hereby declare that the above-named Entity / Seller / Service Provider is not required to have any registration with the competent authority as per provisions of clause 26 of GeM GTC.', subitems:[]},
+        {text:'It is certified that the above-named Entity / Seller / Service Provider is not:', subitems:[
+          'An entity incorporated, established, or registered in a country sharing land border with India; or',
+          'A subsidiary of an entity incorporated, established, or registered in a country sharing land border with India; or',
+          'An entity substantially controlled through entities incorporated, established, or registered in a country sharing land border with India; or',
+          'An entity whose beneficial owner* is situated in a country sharing land border with India; or',
+          'An Indian (or other) agent or reseller of such an entity; or',
+          'A natural person who is a citizen of a country sharing land border with India; or',
+          'A consortium or joint venture where any member of the consortium or joint venture falls under any of the above'
+        ]},
+        {text:'I fully understand that any false declaration and non-compliance of the above would be a ground for immediate termination of any and all contracts and further legal action in accordance with the laws.', subitems:[]},
+        {text:'I have read the clause regarding restrictions on procurement from a bidder of a country which shares a land border with India; I certify that the Entity / Seller / Service Provider is not from such a country and does not have any specified Transfer of Technology (TOT) from such a country, or if having specified ToT from such a country has been registered with the Competent Authority. I hereby certify that this Entity / Seller / Service Provider fulfils all requirements in this regard and is eligible to be considered for procurement on GeM.', subitems:[]}
+      ])
+    ]
+  },
+  finstanding: {
+    label:'Financial Standing Letter', short:'FIN',
+    desc:'Bidder financial standing / non-bankruptcy confirmation letter.',
+    title:'Bidder Financial Standing Letter', subtitle:'',
+    sections:()=>[
+      bdSection('salutation','Salutation','lines',['TO WHOM SOEVER IT MAY CONCERN']),
+      bdSection('body','Declaration','lines',[
+        'We would like to inform you that, we are not under liquidation, court receivership or similar proceedings. We also confirm that we are not bankrupt.',
+        'Thanking you & assuring you of our best services always.'
+      ])
+    ]
+  },
+  mii: {
+    label:'Make in India Declaration', short:'MII',
+    desc:'Self-certification of local content under the Make in India order.',
+    title:'Self-Certification under preference to Make in India order', subtitle:'(Refer Clause No. 2.8 & 3.4.4 of ITT)\nCERTIFICATE',
+    seedBidCustomFields:[{label:'Local Content %', value:'100%'}],
+    sections:()=>[
+      bdSection('body','Certificate Body','lines',[
+        'In line with Government Public Procurement Order No. P-45021/2/2017-PP (BE-II) dated 04.06.2020 and its amendments, we hereby certify that we M/s {{companyName}} are local supplier meeting the requirement of minimum local content i.e., {{cf_local_content}} as defined in above orders for the material against IPR Enquiry/Tender No {{bidNumber}} dated {{date}}. Details of location at which local value addition will be made as follows: {{location}}',
+        'We also understand, false declarations will be in breach of the code of integrity under rule 175(1)(i)(h) of the General Financial Rules for which a bidder or its successors can be debarred for up to two years as per Rule 151(iii) of the General Financial Rules along with such other actions as may be permissible under law.'
+      ])
+    ]
+  },
+  oemauth: {
+    label:'OEM Authorization Letter', short:'OEM',
+    desc:'Manufacturer’s authority letter naming JAYS as the authorized bidder for a product.',
+    title:'', subtitle:'',
+    closing:{extraWord:'Sincerely,', designation:'Manager'},
+    sections:()=>[
+      bdSection('to','To','lines',['To,','The CEO,','GeM - Government e Marketplace, Delhi.']),
+      bdSection('subject','Subject','lines',["Sub: Manufacturer's Authority Letter GeM Bid/RA No {{bidNumber}}: {{bidTitle}}"]),
+      bdSection('salutation','Salutation','lines',['Dear Sir / Madam,']),
+      bdSection('body','Body','lines',[
+        'We, {{companyName}}, are the established and reputed Manufacturers of {{productItem}}.',
+        'We are included to bid, negotiate and conclude the contract with you for the above-mentioned goods manufactured by us.',
+        'No company or firm or individual other than {{companyName}} are authorized to bid, negotiate and conclude the contract in regard to this business for your institution.'
+      ])
+    ]
+  },
+  covering: {
+    label:'Bid Covering Letter', short:'CVR',
+    desc:'Standard covering/submission letter listing the documents enclosed with a bid.',
+    title:'BID COVERING LETTER', subtitle:'',
+    sections:()=>[
+      bdSection('to','To','lines',['To,','The Tender Inviting Authority,','{{organisation}}']),
+      bdSection('subject','Subject','lines',['Sub: Submission of bid against {{bidTitle}} — Bid No. {{bidNumber}}']),
+      bdSection('salutation','Salutation','lines',['Dear Sir / Madam,']),
+      bdSection('body','Body','lines',[
+        'With reference to the above-mentioned tender, we, {{companyName}}, having examined the bidding documents, hereby submit our bid for the supply of {{productItem}}.',
+        'We confirm that our bid is unconditional and remains valid for acceptance as per the terms of the tender. We enclose herewith the documents listed below in support of our bid.'
+      ]),
+      bdSection('enclosures','Enclosures','table',{headers:['#','Document'], rows:[
+        ['1','ATC / Additional Terms & Conditions Acceptance'],
+        ['2','Beneficial Ownership Declaration'],
+        ['3','Bidder Financial Standing Letter'],
+        ['4','Make in India / Local Content Declaration'],
+        ['5','OEM / Manufacturer Authorization Letter']
+      ]})
+    ]
+  },
+  custom: {
+    label:'Custom Bid Letter', short:'CUS',
+    desc:'Blank JAYS letterhead — write any bid-related letter from scratch.',
+    title:'', subtitle:'',
+    sections:()=>[
+      bdSection('to','To (optional)','lines',[]),
+      bdSection('subject','Subject (optional)','lines',[]),
+      bdSection('salutation','Salutation','lines',['Dear Sir / Madam,']),
+      bdSection('body','Body','lines',[''])
+    ]
+  }
+};
+
+const BidDocs = {
+  draft: null,
+  viewMode:'dashboard',
+  dashTab:'templates',
+  searchQ:'', filterTemplate:'',
+
+  /* ---------------- model ---------------- */
+  blankCompany(){
+    const s = Store.data.settings || {};
+    return {
+      logo: s.companyLogo||'', name: s.companyName||'Jays Trading and Business Solution',
+      address: s.companyAddress||'', phone: s.companyPhone||'', email: s.companyEmail||'',
+      gstin: s.companyGSTIN||'', signatureImage: s.signatureImage||'', stampImage:'',
+      authorisedName:'', designation:'CEO'
+    };
+  },
+  blankBid(){
+    return {
+      bidId:'', bidNumber:'', raNumber:'', bidTitle:'', tenderNumber:'', organisation:'',
+      department:'', referenceNumber:'', date:'', closingDate:'', productItem:'', location:'',
+      customFields:[]
+    };
+  },
+  blankDoc(templateKey){
+    const tpl = BIDDOC_TEMPLATES[templateKey];
+    if(!tpl) return null;
+    const bid = this.blankBid();
+    if(tpl.seedBidCustomFields) bid.customFields = tpl.seedBidCustomFields.map(f=>({...f}));
+    return {
+      id:'', parentId:'', revision:0, status:'Draft', templateKey,
+      docNumber:'', createdAt:'', updatedAt:'',
+      createdBy:(Auth.session && (Auth.session.name||Auth.session.username)) || 'System',
+      company: this.blankCompany(), bid,
+      meta:{ title: tpl.title||'', subtitle: tpl.subtitle||'', date: Util.todayISO() },
+      sections: tpl.sections(),
+      closing: Object.assign({companyLine:'For {{companyName}}.', extraWord:'', designation:(tpl.closing&&tpl.closing.designation)||'CEO', showSignature:true, showStamp:true}, tpl.closing||{})
+    };
+  },
+  newFromTemplate(key){
+    const d = this.blankDoc(key);
+    if(!d){ UI.toast('Unknown template'); return; }
+    this.draft = d;
+    this.viewMode='editor';
+    this.render();
+  },
+  edit(id){
+    const d = Store.data.bidDocs.find(x=>x.id===id);
+    if(!d) return;
+    this.draft = JSON.parse(JSON.stringify(d));
+    this.viewMode='editor';
+    this.render();
+  },
+  backToDashboard(){ this.draft=null; this.viewMode='dashboard'; this.render(); },
+
+  /* ---------------- tokens (live merge — never baked into stored text) ---------------- */
+  slug(s){ return String(s||'').toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,''); },
+  tokenCtx(){
+    const d=this.draft, c=d.company||{}, b=d.bid||{};
+    const ctx = {
+      companyName:c.name||'', bidNumber:b.bidNumber||'', raNumber:b.raNumber||'',
+      bidTitle:b.bidTitle||'', tenderNumber:b.tenderNumber||'', organisation:b.organisation||'',
+      department:b.department||'', referenceNumber:b.referenceNumber||'',
+      date: b.date? Util.fmtDate(b.date) : '',
+      closingDate: b.closingDate? Util.fmtDate(b.closingDate) : '',
+      productItem:b.productItem||'', location:b.location||'', designation:c.designation||''
+    };
+    (b.customFields||[]).forEach(f=>{ if(f.label) ctx['cf_'+this.slug(f.label)] = f.value||''; });
+    return ctx;
+  },
+  merge(text){
+    const ctx = this.tokenCtx();
+    return String(text||'').replace(/\{\{(\w+)\}\}/g, (m,k)=> (ctx[k]!==undefined && ctx[k]!=='') ? ctx[k] : '');
+  },
+
+  /* ---------------- section helpers ---------------- */
+  sec(id){ return this.draft.sections.find(s=>s.id===id); },
+  toggleSection(id,val){ this.sec(id).visible=!!val; this.render(); },
+  moveSection(id,dir){
+    const arr=this.draft.sections; const i=arr.findIndex(s=>s.id===id); const j=i+dir;
+    if(i<0||j<0||j>=arr.length) return; const t=arr[i]; arr[i]=arr[j]; arr[j]=t; this.render();
+  },
+  addCustomSection(){
+    this.draft.sections.push(bdSection('custom'+Date.now(),'Custom Section','fields',[{label:'',value:''}]));
+    this.render();
+  },
+  removeSection(id){
+    if(!confirm('Remove this section?')) return;
+    this.draft.sections = this.draft.sections.filter(s=>s.id!==id);
+    this.render();
+  },
+  updField(id,i,key,val){ this.sec(id).data[i][key]=val; this.refreshPreview(); },
+  addField(id){ this.sec(id).data.push({label:'',value:''}); this.render(); },
+  removeField(id,i){ this.sec(id).data.splice(i,1); this.render(); },
+  updLine(id,i,val){ this.sec(id).data[i]=val; this.refreshPreview(); },
+  addLine(id){ this.sec(id).data.push(''); this.render(); },
+  removeLine(id,i){ this.sec(id).data.splice(i,1); this.render(); },
+  updNumbered(id,i,val){ this.sec(id).data[i].text=val; this.refreshPreview(); },
+  addNumbered(id){ this.sec(id).data.push({text:'',subitems:[]}); this.render(); },
+  removeNumbered(id,i){ this.sec(id).data.splice(i,1); this.render(); },
+  addSubItem(id,i){ this.sec(id).data[i].subitems.push(''); this.render(); },
+  removeSubItem(id,i,j){ this.sec(id).data[i].subitems.splice(j,1); this.render(); },
+  updSubItem(id,i,j,val){ this.sec(id).data[i].subitems[j]=val; this.refreshPreview(); },
+  updTableCell(id,r,c,val){ this.sec(id).data.rows[r][c]=val; this.refreshPreview(); },
+  addTableRow(id){ const t=this.sec(id).data; t.rows.push(t.headers.map(()=>'')); this.render(); },
+  removeTableRow(id,r){ this.sec(id).data.rows.splice(r,1); this.render(); },
+
+  /* ---------------- company / bid / meta / closing field updates ---------------- */
+  updCompany(field,val){ this.draft.company[field]=val; this.refreshPreview(); },
+  updBid(field,val){ this.draft.bid[field]=val; this.refreshPreview(); },
+  updBidField(i,key,val){ this.draft.bid.customFields[i][key]=val; this.refreshPreview(); },
+  addBidField(){ this.draft.bid.customFields.push({label:'',value:''}); this.render(); },
+  removeBidField(i){ this.draft.bid.customFields.splice(i,1); this.render(); },
+  updMeta(field,val){ this.draft.meta[field]=val; this.refreshPreview(); },
+  updClosing(field,val){ this.draft.closing[field]=val; this.refreshPreview(); },
+
+  /* ---------------- existing-bid link (auto-populate, still fully editable) ---------------- */
+  openBidPicker(){
+    const html = '<div class="field"><input id="bd_bidSearch" placeholder="Search bid number, title, organisation..." oninput="BidDocs.filterBidPicker(this.value)"></div>' +
+      '<div id="bd_bidList" style="max-height:360px;overflow:auto;">' + this.bidPickerRows(Store.data.bids.slice(0,200)) + '</div>';
+    UI.openModal('Select a Bid', html, '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button>', true);
+  },
+  bidPickerRows(list){
+    if(!list.length) return '<div class="empty-state"><div class="t">No bids found</div></div>';
+    return list.map(b=>'<div class="cust-picker-item" onclick="BidDocs.applyBid(\'' + b.id + '\')"><span class="cpi-name">' +
+      Util.escapeHtml(b.title||b.bidNumber||b.id) + '</span><span class="cpi-sub">' +
+      Util.escapeHtml(b.bidNumber||'') + ' &middot; ' + Util.escapeHtml(b.organisation||'') + '</span></div>').join('');
+  },
+  filterBidPicker(q){
+    q=(q||'').toLowerCase().trim();
+    const list = Store.data.bids.filter(b=>!q || [b.bidNumber,b.title,b.organisation,b.raNumber].some(v=>(v||'').toLowerCase().includes(q)));
+    const box = document.getElementById('bd_bidList');
+    if(box) box.innerHTML = this.bidPickerRows(list.slice(0,200));
+  },
+  applyBid(bidId){
+    const b = Store.data.bids.find(x=>x.id===bidId);
+    if(!b) return;
+    const d = this.draft;
+    d.bid.bidId = b.id;
+    d.bid.bidNumber = b.bidNumber||d.bid.bidNumber;
+    d.bid.raNumber = b.raNumber||d.bid.raNumber;
+    d.bid.bidTitle = b.title||d.bid.bidTitle;
+    d.bid.organisation = b.organisation||d.bid.organisation;
+    d.bid.department = b.department||d.bid.department;
+    d.bid.date = b.publishedDate||d.bid.date;
+    d.bid.closingDate = b.endDate||d.bid.closingDate;
+    d.bid.productItem = b.boqTitle||b.category||d.bid.productItem;
+    d.bid.location = b.location||d.bid.location;
+    UI.closeModal();
+    UI.toast('Bid details loaded — everything is still editable');
+    this.render();
+  },
+  unlinkBid(){ this.draft.bid.bidId=''; this.render(); },
+
+  /* ---------------- per-document image overrides (logo / signature / stamp) ---------------- */
+  _downscale(file, max, quality){
+    return new Promise((resolve, reject)=>{
+      const r = new FileReader();
+      r.onload = ()=>{
+        const img = new Image();
+        img.onload = ()=>{
+          let w=img.width,h=img.height;
+          if(w>max||h>max){ const sc=Math.min(max/w,max/h); w=Math.round(w*sc); h=Math.round(h*sc); }
+          const cv=document.createElement('canvas'); cv.width=w; cv.height=h;
+          const ctx=cv.getContext('2d');
+          ctx.fillStyle='#ffffff'; ctx.fillRect(0,0,w,h);
+          ctx.drawImage(img,0,0,w,h);
+          resolve(cv.toDataURL('image/jpeg', quality));
+        };
+        img.onerror=()=>reject(new Error('Not a readable image'));
+        img.src=r.result;
+      };
+      r.onerror=()=>reject(new Error('Could not read that file'));
+      r.readAsDataURL(file);
+    });
+  },
+  async onCompanyImageFile(input, field, max){
+    const f = input.files && input.files[0]; if(!f) return;
+    if(!/^image\/(jpe?g|png|webp)$/i.test(f.type)){ UI.toast('Use a JPG, PNG or WEBP image'); input.value=''; return; }
+    try{
+      const url = await this._downscale(f, max||300, 0.85);
+      this.draft.company[field] = url;
+      this.render();
+    }catch(e){ console.error(e); UI.toast('Could not process that image'); }
+    input.value='';
+  },
+  clearCompanyImage(field){ this.draft.company[field]=''; this.render(); },
+  resetCompanyFromSettings(){
+    this.draft.company = this.blankCompany();
+    UI.toast('Company details reset from Settings for this document');
+    this.render();
+  },
+
+  /* ---------------- validation / save / duplicate / revision / delete ---------------- */
+  validate(){
+    const errs=[];
+    if(!this.draft.company.name) errs.push('Company Name is required');
+    return errs;
+  },
+  async saveDraft(){ await this._persist('Draft'); },
+  async markCompleted(){
+    const errs = this.validate();
+    if(errs.length){ UI.toast(errs[0]); return; }
+    await this._persist('Completed');
+  },
+  async _persist(status){
+    const d = this.draft;
+    const isNew = !d.id;
+    if(isNew){
+      d.id = (Store.data.settings.bidDocPrefix||'BD-') + String(Store.data.settings.bidDocNext||1).padStart(4,'0');
+      d.createdAt = new Date().toISOString();
+      Store.data.settings.bidDocNext = (Store.data.settings.bidDocNext||1) + 1;
+      await Store.save('settings');
+      d.docNumber = d.docNumber || d.id;
+    }
+    d.status = status;
+    d.updatedAt = new Date().toISOString();
+    if(isNew) Store.data.bidDocs.unshift(d);
+    else{
+      const idx = Store.data.bidDocs.findIndex(x=>x.id===d.id);
+      if(idx>=0) Store.data.bidDocs[idx] = d; else Store.data.bidDocs.unshift(d);
+    }
+    const ok = await Store.save('bidDocs');
+    if(ok){
+      await Activity.log(isNew?'Bid document created':'Bid document updated', (BIDDOC_TEMPLATES[d.templateKey]||{}).label + ' — ' + (d.docNumber||d.id));
+      UI.toast('Saved');
+    }
+    this.render();
+  },
+  async duplicate(id){
+    const src = Store.data.bidDocs.find(x=>x.id===id);
+    if(!src) return;
+    const copy = JSON.parse(JSON.stringify(src));
+    copy.id=''; copy.parentId=''; copy.revision=0; copy.status='Draft';
+    copy.docNumber=''; copy.createdAt=''; copy.updatedAt='';
+    this.draft = copy;
+    this.viewMode='editor';
+    await Activity.log('Bid document duplicated', src.docNumber||src.id);
+    this.render();
+  },
+  async createRevision(){
+    const d = this.draft;
+    if(!d.id){ UI.toast('Save the document first'); return; }
+    const root = d.parentId || d.id;
+    const rev = Math.max(0, ...Store.data.bidDocs.filter(x=>x.id===root||x.parentId===root).map(x=>Number(x.revision)||0)) + 1;
+    const copy = JSON.parse(JSON.stringify(d));
+    copy.id=''; copy.parentId=root; copy.revision=rev; copy.status='Draft'; copy.createdAt=''; copy.updatedAt='';
+    this.draft = copy;
+    await this._persist('Draft');
+    await Activity.log('Bid document revision created', d.docNumber||d.id);
+  },
+  async deleteDoc(id){
+    if(!confirm('Delete this bid document permanently?')) return;
+    const rec = Store.data.bidDocs.find(x=>x.id===id);
+    Store.data.bidDocs = Store.data.bidDocs.filter(x=>x.id!==id);
+    await Store.save('bidDocs');
+    await Activity.log('Bid document deleted', rec? (rec.docNumber||rec.id) : id);
+    UI.toast('Deleted');
+    this.render();
+  },
+
+  /* ---------------- live HTML preview (instant, keeps typing focus) ---------------- */
+  refreshPreview(){
+    const el = document.getElementById('bdPreviewPane');
+    if(el) el.innerHTML = this.previewHTML();
+  },
+  previewHTML(){
+    const d = this.draft, c = d.company||{};
+    const E = Util.escapeHtml;
+    const merge = (t)=>Util.escapeHtml(this.merge(t));
+    let body = '';
+    d.sections.filter(s=>s.visible).forEach(sec=>{
+      if(sec.kind==='fields'){
+        sec.data.forEach(f=>{ if(f.label||f.value) body += '<p style="margin:0 0 8px;">' + (f.label?('<b>'+E(f.label)+':</b> '):'') + merge(f.value) + '</p>'; });
+      } else if(sec.kind==='lines'){
+        sec.data.forEach(l=>{ if(String(l).trim()) body += '<p style="margin:0 0 10px;text-align:justify;">' + merge(l) + '</p>'; });
+      } else if(sec.kind==='numbered'){
+        body += '<ol style="margin:0 0 10px 18px;padding:0;">';
+        sec.data.forEach(item=>{
+          body += '<li style="margin-bottom:8px;text-align:justify;">' + merge(item.text);
+          if((item.subitems||[]).length) body += '<ol type="a" style="margin-top:6px;">' + item.subitems.map(s=>'<li style="margin-bottom:4px;">'+merge(s)+'</li>').join('') + '</ol>';
+          body += '</li>';
+        });
+        body += '</ol>';
+      } else if(sec.kind==='table'){
+        body += '<div style="font-weight:700;color:var(--navy);margin:10px 0 6px;font-size:12px;">' + E(sec.label) + '</div>' +
+          '<table style="border-collapse:collapse;font-size:11.5px;margin-bottom:10px;"><thead><tr>' +
+          (sec.data.headers||[]).map(h=>'<th style="border:1px solid #ccc;padding:5px;background:var(--navy);color:#fff;">'+E(h)+'</th>').join('') +
+          '</tr></thead><tbody>' +
+          (sec.data.rows||[]).map(r=>'<tr>'+r.map(cell=>'<td style="border:1px solid #ccc;padding:5px;">'+merge(cell)+'</td>').join('')+'</tr>').join('') +
+          '</tbody></table>';
+      }
+    });
+    const cl = d.closing||{};
+    return '<div class="bd-preview-page">' +
+      '<div class="bd-preview-head">' +
+        (c.logo? '<img src="'+c.logo+'" class="bd-preview-logo">' : '<div class="bd-preview-logo bd-preview-logo-empty"></div>') +
+        '<div class="bd-preview-companyblock"><div class="bd-preview-companyname">' + E((c.name||'JAYS TRADING AND BUSINESS SOLUTION').toUpperCase()) + '</div>' +
+        [c.phone,c.address,c.gstin?('GSTIN: '+c.gstin):'',c.email].filter(Boolean).map(l=>'<div>'+E(l)+'</div>').join('') + '</div>' +
+      '</div>' +
+      '<div class="bd-preview-date">Date : ' + (d.meta.date?Util.fmtDate(d.meta.date):'') + '</div>' +
+      '<div class="bd-preview-divider"></div>' +
+      (d.meta.title? '<div class="bd-preview-title">'+E(d.meta.title.toUpperCase())+'</div>' : '') +
+      (d.meta.subtitle? '<div class="bd-preview-subtitle">'+String(d.meta.subtitle).split('\n').map(l=>E(l)).join('<br>')+'</div>' : '') +
+      '<div class="bd-preview-body">' + (body || '<p class="hint">Nothing to preview yet — fill in the sections on the left.</p>') + '</div>' +
+      '<div class="bd-preview-closing"><p>' + merge(cl.companyLine) + '</p>' +
+        '<div class="bd-preview-sigbox"><div class="hint" style="margin-bottom:4px;">(Signature of Authorized Signatory)</div>' +
+        (c.signatureImage&&cl.showSignature!==false? '<img src="'+c.signatureImage+'" style="height:34px;">' : '') +
+        (c.stampImage&&cl.showStamp!==false? '<img src="'+c.stampImage+'" style="height:40px;margin-left:8px;">' : '') +
+        (cl.extraWord? '<div>'+E(cl.extraWord)+'</div>' : '') +
+        '<div style="margin-top:6px;">'+E(c.name||'')+'</div>' +
+        (c.designation? '<div>Designation :- '+E(c.designation)+'</div>' : '') +
+        (c.email? '<div>Email: '+E(c.email)+'</div>' : '') +
+        (c.address? '<div>Address: '+E(c.address)+'</div>' : '') +
+        '</div></div>' +
+    '</div>';
+  },
+
+  /* ---------------- PDF engine (jsPDF, reusing the same header/footer conventions as Rate/Offer) ---------------- */
+  libsReady(){ return !!(window.jspdf && window.jspdf.jsPDF); },
+  buildPDF(){
+    if(!this.libsReady()) throw new Error('PDF library is still loading. Check your connection and try again.');
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({unit:'mm', format:'a4'});
+    const d = this.draft, c = d.company||{};
+    const PW = doc.internal.pageSize.getWidth();
+    const PH = doc.internal.pageSize.getHeight();
+    const M = 18;
+    const NAVY=[11,20,36], ORANGE=[235,90,40];
+    const ctx = this.tokenCtx();
+    const merge = (t)=>String(t||'').replace(/\{\{(\w+)\}\}/g,(m,k)=>(ctx[k]!==undefined&&ctx[k]!=='')?ctx[k]:'');
+
+    let y = M, logoBottom = y;
+    if(c.logo){
+      try{
+        const props = doc.getImageProperties(c.logo);
+        const maxW=28, maxH=22;
+        const sc = Math.min(maxW/props.width, maxH/props.height);
+        const lw = props.width*sc, lh = props.height*sc;
+        doc.addImage(c.logo, 'JPEG', M, y, lw, lh);
+        logoBottom = y + lh;
+      }catch(e){ console.warn('logo skipped', e); }
+    }
+    doc.setFont('helvetica','bold'); doc.setFontSize(16); doc.setTextColor(NAVY[0],NAVY[1],NAVY[2]);
+    const nameLines = doc.splitTextToSize(String(c.name||'JAYS TRADING AND BUSINESS SOLUTION').toUpperCase(), PW-M*2-40);
+    let hy = y+6;
+    nameLines.slice(0,2).forEach(l=>{ doc.text(l, PW-M, hy, {align:'right'}); hy += 6.5; });
+    doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(60);
+    [c.phone, c.address, c.gstin?('GSTIN: '+c.gstin):'', c.email].filter(Boolean).forEach(l=>{
+      doc.splitTextToSize(String(l), PW-M-40).forEach(w=>{ doc.text(w, PW-M, hy, {align:'right'}); hy += 4.6; });
+    });
+    y = Math.max(hy, logoBottom) + 4;
+    doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(80);
+    doc.text('Date : ' + (d.meta.date? Util.fmtDate(d.meta.date) : ''), PW-M, y, {align:'right'});
+    y += 6;
+    doc.setFillColor(NAVY[0],NAVY[1],NAVY[2]); doc.rect(M, y, PW-M*2, 1.1, 'F');
+    doc.setFillColor(ORANGE[0],ORANGE[1],ORANGE[2]); doc.rect(M, y+1.1, PW-M*2, 0.9, 'F');
+    y += 9;
+
+    if(d.meta.title){
+      doc.setFont('helvetica','bold'); doc.setFontSize(13); doc.setTextColor(20);
+      const titleTxt = String(d.meta.title).toUpperCase();
+      doc.text(titleTxt, PW/2, y, {align:'center'});
+      const tw = doc.getTextWidth(titleTxt);
+      doc.setDrawColor(20); doc.setLineWidth(0.3);
+      doc.line(PW/2-tw/2, y+1.5, PW/2+tw/2, y+1.5);
+      y += 8;
+    }
+    if(d.meta.subtitle){
+      doc.setFont('helvetica','normal'); doc.setFontSize(10.5); doc.setTextColor(60);
+      String(d.meta.subtitle).split('\n').forEach(l=>{ doc.text(l, PW/2, y, {align:'center'}); y+=5.2; });
+      y += 2;
+    }
+    y += 2;
+
+    const ensure = (need)=>{ if(y > PH-need){ doc.addPage(); y = M; } };
+    doc.setFont('helvetica','normal'); doc.setFontSize(10.5); doc.setTextColor(35);
+
+    d.sections.filter(s=>s.visible).forEach(sec=>{
+      if(sec.kind==='fields'){
+        sec.data.forEach(f=>{
+          if(!f.label && !f.value) return;
+          const line = String(f.label||'') + (f.label?': ':'') + merge(f.value||'');
+          doc.splitTextToSize(line, PW-M*2).forEach(w=>{ ensure(30); doc.text(w, M, y); y+=5.4; });
+        });
+        y += 2;
+      } else if(sec.kind==='lines'){
+        sec.data.forEach(raw=>{
+          const line = merge(raw);
+          if(!line.trim()) return;
+          doc.splitTextToSize(line, PW-M*2).forEach(w=>{ ensure(30); doc.text(w, M, y); y+=5.4; });
+          y += 2.4;
+        });
+      } else if(sec.kind==='numbered'){
+        sec.data.forEach((item,i)=>{
+          const text = merge(item.text);
+          const wrapped = doc.splitTextToSize(text, PW-M*2-8);
+          wrapped.forEach((w,wi)=>{ ensure(30); doc.text(wi===0?((i+1)+'.'):'', M, y); doc.text(w, M+7, y); y+=5.4; });
+          y += 1.4;
+          (item.subitems||[]).forEach((sub,j)=>{
+            const swrapped = doc.splitTextToSize(merge(sub), PW-M*2-24);
+            swrapped.forEach((w,wi)=>{ ensure(30); doc.text(wi===0?(String.fromCharCode(97+j)+'.'):'', M+14, y); doc.text(w, M+20, y); y+=5.2; });
+          });
+          y += 1.6;
+        });
+        y += 2;
+      } else if(sec.kind==='table'){
+        ensure(40);
+        doc.setFont('helvetica','bold'); doc.setFontSize(10); doc.setTextColor(NAVY[0],NAVY[1],NAVY[2]);
+        doc.text(String(sec.label||''), M, y); y += 5;
+        doc.autoTable({
+          startY: y, margin:{left:M, right:M},
+          head:[sec.data.headers||[]],
+          body:(sec.data.rows||[]).map(r=>r.map(cell=>merge(cell))),
+          theme:'grid', styles:{fontSize:9, cellPadding:2.4},
+          headStyles:{fillColor:NAVY, textColor:255}
+        });
+        y = doc.lastAutoTable.finalY + 6;
+        doc.setFont('helvetica','normal'); doc.setFontSize(10.5); doc.setTextColor(35);
+      }
+    });
+
+    ensure(46);
+    y += 4;
+    const cl = d.closing || {};
+    doc.setFont('helvetica','normal'); doc.setFontSize(10.5); doc.setTextColor(35);
+    if(merge(cl.companyLine)){ doc.text(merge(cl.companyLine), M, y); y += 6; }
+    ensure(44);
+    const sx = PW - M - 60;
+    let sy = y;
+    doc.setFontSize(9); doc.setTextColor(60);
+    doc.text('(Signature of Authorized Signatory)', sx, sy); sy += 3;
+    const imgY = sy;
+    if(cl.showSignature!==false && c.signatureImage){
+      try{ doc.addImage(c.signatureImage,'JPEG', sx, imgY, 38, 16); }catch(e){ console.warn('signature skipped',e); }
+    }
+    if(cl.showStamp!==false && c.stampImage){
+      try{ doc.addImage(c.stampImage,'JPEG', sx+40, imgY, 18, 18); }catch(e){ console.warn('stamp skipped',e); }
+    }
+    sy = imgY + 20;
+    if(cl.extraWord){ doc.setFont('helvetica','normal'); doc.setFontSize(9.5); doc.text(String(cl.extraWord), sx, sy); sy += 5; }
+    doc.setFont('helvetica','normal'); doc.setFontSize(9);
+    [c.name, c.designation?('Designation :- '+c.designation):'', c.email?('Email: '+c.email):'', c.address?('Address: '+c.address):''].filter(Boolean).forEach(l=>{
+      doc.splitTextToSize(String(l), 60).forEach(w=>{ doc.text(w, sx, sy); sy += 4.4; });
+    });
+    y = Math.max(y, sy) + 4;
+
+    const pages = doc.internal.getNumberOfPages();
+    for(let i=1;i<=pages;i++){
+      doc.setPage(i);
+      doc.setFont('helvetica','normal'); doc.setFontSize(7.6); doc.setTextColor(140);
+      doc.setDrawColor(228); doc.setLineWidth(0.2);
+      doc.line(M, PH-13, PW-M, PH-13);
+      doc.text('This is a computer generated document.', M, PH-9);
+      doc.text('Page ' + i + ' of ' + pages, PW-M, PH-9, {align:'right'});
+    }
+    return doc;
+  },
+  fileName(){
+    const d=this.draft;
+    const short = (BIDDOC_TEMPLATES[d.templateKey]||{}).short || 'bid-document';
+    return ((d.docNumber||short) + (d.revision?('-rev'+d.revision):'') + '.pdf').replace(/[^a-z0-9.\-]+/gi,'-');
+  },
+  withPDF(fn,label){
+    try{ return fn(this.buildPDF()); }
+    catch(e){ console.error(e); UI.toast((label||'PDF')+' failed: '+(e.message||'unknown error')); return null; }
+  },
+  previewPDF(){
+    this.withPDF(doc=>{
+      const box = document.getElementById('bdPdfFrame');
+      if(box) box.src = doc.output('bloburl');
+      const wrap = document.getElementById('bdPdfWrap');
+      if(wrap) wrap.style.display='block';
+      UI.toast('PDF preview updated');
+    }, 'Preview');
+  },
+  download(){ this.withPDF(doc=>{ doc.save(this.fileName()); }, 'Download'); },
+  print(){
+    this.withPDF(doc=>{
+      const url = doc.output('bloburl');
+      const w = window.open(url,'_blank');
+      if(w){ w.addEventListener('load', ()=>{ try{ w.print(); }catch(e){} }); }
+      else UI.toast('Allow pop-ups to print');
+    }, 'Print');
+  },
+  quickDownload(id){ const rec=Store.data.bidDocs.find(x=>x.id===id); if(!rec) return; const kept=this.draft; this.draft=JSON.parse(JSON.stringify(rec)); this.download(); this.draft=kept; },
+  quickPrint(id){ const rec=Store.data.bidDocs.find(x=>x.id===id); if(!rec) return; const kept=this.draft; this.draft=JSON.parse(JSON.stringify(rec)); this.print(); this.draft=kept; },
+  quickPreview(id){ this.edit(id); setTimeout(()=>this.previewPDF(),50); },
+
+  /* ---------------- editor UI ---------------- */
+  sectionEditorHTML(sec, idx){
+    const E = Util.escapeHtml;
+    let inner = '';
+    if(sec.kind==='fields'){
+      inner = sec.data.map((f,i)=>
+        '<div class="form-row" style="align-items:end;">' +
+          '<div class="field"><label>Field Label</label><input value="'+E(f.label)+'" oninput="BidDocs.updField(\''+sec.id+'\','+i+',\'label\',this.value)"></div>' +
+          '<div class="field"><label>Value</label><input value="'+E(f.value)+'" oninput="BidDocs.updField(\''+sec.id+'\','+i+',\'value\',this.value)"></div>' +
+        '</div>' +
+        '<div style="text-align:right;margin:-8px 0 10px;"><button class="btn btn-outline btn-sm" onclick="BidDocs.removeField(\''+sec.id+'\','+i+')">Remove</button></div>'
+      ).join('') + '<button class="btn btn-outline btn-sm" onclick="BidDocs.addField(\''+sec.id+'\')">&#65291; Add Field</button>';
+    } else if(sec.kind==='lines'){
+      inner = sec.data.map((line,i)=>
+        '<div class="field">' +
+          '<label>Paragraph '+(i+1)+'</label>' +
+          '<textarea rows="3" oninput="BidDocs.updLine(\''+sec.id+'\','+i+',this.value)">'+E(line)+'</textarea>' +
+          '<button class="btn btn-outline btn-sm" style="margin-top:4px;" onclick="BidDocs.removeLine(\''+sec.id+'\','+i+')">Remove</button>' +
+        '</div>'
+      ).join('') + '<button class="btn btn-outline btn-sm" onclick="BidDocs.addLine(\''+sec.id+'\')">&#65291; Add Paragraph</button>';
+    } else if(sec.kind==='numbered'){
+      inner = sec.data.map((item,i)=>
+        '<div class="card card-pad" style="margin-bottom:10px;background:#F8FAFC;">' +
+          '<div class="field"><label>Point '+(i+1)+'</label><textarea rows="2" oninput="BidDocs.updNumbered(\''+sec.id+'\','+i+',this.value)">'+E(item.text)+'</textarea></div>' +
+          (item.subitems||[]).map((sub,j)=>
+            '<div class="field" style="margin-left:16px;"><label>Sub-point '+String.fromCharCode(97+j)+'</label>' +
+              '<div style="display:flex;gap:6px;"><input style="flex:1;" value="'+E(sub)+'" oninput="BidDocs.updSubItem(\''+sec.id+'\','+i+','+j+',this.value)">' +
+              '<button class="icon-btn" title="Remove" onclick="BidDocs.removeSubItem(\''+sec.id+'\','+i+','+j+')">&times;</button></div>' +
+            '</div>'
+          ).join('') +
+          '<div class="toolbar" style="margin:6px 0 0;">' +
+            '<button class="btn btn-outline btn-sm" onclick="BidDocs.addSubItem(\''+sec.id+'\','+i+')">&#65291; Sub-point</button>' +
+            '<button class="btn btn-outline btn-sm" onclick="BidDocs.removeNumbered(\''+sec.id+'\','+i+')">Remove Point</button>' +
+          '</div>' +
+        '</div>'
+      ).join('') + '<button class="btn btn-outline btn-sm" onclick="BidDocs.addNumbered(\''+sec.id+'\')">&#65291; Add Point</button>';
+    } else if(sec.kind==='table'){
+      const headers = sec.data.headers||[];
+      inner = '<div class="table-wrap"><table><thead><tr>'+headers.map(h=>'<th>'+E(h)+'</th>').join('')+'<th></th></tr></thead><tbody>' +
+        sec.data.rows.map((row,ri)=>'<tr>'+row.map((cell,ci)=>'<td><input value="'+E(cell)+'" oninput="BidDocs.updTableCell(\''+sec.id+'\','+ri+','+ci+',this.value)" style="width:100%;border:1px solid var(--border);border-radius:6px;padding:5px;"></td>').join('')+'<td><button class="icon-btn" onclick="BidDocs.removeTableRow(\''+sec.id+'\','+ri+')">&times;</button></td></tr>').join('') +
+        '</tbody></table></div><button class="btn btn-outline btn-sm" style="margin-top:8px;" onclick="BidDocs.addTableRow(\''+sec.id+'\')">&#65291; Add Row</button>';
+    }
+    return '<div class="card card-pad" style="margin-bottom:14px;">' +
+      '<div class="toolbar" style="margin-bottom:10px;">' +
+        '<div class="wa-step" style="margin:0;">'+E(sec.label)+'</div>' +
+        '<div class="toolbar-spacer"></div>' +
+        '<label class="chk" style="font-size:12px;"><input type="checkbox" '+(sec.visible?'checked':'')+' onchange="BidDocs.toggleSection(\''+sec.id+'\',this.checked)"> Show on PDF</label>' +
+        (idx>0?'<button class="icon-btn" title="Move up" onclick="BidDocs.moveSection(\''+sec.id+'\',-1)">&#8593;</button>':'') +
+        (idx<this.draft.sections.length-1?'<button class="icon-btn" title="Move down" onclick="BidDocs.moveSection(\''+sec.id+'\',1)">&#8595;</button>':'') +
+        '<button class="icon-btn" title="Remove section" onclick="BidDocs.removeSection(\''+sec.id+'\')">&#128465;</button>' +
+      '</div>' +
+      (sec.visible? inner : '<div class="hint">Hidden — won’t appear on the PDF.</div>') +
+    '</div>';
+  },
+  render(){
+    if(this.viewMode==='editor' && this.draft) return this.renderEditor();
+    return this.renderDashboard();
+  },
+  renderEditor(){
+    const d = this.draft, tpl = BIDDOC_TEMPLATES[d.templateKey] || {label:'Bid Document'};
+    const E = Util.escapeHtml;
+    const linkedBid = d.bid.bidId ? Store.data.bids.find(b=>b.id===d.bid.bidId) : null;
+    const statusBadge = '<span class="badge '+(d.status==='Completed'?'badge-green':'badge-amber')+'">'+d.status+'</span>';
+    document.getElementById('content').innerHTML =
+      '<div class="toolbar">' +
+        '<button class="btn btn-outline btn-sm" onclick="BidDocs.backToDashboard()">&larr; Back to Bid Documents</button>' +
+        '<div class="toolbar-spacer"></div>' +
+        statusBadge + ' ' + (d.docNumber?('<span class="mono cell-mute">'+E(d.docNumber)+'</span>'):'') +
+      '</div>' +
+      '<div class="wa-grid">' +
+      '<div>' +
+        '<div class="card card-pad" style="margin-bottom:14px;">' +
+          '<div class="wa-step">'+E(tpl.label)+'</div>' +
+          '<div class="hint" style="margin-bottom:10px;">'+E(tpl.desc||'')+'</div>' +
+          (linkedBid? '<div class="hint" style="margin-bottom:10px;">Linked to Bid <b>'+E(linkedBid.bidNumber||linkedBid.id)+'</b> &middot; <a href="#" onclick="event.preventDefault();BidDocs.unlinkBid()">Unlink</a></div>' : '') +
+          '<button class="btn btn-outline btn-sm" onclick="BidDocs.openBidPicker()">&#128269; '+(linkedBid?'Change Linked Bid':'Select Existing Bid')+'</button>' +
+        '</div>' +
+
+        '<div class="card card-pad" style="margin-bottom:14px;">' +
+          '<div class="wa-step">Document Header</div>' +
+          '<div class="form-row">' +
+            '<div class="field"><label>Title</label><input value="'+E(d.meta.title)+'" oninput="BidDocs.updMeta(\'title\',this.value)"></div>' +
+            '<div class="field"><label>Date</label><input type="date" value="'+E(d.meta.date)+'" oninput="BidDocs.updMeta(\'date\',this.value)"></div>' +
+          '</div>' +
+          '<div class="field"><label>Subtitle <span class="hint">(optional, one line each)</span></label><textarea rows="2" oninput="BidDocs.updMeta(\'subtitle\',this.value)">'+E(d.meta.subtitle)+'</textarea></div>' +
+        '</div>' +
+
+        '<div class="card card-pad" style="margin-bottom:14px;">' +
+          '<div class="wa-step">Company Details <span class="hint" style="text-transform:none;font-weight:400;">(defaults from Settings — edits apply to this document only)</span></div>' +
+          '<div class="toolbar" style="margin:0 0 10px;"><button class="btn btn-outline btn-sm" onclick="BidDocs.resetCompanyFromSettings()">&#8635; Reset from Settings</button></div>' +
+          '<div class="field"><label>Company Name</label><input value="'+E(d.company.name)+'" oninput="BidDocs.updCompany(\'name\',this.value)"></div>' +
+          '<div class="field"><label>Address</label><textarea rows="2" oninput="BidDocs.updCompany(\'address\',this.value)">'+E(d.company.address)+'</textarea></div>' +
+          '<div class="form-row">' +
+            '<div class="field"><label>Phone</label><input value="'+E(d.company.phone)+'" oninput="BidDocs.updCompany(\'phone\',this.value)"></div>' +
+            '<div class="field"><label>Email</label><input value="'+E(d.company.email)+'" oninput="BidDocs.updCompany(\'email\',this.value)"></div>' +
+          '</div>' +
+          '<div class="form-row">' +
+            '<div class="field"><label>GSTIN</label><input value="'+E(d.company.gstin)+'" oninput="BidDocs.updCompany(\'gstin\',this.value)"></div>' +
+            '<div class="field"><label>Designation of Signatory</label><input value="'+E(d.company.designation)+'" oninput="BidDocs.updCompany(\'designation\',this.value)"></div>' +
+          '</div>' +
+          '<div class="form-row">' +
+            '<div class="field"><label>Logo</label>' +
+              '<div class="wa-imgbox" style="min-height:50px;">'+(d.company.logo?('<img src="'+d.company.logo+'" style="max-height:44px;">'):'<span class="hint">No logo</span>')+'</div>' +
+              '<input type="file" accept="image/*" id="bd_logoFile" style="display:none;" onchange="BidDocs.onCompanyImageFile(this,\'logo\',300)">' +
+              '<div class="toolbar" style="margin-top:6px;">' +
+                '<button class="btn btn-outline btn-sm" onclick="document.getElementById(\'bd_logoFile\').click()">Upload</button>' +
+                (d.company.logo?'<button class="btn btn-outline btn-sm" onclick="BidDocs.clearCompanyImage(\'logo\')">Remove</button>':'') +
+              '</div>' +
+            '</div>' +
+            '<div class="field"><label>Signature</label>' +
+              '<div class="wa-imgbox" style="min-height:50px;">'+(d.company.signatureImage?('<img src="'+d.company.signatureImage+'" style="max-height:44px;">'):'<span class="hint">No signature</span>')+'</div>' +
+              '<input type="file" accept="image/*" id="bd_sigFile" style="display:none;" onchange="BidDocs.onCompanyImageFile(this,\'signatureImage\',300)">' +
+              '<div class="toolbar" style="margin-top:6px;">' +
+                '<button class="btn btn-outline btn-sm" onclick="document.getElementById(\'bd_sigFile\').click()">Upload</button>' +
+                (d.company.signatureImage?'<button class="btn btn-outline btn-sm" onclick="BidDocs.clearCompanyImage(\'signatureImage\')">Remove</button>':'') +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+          '<div class="field"><label>Stamp <span class="hint">(optional, drawn beside the signature)</span></label>' +
+            '<div class="wa-imgbox" style="min-height:50px;">'+(d.company.stampImage?('<img src="'+d.company.stampImage+'" style="max-height:44px;">'):'<span class="hint">No stamp</span>')+'</div>' +
+            '<input type="file" accept="image/*" id="bd_stampFile" style="display:none;" onchange="BidDocs.onCompanyImageFile(this,\'stampImage\',300)">' +
+            '<div class="toolbar" style="margin-top:6px;">' +
+              '<button class="btn btn-outline btn-sm" onclick="document.getElementById(\'bd_stampFile\').click()">Upload</button>' +
+              (d.company.stampImage?'<button class="btn btn-outline btn-sm" onclick="BidDocs.clearCompanyImage(\'stampImage\')">Remove</button>':'') +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+
+        '<div class="card card-pad" style="margin-bottom:14px;">' +
+          '<div class="wa-step">Bid Details</div>' +
+          '<div class="form-row">' +
+            '<div class="field"><label>Bid Number</label><input value="'+E(d.bid.bidNumber)+'" oninput="BidDocs.updBid(\'bidNumber\',this.value)"></div>' +
+            '<div class="field"><label>Bid/RA Number</label><input value="'+E(d.bid.raNumber)+'" oninput="BidDocs.updBid(\'raNumber\',this.value)"></div>' +
+          '</div>' +
+          '<div class="field"><label>Bid Title</label><input value="'+E(d.bid.bidTitle)+'" oninput="BidDocs.updBid(\'bidTitle\',this.value)"></div>' +
+          '<div class="form-row">' +
+            '<div class="field"><label>Tender Number</label><input value="'+E(d.bid.tenderNumber)+'" oninput="BidDocs.updBid(\'tenderNumber\',this.value)"></div>' +
+            '<div class="field"><label>Reference Number</label><input value="'+E(d.bid.referenceNumber)+'" oninput="BidDocs.updBid(\'referenceNumber\',this.value)"></div>' +
+          '</div>' +
+          '<div class="form-row">' +
+            '<div class="field"><label>Organisation</label><input value="'+E(d.bid.organisation)+'" oninput="BidDocs.updBid(\'organisation\',this.value)"></div>' +
+            '<div class="field"><label>Department</label><input value="'+E(d.bid.department)+'" oninput="BidDocs.updBid(\'department\',this.value)"></div>' +
+          '</div>' +
+          '<div class="form-row">' +
+            '<div class="field"><label>Date</label><input type="date" value="'+E(d.bid.date)+'" oninput="BidDocs.updBid(\'date\',this.value)"></div>' +
+            '<div class="field"><label>Closing Date</label><input type="date" value="'+E(d.bid.closingDate)+'" oninput="BidDocs.updBid(\'closingDate\',this.value)"></div>' +
+          '</div>' +
+          '<div class="form-row">' +
+            '<div class="field"><label>Product / Item</label><input value="'+E(d.bid.productItem)+'" oninput="BidDocs.updBid(\'productItem\',this.value)"></div>' +
+            '<div class="field"><label>Location</label><input value="'+E(d.bid.location)+'" oninput="BidDocs.updBid(\'location\',this.value)"></div>' +
+          '</div>' +
+          d.bid.customFields.map((f,i)=>
+            '<div class="form-row" style="align-items:end;">' +
+              '<div class="field"><label>Custom Field</label><input value="'+E(f.label)+'" oninput="BidDocs.updBidField('+i+',\'label\',this.value)"></div>' +
+              '<div class="field"><label>Value</label><input value="'+E(f.value)+'" oninput="BidDocs.updBidField('+i+',\'value\',this.value)"></div>' +
+            '</div>' +
+            '<div style="text-align:right;margin:-8px 0 10px;"><button class="btn btn-outline btn-sm" onclick="BidDocs.removeBidField('+i+')">Remove</button></div>'
+          ).join('') +
+          '<button class="btn btn-outline btn-sm" onclick="BidDocs.addBidField()">&#65291; Custom Field</button>' +
+          '<div class="hint" style="margin-top:8px;">Use these anywhere in your text as {{bidNumber}}, {{raNumber}}, {{bidTitle}}, {{organisation}}, {{department}}, {{tenderNumber}}, {{referenceNumber}}, {{date}}, {{closingDate}}, {{productItem}}, {{location}}, {{companyName}}, {{designation}} — a custom field\'s placeholder is its label in lowercase (e.g. {{cf_local_content}}).</div>' +
+        '</div>' +
+
+        d.sections.map((sec,i)=>this.sectionEditorHTML(sec,i)).join('') +
+        '<button class="btn btn-outline btn-sm" onclick="BidDocs.addCustomSection()">&#65291; Add Custom Section</button>' +
+
+        '<div class="card card-pad" style="margin:14px 0;">' +
+          '<div class="wa-step">Closing</div>' +
+          '<div class="field"><label>Closing Line</label><input value="'+E(d.closing.companyLine)+'" oninput="BidDocs.updClosing(\'companyLine\',this.value)"></div>' +
+          '<div class="field"><label>Extra Closing Word <span class="hint">(optional, e.g. "Sincerely,")</span></label><input value="'+E(d.closing.extraWord)+'" oninput="BidDocs.updClosing(\'extraWord\',this.value)"></div>' +
+          '<div class="form-row">' +
+            '<label class="chk"><input type="checkbox" '+(d.closing.showSignature!==false?'checked':'')+' onchange="BidDocs.updClosing(\'showSignature\',this.checked)"> Show signature image</label>' +
+            '<label class="chk"><input type="checkbox" '+(d.closing.showStamp!==false?'checked':'')+' onchange="BidDocs.updClosing(\'showStamp\',this.checked)"> Show stamp image</label>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+
+      '<div>' +
+        '<div class="card card-pad" style="position:sticky;top:12px;">' +
+          '<div class="wa-step">Live Preview</div>' +
+          '<div id="bdPreviewPane">'+this.previewHTML()+'</div>' +
+        '</div>' +
+      '</div>' +
+      '</div>' +
+
+      '<div class="card" id="bdPdfWrap" style="display:none;margin-top:16px;">' +
+        '<div class="card-pad" style="padding-bottom:6px;"><h3 style="margin:0;font-size:14px;">PDF Preview</h3></div>' +
+        '<iframe id="bdPdfFrame" style="width:100%;height:760px;border:0;border-top:1px solid var(--border);"></iframe>' +
+      '</div>' +
+
+      '<div class="rp-sticky-actions">' +
+        '<button class="btn btn-outline btn-sm" onclick="BidDocs.saveDraft()">&#128190; Save Draft</button>' +
+        '<button class="btn btn-outline btn-sm" onclick="BidDocs.previewPDF()">&#128065; Preview PDF</button>' +
+        '<button class="btn btn-primary btn-sm" onclick="BidDocs.download()">&#11015; Download PDF</button>' +
+        '<button class="icon-btn" title="Print" onclick="BidDocs.print()">&#128424;</button>' +
+        (d.id?('<button class="btn btn-outline btn-sm" onclick="BidDocs.duplicate(\''+d.id+'\')">Duplicate</button>'):'') +
+        (d.id?'<button class="btn btn-outline btn-sm" onclick="BidDocs.createRevision()">Create Revision</button>':'') +
+        (d.status!=='Completed'?'<button class="btn btn-outline btn-sm" onclick="BidDocs.markCompleted()">&#10003; Mark Completed</button>':'') +
+        '<span class="rp-status-pill">'+statusBadge+' '+(d.docNumber?E(d.docNumber):'')+'</span>' +
+      '</div>';
+  },
+
+  /* ---------------- dashboard UI ---------------- */
+  setTab(t){ this.dashTab=t; this.render(); },
+  setSearch(v){ this.searchQ=v; this.renderDocList(this.filteredList()); },
+  setFilterTemplate(v){ this.filterTemplate=v; this.render(); },
+  filteredList(){
+    let list = Store.data.bidDocs.slice();
+    if(this.dashTab==='drafts') list = list.filter(d=>d.status==='Draft');
+    if(this.dashTab==='completed') list = list.filter(d=>d.status==='Completed');
+    if(this.filterTemplate) list = list.filter(d=>d.templateKey===this.filterTemplate);
+    if(this.searchQ){
+      const q=this.searchQ.toLowerCase();
+      list = list.filter(d=>[d.docNumber,(BIDDOC_TEMPLATES[d.templateKey]||{}).label,d.bid.bidNumber,d.bid.bidTitle,d.bid.organisation].some(v=>(v||'').toLowerCase().includes(q)));
+    }
+    list.sort((a,b)=>(b.updatedAt||b.createdAt||'').localeCompare(a.updatedAt||a.createdAt||''));
+    return list;
+  },
+  renderDashboard(){
+    const tabs = [['templates','Templates'],['all','All'],['drafts','Drafts'],['completed','Completed']];
+    document.getElementById('content').innerHTML =
+      '<div class="grid grid-4" style="margin-bottom:16px;">' +
+        '<div class="card card-pad" style="text-align:center;"><div style="font-size:22px;font-weight:700;">'+Store.data.bidDocs.length+'</div><div class="cell-mute" style="font-size:11.5px;">Total Documents</div></div>' +
+        '<div class="card card-pad" style="text-align:center;"><div style="font-size:22px;font-weight:700;color:var(--amber);">'+Store.data.bidDocs.filter(d=>d.status==='Draft').length+'</div><div class="cell-mute" style="font-size:11.5px;">Drafts</div></div>' +
+        '<div class="card card-pad" style="text-align:center;"><div style="font-size:22px;font-weight:700;color:var(--accent-dark);">'+Store.data.bidDocs.filter(d=>d.status==='Completed').length+'</div><div class="cell-mute" style="font-size:11.5px;">Completed</div></div>' +
+        '<div class="card card-pad" style="text-align:center;"><div style="font-size:22px;font-weight:700;">'+Object.keys(BIDDOC_TEMPLATES).length+'</div><div class="cell-mute" style="font-size:11.5px;">Templates</div></div>' +
+      '</div>' +
+      '<div class="tabs">' + tabs.map(t=>'<button class="tab-btn '+(this.dashTab===t[0]?'active':'')+'" onclick="BidDocs.setTab(\''+t[0]+'\')">'+t[1]+'</button>').join('') + '</div>' +
+      '<div id="bdTabBody"></div>';
+    if(this.dashTab==='templates') this.renderTemplateGrid();
+    else this.renderDocList(this.filteredList());
+  },
+  renderTemplateGrid(){
+    const E = Util.escapeHtml;
+    const box = document.getElementById('bdTabBody');
+    box.innerHTML = '<div class="hint" style="margin-bottom:12px;">Pick a template to start a new bid document. Every field is editable — nothing is hard-coded.</div>' +
+      '<div class="grid grid-3">' +
+      Object.keys(BIDDOC_TEMPLATES).map(key=>{
+        const t = BIDDOC_TEMPLATES[key];
+        return '<div class="card card-pad bd-tpl-card">' +
+          '<div style="font-weight:700;font-size:13.5px;margin-bottom:4px;">'+E(t.label)+'</div>' +
+          '<div class="cell-mute" style="font-size:12px;margin-bottom:12px;">'+E(t.desc||'')+'</div>' +
+          '<button class="btn btn-primary btn-sm" onclick="BidDocs.newFromTemplate(\''+key+'\')">+ New '+E(t.short)+'</button>' +
+        '</div>';
+      }).join('') +
+      '</div>';
+  },
+  renderDocList(list){
+    const E = Util.escapeHtml;
+    const box = document.getElementById('bdTabBody');
+    box.innerHTML =
+      '<div class="toolbar">' +
+        '<input placeholder="Search doc no., bid no., title, organisation..." style="min-width:260px;" value="'+E(this.searchQ)+'" oninput="BidDocs.setSearch(this.value)">' +
+        '<select onchange="BidDocs.setFilterTemplate(this.value)"><option value="">All Templates</option>' +
+          Object.keys(BIDDOC_TEMPLATES).map(k=>'<option value="'+k+'" '+(this.filterTemplate===k?'selected':'')+'>'+E(BIDDOC_TEMPLATES[k].label)+'</option>').join('') +
+        '</select>' +
+        '<div class="toolbar-spacer"></div>' +
+        '<button class="btn btn-primary btn-sm" onclick="BidDocs.setTab(\'templates\')">&#65291; New Bid Document</button>' +
+      '</div>' +
+      '<div class="card"><div class="table-wrap">' +
+      (list.length? (
+        '<table><thead><tr><th>Doc No.</th><th>Template</th><th>Bid</th><th>Status</th><th>Updated</th><th></th></tr></thead><tbody>' +
+        list.map(d=>{
+          const tpl = BIDDOC_TEMPLATES[d.templateKey]||{label:d.templateKey};
+          return '<tr>' +
+            '<td class="mono cell-mute">'+E(d.docNumber||d.id||'(unsaved)')+'</td>' +
+            '<td>'+E(tpl.label)+(d.revision?(' <span class="badge badge-gray">R'+d.revision+'</span>'):'')+'</td>' +
+            '<td class="cell-mute">'+E(d.bid.bidNumber||d.bid.bidTitle||'—')+'</td>' +
+            '<td><span class="badge '+(d.status==='Completed'?'badge-green':'badge-amber')+'">'+d.status+'</span></td>' +
+            '<td class="cell-mute">'+(d.updatedAt?Util.fmtDateTime(d.updatedAt):(d.createdAt?Util.fmtDateTime(d.createdAt):'—'))+'</td>' +
+            '<td style="white-space:nowrap;">' +
+              '<button class="icon-btn" title="View / Edit" onclick="BidDocs.edit(\''+d.id+'\')">&#9998;</button>' +
+              '<button class="icon-btn" title="Duplicate" onclick="BidDocs.duplicate(\''+d.id+'\')">&#128203;</button>' +
+              '<button class="icon-btn" title="Preview" onclick="BidDocs.quickPreview(\''+d.id+'\')">&#128065;</button>' +
+              '<button class="icon-btn" title="Download PDF" onclick="BidDocs.quickDownload(\''+d.id+'\')">&#11015;</button>' +
+              '<button class="icon-btn" title="Print" onclick="BidDocs.quickPrint(\''+d.id+'\')">&#128424;</button>' +
+              '<button class="icon-btn" title="Delete" onclick="BidDocs.deleteDoc(\''+d.id+'\')">&#128465;</button>' +
+            '</td>' +
+          '</tr>';
+        }).join('') +
+        '</tbody></table>'
+      ) : '<div class="empty-state"><div class="ic">&#128196;</div><div class="t">No bid documents yet</div><button class="btn btn-primary btn-sm" style="margin-top:10px;" onclick="BidDocs.setTab(\'templates\')">+ New Bid Document</button></div>') +
+      '</div></div>';
+  }
+};
+Views.biddocs = ()=>BidDocs.render();
 
 /* =====================================================================
    USERS & ROLES (admin only)
