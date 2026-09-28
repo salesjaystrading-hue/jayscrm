@@ -7023,7 +7023,7 @@ function oppClassify(r){
   // well just because it's large and closing soon.
   if(!matched.length){
     return { score:0, type:'OTHER', hits:[],
-      scoreBreakdown:{product:0, sector:0, subSector:0, procurement:0, location:0, fund:0, deadline:0, history:0} };
+      scoreBreakdown:{product:0, sector:0, subSector:0, procurement:0, location:0, fund:0, deadline:0, history:0, zeroExpenditure:0} };
   }
 
   const dominant = Object.entries(categoryWeights).sort((a,b)=>b[1]-a[1])[0];
@@ -7070,15 +7070,26 @@ function oppClassify(r){
   const lb = oppNorm(r['LB Name']);
   const historyScore = (lb && Object.entries(Store.data.oppTracking||{}).some(([k,tr])=>tr.status==='Won' && k.split('|')[1]===lb)) ? 10 : 0;
 
+  // 9) Zero Expenditure - 5% bonus. A project with money allocated but a
+  //    stated Expenditure of exactly 0 has its full fund still untouched -
+  //    genuinely more actionable to pursue right now than one that's
+  //    already partly (or fully) spent. Only credited when Expenditure is
+  //    an explicit "0" (not simply blank/unknown) AND there's an actual
+  //    fund amount to spend - an all-blank row gets no free credit, same
+  //    rule this scoring model already applies to every other factor.
+  const expRaw = String(r['Expenditure']!=null ? r['Expenditure'] : '').trim();
+  const zeroExpenditureScore = (fund>0 && expRaw!=='' && oppMoney(expRaw)===0) ? 5 : 0;
+
   const score = Math.round(Math.min(100,
-    productScore + sectorScore + subSectorScore + procurementScore + locationScore + fundScore + deadlineScore + historyScore));
+    productScore + sectorScore + subSectorScore + procurementScore + locationScore + fundScore + deadlineScore + historyScore + zeroExpenditureScore));
 
   return {
     score, type, hits: [...new Set(matched.map(m=>m.word))].slice(0,15),
     scoreBreakdown: {
       product: Math.round(productScore), sector: sectorScore, subSector: subSectorScore,
       procurement: Math.round(procurementScore), location: locationScore,
-      fund: Math.round(fundScore*10)/10, deadline: deadlineScore, history: historyScore
+      fund: Math.round(fundScore*10)/10, deadline: deadlineScore, history: historyScore,
+      zeroExpenditure: zeroExpenditureScore
     }
   };
 }
@@ -7350,7 +7361,8 @@ const OppFinder = {
           [['Product Match',r.scoreBreakdown.product,30],['Sector',r.scoreBreakdown.sector,15],
            ['Sub-sector',r.scoreBreakdown.subSector,10],['Procurement Wording',r.scoreBreakdown.procurement,10],
            ['District',r.scoreBreakdown.location,5],['Fund Value',r.scoreBreakdown.fund,10],
-           ['Deadline',r.scoreBreakdown.deadline,10],['Past Success Here',r.scoreBreakdown.history,10]]
+           ['Deadline',r.scoreBreakdown.deadline,10],['Past Success Here',r.scoreBreakdown.history,10],
+           ['Zero Expenditure',r.scoreBreakdown.zeroExpenditure||0,5]]
            .map(([label,val,max])=>'<div class="card card-pad" style="padding:7px;text-align:center;"><div class="hint">'+E(label)+'</div><b>'+val+'</b><span class="hint">/'+max+'</span></div>').join('') +
         '</div>' : '') +
       '<h3 style="margin:16px 0 8px;">\u2b50 My Opportunity</h3>' +
