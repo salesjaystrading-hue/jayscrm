@@ -984,6 +984,30 @@ const Store = {
       return data;
     }catch(e){ console.error('opp batch merge failed', e); return null; }
   },
+  /* oppProjects now lives in its own indexed table (opp_projects_rows),
+     not the jays_crm_store blob every other collection uses - reading
+     it back is a plain SELECT via this function, never a rewrite, so
+     it stays cheap and fast no matter how large the collection gets. */
+  async loadOppProjects(){
+    try{
+      const { data, error } = await sb.rpc('opp_get_all');
+      if(error) throw error;
+      this.loadFailed['jays_oppprojects'] = false;
+      return data || [];
+    }catch(e){ console.error('opp load failed', e); this.loadFailed['jays_oppprojects'] = true; return []; }
+  },
+  /* Full replace - only for the rare occasions the ENTIRE collection
+     needs rewriting at once (Recalculate All Scores, Delete All Project
+     Records, restoring oppProjects from a Backup file). Unlike
+     mergeOppBatch this is not cheap - it's fine here because none of
+     those happen as part of routine importing. */
+  async replaceAllOppProjects(rows){
+    try{
+      const { error } = await sb.rpc('opp_replace_all', { p_rows: rows });
+      if(error) throw error;
+      return true;
+    }catch(e){ console.error('opp replace-all failed', e); return false; }
+  },
   async loadAll(){
     this.loadFailed = {};
     this.data.customers = await this.loadKey('jays_customers', null);
@@ -1011,7 +1035,7 @@ const Store = {
     this.data.rateDocs = await this.loadKey('jays_ratedocs', []);
     this.data.rateTerms = await this.loadKey('jays_rateterms', []);
     this.data.rateDocTemplates = await this.loadKey('jays_ratedoctemplates', []);
-    this.data.oppProjects = await this.loadKey('jays_oppprojects', []);
+    this.data.oppProjects = await this.loadOppProjects();
     this.data.oppTracking = await this.loadKey('jays_opptracking', {});
     this.data.oppProducts = await this.loadKey('jays_oppproducts', []);
     this.data.oppImportHistory = await this.loadKey('jays_oppimporthistory', []);
@@ -7153,9 +7177,8 @@ const OppFinder = {
       return false;
     }
     // Re-pull the merged collection so the dashboard/table reflect the
-    // save immediately (a GET of the full array; downloads have not
-    // been the problem here, only uploads were).
-    Store.data.oppProjects = await Store.loadKey('jays_oppprojects', Store.data.oppProjects);
+    // save immediately (a cheap read from opp_projects_rows).
+    Store.data.oppProjects = await Store.loadOppProjects();
     const added = result.newCount||0, updated = result.updatedCount||0;
     Store.data.oppImportHistory.unshift({date:new Date().toISOString(), source:source||'Excel Import',
       records:incoming.length, newCount:added, updated, duplicates:updated});
@@ -7288,8 +7311,9 @@ const OppFinder = {
   async recalculateScores(){
     if(!Store.data.oppProjects.length){ UI.toast('No projects to recalculate'); return; }
     Store.data.oppProjects = Store.data.oppProjects.map(r=>Object.assign({}, r, oppClassify(r)));
-    const ok = await Store.save('oppProjects');
+    const ok = await Store.replaceAllOppProjects(Store.data.oppProjects);
     if(ok){ await Activity.log('Project opportunity scores recalculated', Store.data.oppProjects.length+' project(s)'); UI.toast('Scores updated'); }
+    else UI.toast('Save failed — check your connection and try again.');
     this.render();
   },
   /* Forces a fresh fetch straight from Supabase, bypassing whatever is
@@ -7298,7 +7322,7 @@ const OppFinder = {
      in-memory state. */
   async reloadFromDatabase(){
     UI.toast('Reloading from database\u2026');
-    const fresh = await Store.loadKey('jays_oppprojects', []);
+    const fresh = await Store.loadOppProjects();
     if(Store.loadFailed['jays_oppprojects']){
       UI.toast('Could not reach the database \u2014 check your connection and try again.');
       return;
@@ -7942,7 +7966,13 @@ const Backup = {
       ['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs'].forEach(k=>{
         if(data[k]!==undefined) Store.data[k] = data[k];
       });
-      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs'].map(k=>Store.save(k)));
+      // oppProjects lives in its own indexed table now, not the
+      // jays_crm_store blob the rest of this list saves to - it needs
+      // the dedicated full-replace path so opp_projects_rows (what
+      // imports actually merge against) gets restored too, not just
+      // the legacy blob.
+      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs'].map(k=>Store.save(k)));
+      if(data['oppProjects']!==undefined) await Store.replaceAllOppProjects(Store.data.oppProjects);
       await Activity.log('Data restored', 'Restored from backup file '+file.name);
       UI.toast('Data restored successfully');
       Router.render('backup');
@@ -9145,7 +9175,7 @@ const SettingsView = {
     if(!confirm('Delete all '+n+' saved project record(s)? This cannot be undone. Your "My Opportunities" tracking, product keywords and keyword library will NOT be affected.')) return;
     Store.data.oppProjects = [];
     Store.data.oppImportHistory = [];
-    const ok1 = await Store.save('oppProjects');
+    const ok1 = await Store.replaceAllOppProjects([]);
     const ok2 = await Store.save('oppImportHistory');
     if(ok1 && ok2){ await Activity.log('All project opportunity records deleted', n+' record(s)'); UI.toast('Deleted '+n+' record(s)'); }
     Router.render('settings');
