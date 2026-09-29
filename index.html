@@ -965,6 +965,25 @@ const Store = {
       return true;
     }catch(e){ console.error('storage save failed', key, e); return false; }
   },
+  /* Project Opportunity's oppProjects collection is a single JSON blob
+     row like every other collection here, but it's also the one that
+     regularly reaches tens of thousands of records - a plain saveKey()
+     re-uploads the ENTIRE array on every import, and once that array
+     passed a few MB, browser saves started failing outright ("check
+     your connection") purely from the upload size, not a real network
+     problem. This calls a Postgres function (opp_merge_batch, added as
+     a migration on the Supabase project) that does the merge server
+     side: only the small newly-parsed batch travels over the network,
+     never the whole existing collection. Returns {newCount, updatedCount,
+     total} on success, or null on failure (same failure signal shape
+     other Store methods use, so callers can fall back to a toast). */
+  async mergeOppBatch(batch){
+    try{
+      const { data, error } = await sb.rpc('opp_merge_batch', { p_batch: batch });
+      if(error) throw error;
+      return data;
+    }catch(e){ console.error('opp batch merge failed', e); return null; }
+  },
   async loadAll(){
     this.loadFailed = {};
     this.data.customers = await this.loadKey('jays_customers', null);
@@ -6898,23 +6917,27 @@ const OPP_CATEGORY_NAMES = {
 const OPP_STATUSES = ['New','Researching','Contacted','Interested','Quotation','Submitted','Won','Lost'];
 /* Canonical schema, taken directly from the official Excel template -
    this is now the authoritative column set for Project Opportunity
-   data end to end (detail view, CSV export, template download). */
+   data end to end (detail view, CSV export, template download).
+   Agency / State Sponsored Scheme / Central Sponsored Scheme / Total
+   Benificiaries / Project Category1 / Disaster Management were removed
+   from this list on request, to keep imported records (and the
+   template) smaller - these columns are no longer stored, imported,
+   or shown anywhere, going forward. Existing records also had these
+   keys stripped from the database directly. */
 const OPP_FIELDS = ['Project No','Project Name Mal','Project Name Eng','LB Name','LB Type','District',
   'Impl Code','Impl Officer Name','Project Type','Project Category','Sector Type','Sector','Sub Sector',
-  'Impl mode','Agency','State Sponsored Scheme','Central Sponsored Scheme','Total Benificiaries','Status',
-  'Fund Description','FundTotal','Expenditure Description','Expenditure','Balance','Project Category1',
-  'Disaster Management',
+  'Impl mode','Status',
+  'Fund Description','FundTotal','Expenditure Description','Expenditure','Balance',
   '\u0d24\u0d28\u0d4d\u200d\u0d35\u0d7c\u0d37 \u0d2c\u0d1c\u0d31\u0d4d\u0d31\u0d3f\u0d32\u0d4d\u200d \u0d09\u0d33\u0d4d\u200d\u0d2a\u0d4d\u0d2a\u0d46\u0d1f\u0d41\u0d24\u0d4d\u0d24\u0d41\u0d28\u0d4d\u0d28 \u0d38\u0d4d\u0d2a\u0d3f\u0d32\u0d4d\u200d \u0d13\u0d35\u0d7c \u0d2a\u0d4d\u0d30\u0d4b\u0d1c\u0d15\u0d4d\u0d1f\u0d4d \u0d06\u0d23\u0d4b',
   '\u0d38\u0d4d\u0d2a\u0d3f\u0d32\u0d4d\u200d \u0d13\u0d35\u0d7c \u0d05\u0d27\u0d3f\u0d15\u0d35\u0d3f\u0d39\u0d3f\u0d24\u0d24\u0d4d\u0d24\u0d3f\u0d7d \u0d09\u0d33\u0d4d\u200d\u0d2a\u0d4d\u0d2a\u0d46\u0d1f\u0d41\u0d24\u0d4d\u0d24\u0d3f\u0d2f\u0d3f\u0d1f\u0d4d\u0d1f\u0d41\u0d33\u0d4d\u0d33 \u0d2a\u0d41\u0d24\u0d3f\u0d2f \u0d2a\u0d4d\u0d30\u0d4b\u0d1c\u0d15\u0d4d\u0d1f\u0d4d \u0d06\u0d23\u0d4b',
   'Project Date','Closing Date'];
-/* Column order for the downloadable Excel template - the 26 named
-   fields (the two long Malayalam question-columns are included via
-   OPP_FIELDS for display/detail purposes but are unusual to hand-fill
-   in a blank template, so the template offers the standard 26). */
+/* Column order for the downloadable Excel template - reduced from the
+   original 26 to 20 named fields (see note on OPP_FIELDS above for
+   which 6 were dropped and why). */
 const OPP_TEMPLATE_COLUMNS = ['Project No','Project Name Mal','Project Name Eng','LB Name','LB Type','District',
   'Impl Code','Impl Officer Name','Project Type','Project Category','Sector Type','Sector','Sub Sector',
-  'Impl mode','Agency','State Sponsored Scheme','Central Sponsored Scheme','Total Benificiaries','Status',
-  'Fund Description','FundTotal','Expenditure Description','Expenditure','Balance','Project Category1','Disaster Management'];
+  'Impl mode','Status',
+  'Fund Description','FundTotal','Expenditure Description','Expenditure','Balance'];
 
 function oppNorm(v){ return String(v==null?'':v).toLowerCase().replace(/\s+/g,' ').trim(); }
 function oppMoney(v){ const n = Number(String(v==null?'':v).replace(/[,\u20B9\s]/g,'')); return isNaN(n)?0:n; }
@@ -7111,24 +7134,35 @@ const OppFinder = {
   setTab(t){ this.tab = t; this.render(); },
 
   /* ---------------- import: paste TSV or upload an Excel file ---------------- */
+  /* Saves via Store.mergeOppBatch - only THIS batch travels to the
+     server, where it's merged into the existing collection in one SQL
+     statement (see opp_merge_batch migration). Previously this built
+     the full merged array in JS and pushed the WHOLE thing back with
+     Store.save('oppProjects'), which meant every import re-uploaded
+     every record ever imported before it - fine at a few hundred rows,
+     but it made saves progressively larger (and eventually unreliable)
+     as the collection grew into the tens of thousands. */
   async importIncoming(incoming, source){
     const msg = document.getElementById('oppMsg');
     if(!incoming.length){ if(msg) msg.textContent = 'No rows detected.'; return false; }
-    const old = new Map(Store.data.oppProjects.map(r=>[oppKeyOf(r), r]));
-    let added = 0, updated = 0, dupes = 0;
-    incoming.forEach(r=>{
-      const k = oppKeyOf(r);
-      if(old.has(k)){ dupes++; old.set(k, Object.assign({}, old.get(k), r)); updated++; }
-      else { old.set(k, r); added++; }
-    });
-    Store.data.oppProjects = [...old.values()];
+    if(msg) msg.textContent = 'Saving to database\u2026';
+    const result = await Store.mergeOppBatch(incoming);
+    if(!result){
+      if(msg) msg.textContent = 'Save failed \u2014 check your connection and try again.';
+      UI.toast('Save failed \u2014 check your connection and try again.');
+      return false;
+    }
+    // Re-pull the merged collection so the dashboard/table reflect the
+    // save immediately (a GET of the full array; downloads have not
+    // been the problem here, only uploads were).
+    Store.data.oppProjects = await Store.loadKey('jays_oppprojects', Store.data.oppProjects);
+    const added = result.newCount||0, updated = result.updatedCount||0;
     Store.data.oppImportHistory.unshift({date:new Date().toISOString(), source:source||'Excel Import',
-      records:incoming.length, newCount:added, updated, duplicates:dupes});
+      records:incoming.length, newCount:added, updated, duplicates:updated});
     Store.data.oppImportHistory = Store.data.oppImportHistory.slice(0,30);
-    const ok1 = await Store.save('oppProjects');
     const ok2 = await Store.save('oppImportHistory');
-    if(ok1 && ok2) await Activity.log('Project opportunity data imported', incoming.length+' row(s), '+added+' new, '+updated+' updated');
-    if(msg) msg.textContent = `Imported ${incoming.length} rows \u2022 ${added} new \u2022 ${updated} updated \u2022 ${dupes} duplicate keys handled.`;
+    if(ok2) await Activity.log('Project opportunity data imported', incoming.length+' row(s), '+added+' new, '+updated+' updated');
+    if(msg) msg.textContent = `Imported ${incoming.length} rows \u2022 ${added} new \u2022 ${updated} updated (merged server-side).`;
     this.render();
     return true;
   },
