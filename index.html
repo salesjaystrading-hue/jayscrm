@@ -20,6 +20,9 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<!-- Field Sales Map View - Leaflet + OpenStreetMap tiles, no API key required -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <style>
   :root{
     --navy:#0B1424;
@@ -178,6 +181,13 @@
   @keyframes loginLogoGlow{
     0%,100%{filter:drop-shadow(0 10px 25px rgba(0,0,0,0.35));}
     50%{filter:drop-shadow(0 10px 32px rgba(235,90,40,0.45));}
+  }
+  /* Small live-GPS-tracking pulse dot, used next to "Started" visits in
+     the Field Sales visits list. */
+  @keyframes pulse{
+    0%{box-shadow:0 0 0 0 rgba(22,163,74,0.5);}
+    70%{box-shadow:0 0 0 6px rgba(22,163,74,0);}
+    100%{box-shadow:0 0 0 0 rgba(22,163,74,0);}
   }
   /* Sign-in button gets a slow light sweep on hover, on top of its
      existing hover/active behaviour (untouched). */
@@ -738,9 +748,9 @@
 
 <div class="mobile-bottom-nav" id="mobileBottomNav" style="display:none;">
   <div class="mbn-item" data-view="dashboard" onclick="go('dashboard')"><span class="ic">&#127968;</span><span>Home</span></div>
+  <div class="mbn-item" data-view="visits" onclick="go('visits')"><span class="ic">&#128100;</span><span>Visits</span></div>
   <div class="mbn-item" data-view="customers" onclick="go('customers')"><span class="ic">&#128101;</span><span>Leads</span></div>
-  <div class="mbn-item" data-view="tasks" onclick="go('tasks')"><span class="ic">&#9989;</span><span>Tasks</span></div>
-  <div class="mbn-item" data-view="notifications" onclick="go('notifications')"><span class="ic">&#128276;</span><span>Alerts</span></div>
+  <div class="mbn-item" data-view="fieldmap" onclick="go('fieldmap')"><span class="ic">&#128506;</span><span>Map</span></div>
   <div class="mbn-item" onclick="UI.toggleSidebar()"><span class="ic">&#8942;</span><span>More</span></div>
 </div>
 
@@ -752,6 +762,11 @@
     <button onclick="QuickCreate.go('order')">&#128230; Order</button>
     <button onclick="QuickCreate.go('followup')">&#9200; Follow-up</button>
     <button onclick="QuickCreate.go('payment')">&#128176; Payment</button>
+    <button onclick="QuickCreate.go('quickLead')">&#128100; Quick Lead (Field)</button>
+    <button onclick="QuickCreate.go('recordVisit')">&#128100; Record Visit</button>
+    <button onclick="QuickCreate.go('requirement')">&#128221; Add Requirement</button>
+    <button onclick="QuickCreate.go('travel')">&#128664; Start Travel</button>
+    <button onclick="QuickCreate.go('findLocation')">&#128205; Find Location</button>
   </div>
   <button class="qc-fab" id="qcFab" onclick="QuickCreate.toggle()" title="Quick Create">&#65291;</button>
 </div>
@@ -860,8 +875,18 @@ const DROPDOWNS = {
   bidType: ['Bid','RA (Reverse Auction)'],
   bidStatus: ['New','Saved','Under Review','Go / No-Go Decision','Documents Pending','Under Preparation','Ready for Submission','Submitted','Technical Evaluation','Financial Evaluation','Won','Lost','Cancelled','Not Participating'],
   leaveType: ['Casual Leave','Sick Leave','Earned Leave','Unpaid Leave','Other'],
-  attendanceStatus: ['Present','Leave','Absent']
+  attendanceStatus: ['Present','Leave','Absent'],
+  leadSource: ['Referral','Walk-in','Website','WhatsApp','Existing Customer','Field Visit','Government Project','Other'],
+  customerType: ['Individual','Government / Panchayat','Institution','Dealer / Reseller','Contractor','Other'],
+  visitType: ['New Lead','Customer Visit','Follow-up','Demo','Site Survey','Payment Collection','Complaint','Other'],
+  visitOutcome: ['Interested','Not Interested','Requirement Collected','Quotation Needed','Follow-up','Closed'],
+  visitStatus: ['Planned','Started','Completed','Cancelled'],
+  requirementStatus: ['New','Quotation Required','Quotation Sent','Negotiation','Won','Lost'],
+  requirementPriority: ['Low','Medium','High','Urgent'],
+  travelMode: ['Bike','Car','Public Transport','Walk','Other'],
+  quotationStatus: ['Draft','Generated','Sent','Negotiation','Accepted','Rejected']
 };
+const QUOTATION_OPEN_STATUSES = ['Draft','Generated','Sent','Negotiation'];
 const DEFAULT_BID_CHECKLIST = ['PAN','GST Certificate','UDYAM Certificate','Experience Certificate','Turnover Certificate','Financial Statement','Product Catalogue','Technical Specification','OEM Authorization','MAF','EMD Document'];
 const BID_TERMINAL_STATUSES = ['Won','Lost','Cancelled','Not Participating'];
 
@@ -937,7 +962,7 @@ function dashboardCardsHTML(title, cards){
   return `<div class="card card-pad" style="margin-bottom:16px;">
     <h3 style="margin:0 0 12px;font-size:14px;">${title}</h3>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;">
-      ${cards.map(c=>`<div class="card card-pad" style="text-align:center;"><div style="font-size:22px;font-weight:700;${c.color?`color:${c.color};`:''}">${c.value}</div><div class="cell-mute" style="font-size:11.5px;">${Util.escapeHtml(c.label)}</div></div>`).join('')}
+      ${cards.map(c=>`<div class="card card-pad" ${c.onclick?`onclick="${c.onclick}" style="text-align:center;cursor:pointer;"`:'style="text-align:center;"'}><div style="font-size:22px;font-weight:700;${c.color?`color:${c.color};`:''}">${c.value}</div><div class="cell-mute" style="font-size:11.5px;">${Util.escapeHtml(c.label)}</div></div>`).join('')}
     </div>
   </div>`;
 }
@@ -956,7 +981,12 @@ const Store = {
     gemcrac: [], orders: [], complaints: [], bids: [], waTemplates: [], waHistory: [],
     rateTemplates: [], rateDocs: [], rateTerms: [], rateDocTemplates: [],
     oppProjects: [], oppTracking: {}, oppProducts: [], oppImportHistory: [], oppKeywordGroups: [],
-    attendance: [], leaveRequests: [], bidDocs: []
+    attendance: [], leaveRequests: [], bidDocs: [],
+    /* Field Sales module (visits, requirements, travel log) - plain
+       jays_crm_store-backed collections like every other module above,
+       so the existing Store.save('visits')/loadKey() machinery just
+       works for them with zero new persistence code. */
+    visits: [], requirements: [], travelLogs: []
   },
   /* One-time, non-destructive lift of the old WhatsApp rate templates into
      the Rate Template Library. The source waTemplates rows are NEVER deleted
@@ -1114,6 +1144,9 @@ const Store = {
     this.data.attendance = await this.loadKey('jays_attendance', []);
     this.data.leaveRequests = await this.loadKey('jays_leaverequests', []);
     this.data.bidDocs = await this.loadKey('jays_biddocs', []);
+    this.data.visits = await this.loadKey('jays_visits', []);
+    this.data.requirements = await this.loadKey('jays_requirements', []);
+    this.data.travelLogs = await this.loadKey('jays_travellogs', []);
     await this.migrateWaTemplates();
 
     const settingsFailedBefore = false;
@@ -1428,11 +1461,20 @@ const NAV = [
     {id:'dashboard', ic:'&#127968;', label:'Dashboard'},
     {id:'notifications', ic:'&#128276;', label:'Notifications'},
   ]},
+  {sec:'Field Sales', items:[
+    {id:'fieldhome', ic:'&#128204;', label:'My Day'},
+    {id:'visits', ic:'&#128100;', label:'Visits'},
+    {id:'requirements', ic:'&#128221;', label:'Requirements'},
+    {id:'travel', ic:'&#128664;', label:'Travel Log'},
+    {id:'fieldmap', ic:'&#128506;', label:'Field Map'},
+    {id:'findlocation', ic:'&#128205;', label:'Find Location'},
+  ]},
   {sec:'Sales', items:[
     {id:'leads', ic:'&#128101;', label:'Leads'},
     {id:'customers', ic:'&#128100;', label:'Customers'},
     {id:'pipeline', ic:'&#128202;', label:'Sales Pipeline'},
     {id:'followupcentre', ic:'&#9200;', label:'Follow-ups'},
+    {id:'officequeue', ic:'&#128203;', label:'Office Queue'},
     {id:'quotations', ic:'&#128196;', label:'Quotations'},
     {id:'rate_docs', ic:'&#128196;', label:'Rate / Offer PDF'},
     {id:'orders', ic:'&#128230;', label:'Orders'},
@@ -1459,6 +1501,7 @@ const NAV = [
   ]},
   {sec:'Analytics', items:[
     {id:'reports', ic:'&#128200;', label:'Reports'},
+    {id:'fieldreports', ic:'&#128202;', label:'Field Reports'},
   ]},
   {sec:'System', items:[
     {id:'backup', ic:'&#9729;', label:'Backup &amp; Restore'},
@@ -1474,6 +1517,7 @@ const PAGE_META = {
   customers:['Customers','Every enquiry, tracked from first contact to close'],
   pipeline:['Sales Pipeline','Leads, quotations and orders — one funnel'],
   followupcentre:['Follow-ups','Today, tomorrow, overdue &amp; upcoming — one click away'],
+  officequeue:['Office Queue','New requirements from the field, awaiting office action'],
   quotations:['Quotations','Create and track quotes'],
   rate_docs:['Rate / Offer PDF','Build professional rate offers and export them as PDF'],
   oppfinder:['Project Opportunity','Match panchayat/local-body project data against JAYS products'],
@@ -1491,6 +1535,13 @@ const PAGE_META = {
   tasks:['Tasks & To-Do','Team to-do list &amp; task tracking'],
   notes:['Notes','Quick notes & reminders'],
   reports:['Reports','Business performance'],
+  fieldhome:['My Day','Today’s visits, plan and field activity'],
+  visits:['Visits','Record and track every field visit'],
+  requirements:['Requirements','Customer requirements collected in the field'],
+  travel:['Travel Log','Journeys, distance and travel expense'],
+  fieldmap:['Field Map','Leads, customers and today’s visits on the map'],
+  findlocation:['Find Location','Capture your current GPS position'],
+  fieldreports:['Field Reports','Field-sales performance and activity reports'],
   backup:['Backup & Restore','Keep your business data safe'],
   users:['Users & Roles','Manage team access'],
   settings:['Settings','Company & app preferences']
@@ -1519,6 +1570,13 @@ function navBadgeCount(id){
   const today = Util.todayISO();
   if(id==='followupcentre'){
     return Store.data.followups.filter(f=>f.status!=='Done').length;
+  }
+  if(id==='visits'){
+    const me = Field.me();
+    return Store.data.visits.filter(v=>(Auth.isAdmin()||v.staff===me) && (v.status==='Planned'||v.status==='Started') && (v.plannedDate===today || (v.startAt||'').slice(0,10)===today)).length;
+  }
+  if(id==='requirements'){
+    return Store.data.requirements.filter(r=>r.status==='Quotation Required').length;
   }
   if(id==='leads'){
     return Store.data.customers.filter(c=>['New Lead','First Contact','Call Not Taken'].includes(c.status)).length;
@@ -1854,7 +1912,7 @@ Views.dashboard = function(){
   const overdueFollowups = Store.data.followups.filter(f=>f.status!=='Done' && f.date && f.date<today);
   const activeLeads = c.filter(x=>!['Converted Customer','Not Interested','Closed Lost'].includes(x.status));
   const converted = c.filter(x=>x.status==='Converted Customer').length;
-  const openQuotations = Store.data.quotations.filter(q=>q.status==='Draft'||q.status==='Sent');
+  const openQuotations = Store.data.quotations.filter(q=>QUOTATION_OPEN_STATUSES.includes(q.status));
   const paymentsDue = Store.data.payments.filter(p=>p.status==='Pending' && p.followupDate && p.followupDate<=today);
   const openComplaints = Store.data.complaints.filter(x=>x.status!=='Solved');
   const lowStockProducts = Store.data.products.filter(p=>!p.stock||Number(p.stock)<5);
@@ -1973,15 +2031,36 @@ Views.dashboard = function(){
     </div>
 
     ${dashboardCardsHTML('More at a Glance', [
-      {label:'Follow-ups Today', value:fuToday},
-      {label:'Open Complaints', value:openComplaints.length, color: openComplaints.length?'var(--amber,#d97706)':undefined},
-      {label:'GeM Bids Closing Soon', value:bidsClosingSoon.length, color: bidsClosingSoon.length?'var(--red,#dc2626)':undefined},
-      {label:'Project Opportunities Needing Action', value:oppNeedingAction.length, color:'var(--blue,#2563eb)'},
-      {label:'Orders In Progress', value:ordersInProgress.length},
-      {label:'Tasks Due Today', value:todaysTasks.length},
-      {label:'Staff In Today', value:attCounts.Office+attCounts.Home},
-      {label:'Converted Customers', value:converted, color:'var(--green,#16a34a)'}
+      {label:'Follow-ups Today', value:fuToday, onclick:"go('followupcentre')"},
+      {label:'Open Complaints', value:openComplaints.length, color: openComplaints.length?'var(--amber,#d97706)':undefined, onclick:"go('complaints')"},
+      {label:'GeM Bids Closing Soon', value:bidsClosingSoon.length, color: bidsClosingSoon.length?'var(--red,#dc2626)':undefined, onclick:"go('bidsearch')"},
+      {label:'Project Opportunities Needing Action', value:oppNeedingAction.length, color:'var(--blue,#2563eb)', onclick:"go('oppfinder')"},
+      {label:'Orders In Progress', value:ordersInProgress.length, onclick:"go('orders')"},
+      {label:'Tasks Due Today', value:todaysTasks.length, onclick:"go('tasks')"},
+      {label:'Staff In Today', value:attCounts.Office+attCounts.Home, onclick:"go('attendance')"},
+      {label:'Converted Customers', value:converted, color:'var(--green,#16a34a)', onclick:"go('customers')"},
+      {label:'Pending Payments Due', value:paymentsDue.length, color: paymentsDue.length?'var(--red,#dc2626)':undefined, onclick:"go('payments')"}
     ])}
+
+    ${Auth.isAdmin() ? (()=>{
+      const vToday = Store.data.visits.filter(v=>(v.startAt||'').slice(0,10)===today);
+      const activeStaff = new Set(vToday.map(v=>v.staff).filter(Boolean));
+      const missed = Store.data.visits.filter(v=>v.status==='Planned' && v.plannedDate && v.plannedDate<today);
+      const distToday = Store.data.travelLogs.filter(t=>(t.startAt||'').slice(0,10)===today).reduce((s,t)=>s+(Number(t.distanceKm)||0),0);
+      const newReqs = Store.data.requirements.filter(r=>r.status==='New');
+      const quoteReqReqs = Store.data.requirements.filter(r=>r.status==='Quotation Required');
+      return dashboardCardsHTML('&#128100; Field Activity (Today) &mdash; Manager View', [
+        {label:'Staff Active in Field', value: activeStaff.size},
+        {label:'Visits Today', value: vToday.length, onclick:"go('visits')"},
+        {label:'Visits Completed', value: vToday.filter(v=>v.status==='Completed').length, color:'var(--green,#16a34a)', onclick:"go('visits')"},
+        {label:'Missed / Overdue Visits', value: missed.length, color: missed.length?'var(--red,#dc2626)':undefined, onclick:"go('visits')"},
+        {label:'Requirements Collected Today', value: Store.data.requirements.filter(r=>(r.createdAt||'').slice(0,10)===today).length, onclick:"go('requirements')"},
+        {label:'Requirements Awaiting Office Action', value: newReqs.length+quoteReqReqs.length, color:'var(--blue,#2563eb)', onclick:"go('officequeue')"},
+        {label:'Requirements Marked Quotation Required', value: quoteReqReqs.length, color:'var(--amber,#d97706)', onclick:"go('officequeue')"},
+        {label:'Quotations Awaiting Follow-up', value: Store.data.quotations.filter(q=>QUOTATION_OPEN_STATUSES.includes(q.status)).length, onclick:"go('quotations')"},
+        {label:'Distance Travelled (km)', value: distToday.toFixed(1)}
+      ]);
+    })() : ''}
 
     <div class="grid grid-2" style="margin-bottom:16px;align-items:start;">
       <div class="card card-pad">
@@ -2177,6 +2256,11 @@ const QuickCreate = {
     else if(action==='order'){ go('orders'); OrdersMgmt.openForm(null); }
     else if(action==='followup'){ go('followupcentre'); Followups.openForm(null,null); }
     else if(action==='payment'){ go('payments'); Payments.openForm(null); }
+    else if(action==='quickLead'){ Field.QuickLead.open(); }
+    else if(action==='recordVisit'){ go('visits'); Field.Visits.openStartForm(null); }
+    else if(action==='requirement'){ go('requirements'); Field.Requirements.openForm(null, null); }
+    else if(action==='travel'){ go('travel'); Field.Travel.openStartForm(); }
+    else if(action==='findLocation'){ go('findlocation'); }
   }
 };
 document.addEventListener('click', function(e){
@@ -2350,23 +2434,38 @@ const Customers = {
   },
   openForm(id){
     const rec = id ? Store.data.customers.find(x=>x.id===id) : null;
-    const v = rec || {name:'',phone:'',email:'',district:'',panchayath:'',assignedTo:'',status:'New Lead', lastContact: Util.todayISO(), notes:''};
+    const v = rec || {name:'',phone:'',whatsapp:'',email:'',district:'',panchayath:'',assignedTo:'',status:'New Lead', lastContact: Util.todayISO(), notes:'', leadSource:'', customerType:'', lat:'', lng:''};
     UI.openModal(rec? 'Edit Lead / Customer' : 'Add Lead / Customer', `
       <div class="form-row">
         <div class="field"><label>Full Name *</label><input id="f_name" value="${Util.escapeHtml(v.name)}"></div>
         <div class="field"><label>Phone *</label><input id="f_phone" value="${Util.escapeHtml(v.phone)}"></div>
       </div>
       <div class="form-row">
+        <div class="field"><label>WhatsApp (if different)</label><input id="f_whatsapp" value="${Util.escapeHtml(v.whatsapp||'')}"></div>
         <div class="field"><label>Email</label><input id="f_email" value="${Util.escapeHtml(v.email)}"></div>
+      </div>
+      <div class="form-row">
         <div class="field"><label>District</label><input id="f_district" list="dl_district" value="${Util.escapeHtml(v.district)}"></div>
-      </div>
-      <div class="form-row">
         <div class="field"><label>Area / Panchayath</label><input id="f_panchayath" value="${Util.escapeHtml(v.panchayath)}"></div>
-        <div class="field"><label>Assigned To</label><select id="f_assignedTo">${selectOptions(DROPDOWNS.assignedTo, v.assignedTo)}</select></div>
       </div>
       <div class="form-row">
+        <div class="field"><label>Lead Source</label><select id="f_leadSource">${selectOptions(DROPDOWNS.leadSource, v.leadSource)}</select></div>
+        <div class="field"><label>Customer Type</label><select id="f_customerType">${selectOptions(DROPDOWNS.customerType, v.customerType)}</select></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>Assigned To</label><select id="f_assignedTo">${selectOptions(DROPDOWNS.assignedTo, v.assignedTo)}</select></div>
         <div class="field"><label>Status</label><select id="f_status">${DROPDOWNS.status.map(s=>`<option ${s===v.status?'selected':''}>${s}</option>`).join('')}</select></div>
+      </div>
+      <div class="form-row">
         <div class="field"><label>Last Contact Date</label><input type="date" id="f_lastContact" value="${v.lastContact||''}"></div>
+        <div class="field">
+          <label>GPS Location</label>
+          <div style="display:flex;gap:6px;align-items:center;">
+            <input id="f_gpsLabel" readonly value="${v.lat&&v.lng? Number(v.lat).toFixed(5)+', '+Number(v.lng).toFixed(5) : 'Not captured'}" style="flex:1;">
+            <button type="button" class="btn btn-outline btn-sm" onclick="Customers.captureGPS()">&#128205; Capture</button>
+          </div>
+          <input type="hidden" id="f_lat" value="${v.lat||''}"><input type="hidden" id="f_lng" value="${v.lng||''}">
+        </div>
       </div>
       <div class="field"><label>Notes (reply / remarks)</label><textarea id="f_notes" placeholder="e.g. Asked for a call back next week, wants bulk discount...">${Util.escapeHtml(v.notes||'')}</textarea></div>
       <datalist id="dl_district">${DROPDOWNS.district.map(d=>`<option value="${d}">`).join('')}</datalist>
@@ -2375,23 +2474,65 @@ const Customers = {
       <button class="btn btn-primary" onclick="Customers.save('${id||''}')">Save</button>
     `);
   },
+  /* Best-effort GPS capture for the lead/customer's location, used later
+     by Navigate / Find Location / Field Map / Customers Near Me. Never
+     blocks saving the form if permission is denied or unavailable. */
+  captureGPS(){
+    if(!navigator.geolocation){ UI.toast('GPS not available on this device/browser'); return; }
+    UI.toast('Getting location…');
+    navigator.geolocation.getCurrentPosition(pos=>{
+      const lbl = document.getElementById('f_gpsLabel');
+      if(lbl) lbl.value = pos.coords.latitude.toFixed(5)+', '+pos.coords.longitude.toFixed(5);
+      const la = document.getElementById('f_lat'), ln = document.getElementById('f_lng');
+      if(la) la.value = pos.coords.latitude; if(ln) ln.value = pos.coords.longitude;
+      UI.toast('Location captured');
+    }, err=>{ UI.toast('Could not get location: '+(err.message||'permission denied')); }, {enableHighAccuracy:true, timeout:12000});
+  },
+  /* Prevents accidental duplicate leads: on NEW records only, checks the
+     phone, WhatsApp number and a normalised name against existing
+     records and asks for confirmation before creating another one.
+     Never blocks editing an existing record. */
+  findPossibleDuplicates(name, phone, whatsapp){
+    const normPhone = (p)=>String(p||'').replace(/\D/g,'').slice(-10);
+    const np = normPhone(phone), nw = normPhone(whatsapp);
+    const nn = String(name||'').trim().toLowerCase();
+    return Store.data.customers.filter(x=>{
+      if(np && normPhone(x.phone)===np) return true;
+      if(nw && (normPhone(x.whatsapp)===nw || normPhone(x.phone)===nw)) return true;
+      if(np && normPhone(x.whatsapp)===np) return true;
+      if(nn && String(x.name||'').trim().toLowerCase()===nn) return true;
+      return false;
+    });
+  },
   async save(id){
     const name = document.getElementById('f_name').value.trim();
     const phone = document.getElementById('f_phone').value.trim();
+    const whatsapp = document.getElementById('f_whatsapp').value.trim();
     if(!name || !phone){ UI.toast('Name and phone are required'); return; }
+    if(!id){
+      const dupes = this.findPossibleDuplicates(name, phone, whatsapp);
+      if(dupes.length && !confirm('Possible duplicate found: '+dupes.map(d=>d.name+' ('+d.phone+')').join(', ')+'.\n\nCreate this as a new record anyway?')) return;
+    }
     const prev = id ? Store.data.customers.find(x=>x.id===id) : null;
     const newStatus = document.getElementById('f_status').value;
     const rec = {
       id: id || Util.uid('C', Store.data.customers),
-      name, phone,
+      name, phone, whatsapp,
       email: document.getElementById('f_email').value.trim(),
       district: document.getElementById('f_district').value.trim(),
       panchayath: document.getElementById('f_panchayath').value.trim(),
+      leadSource: document.getElementById('f_leadSource').value,
+      customerType: document.getElementById('f_customerType').value,
+      lat: document.getElementById('f_lat').value || (prev&&prev.lat) || '',
+      lng: document.getElementById('f_lng').value || (prev&&prev.lng) || '',
       assignedTo: document.getElementById('f_assignedTo').value,
       status: newStatus,
       lastContact: document.getElementById('f_lastContact').value,
       notes: document.getElementById('f_notes').value.trim(),
       createdDate: (prev && prev.createdDate) || Util.todayISO(),
+      createdBy: (prev && prev.createdBy) || ((Auth.session&&Auth.session.name)||'System'),
+      updatedBy: (Auth.session&&Auth.session.name)||'System',
+      updatedAt: new Date().toISOString(),
       timeline: (prev && prev.timeline) || []
     };
     if(id){
@@ -2490,11 +2631,32 @@ const Customers = {
             <div><div class="cell-mute" style="font-size:11px;">ASSIGNED TO</div><div>${Util.escapeHtml(x.assignedTo||'—')}</div></div>
             <div><div class="cell-mute" style="font-size:11px;">LAST CONTACT</div><div>${Util.fmtDate(x.lastContact)}</div></div>
           </div>
-          <div style="display:flex;gap:8px;margin-top:14px;">
+          <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;">
             <button class="btn btn-wa btn-sm" style="flex:1;" onclick="Customers.sendWhatsApp('${x.id}')">&#128172; WhatsApp</button>
             <a class="btn btn-outline btn-sm" style="text-decoration:none;flex:1;text-align:center;" href="tel:${Util.escapeHtml(x.phone)}">&#128222; Call</a>
+            ${x.lat&&x.lng? `<a class="btn btn-outline btn-sm" style="text-decoration:none;flex:1;text-align:center;" target="_blank" href="https://www.google.com/maps/dir/?api=1&destination=${x.lat},${x.lng}">&#128663; Navigate</a>` : ''}
           </div>
         </div>
+
+        ${(()=>{
+          const lastVisit = Store.data.visits.filter(v=>v.customerId===x.id && v.status==='Completed').sort((a,b)=>(b.endAt||b.startAt||'').localeCompare(a.endAt||a.startAt||''))[0];
+          const days = lastVisit ? Math.max(0, Math.round((Date.now()-new Date(lastVisit.endAt||lastVisit.startAt).getTime())/86400000)) : null;
+          return `<div class="card card-pad" style="margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:8px;">
+            <div>
+              <div class="cell-mute" style="font-size:11px;">LAST VISITED</div>
+              <div style="font-weight:700;">${days===null?'Never visited':(days===0?'Today':days+' day'+(days===1?'':'s')+' ago')}</div>
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="Field.Visits.openStartForm('${x.id}')">&#128100; Record Visit</button>
+          </div>`;
+        })()}
+
+        ${x.lat&&x.lng? `<div class="card card-pad" style="margin-bottom:14px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <div class="cell-mute" style="font-size:11px;">NEARBY OPPORTUNITIES</div>
+            <button class="btn btn-outline btn-sm" onclick="Field.showNearbyFrom('${x.id}')">Check</button>
+          </div>
+          <div id="nearbyFrom_${x.id}" style="margin-top:8px;"></div>
+        </div>` : ''}
 
         ${x.notes? `<div class="card card-pad" style="margin-bottom:14px;">
           <div class="cell-mute" style="font-size:11px;margin-bottom:4px;">NOTES</div>
@@ -2506,11 +2668,39 @@ const Customers = {
           <button class="btn btn-outline btn-sm" onclick="Followups.openForm(null,'${x.id}')">&#128197; Schedule Follow-up</button>
           <button class="btn btn-outline btn-sm" onclick="Quotations.openForm(null,'${x.id}')">&#128196; New Quotation</button>
           <button class="btn btn-outline btn-sm" onclick="Payments.openForm(null,'${x.id}')">&#128179; Log Payment / Invoice</button>
+          <button class="btn btn-outline btn-sm" onclick="Field.Requirements.openForm(null,'${x.id}')">&#128230; Add Requirement</button>
           <button class="btn btn-outline btn-sm" onclick="Customers.addTimelineForm('${x.id}')">&#128221; Add Timeline Entry</button>
         </div>
 
         <h4 style="font-size:12.5px;text-transform:uppercase;color:var(--text-mute);margin:16px 0 8px;">History Summary</h4>
-        <div class="cell-mute" style="font-size:12.5px;margin-bottom:14px;">${relatedQuotes.length} quotation(s) &middot; ${relatedPayments.length} invoice(s) &middot; ${relatedFollowups.length} follow-up(s)</div>
+        <div class="cell-mute" style="font-size:12.5px;margin-bottom:14px;">${relatedQuotes.length} quotation(s) &middot; ${relatedPayments.length} invoice(s) &middot; ${relatedFollowups.length} follow-up(s) &middot; ${Store.data.visits.filter(v=>v.customerId===x.id).length} visit(s)</div>
+
+        ${(()=>{
+          const reqs = Store.data.requirements.filter(r=>r.customerId===x.id);
+          if(!reqs.length) return '';
+          return `<h4 style="font-size:12.5px;text-transform:uppercase;color:var(--text-mute);margin:16px 0 10px;">Requirements (${reqs.length})</h4>
+          <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px;">
+            ${reqs.map(r=>`<div class="card card-pad" style="cursor:pointer;" onclick="Field.Requirements.openForm('${r.id}','${x.id}')">
+              <div style="display:flex;justify-content:space-between;gap:8px;"><b style="font-size:13px;">${Util.escapeHtml(r.title||r.product||'Requirement')}</b>${Field.badge(r.status, Field.REQ_COLOR)}</div>
+              <div class="cell-mute" style="font-size:12px;margin-top:2px;">${Util.escapeHtml(r.product||'')} ${r.qty?'&middot; '+Util.escapeHtml(String(r.qty))+' '+Util.escapeHtml(r.unit||''):''}</div>
+            </div>`).join('')}
+          </div>`;
+        })()}
+
+        ${(()=>{
+          const visits = Store.data.visits.filter(v=>v.customerId===x.id).sort((a,b)=>(b.startAt||'').localeCompare(a.startAt||''));
+          if(!visits.length) return '';
+          return `<h4 style="font-size:12.5px;text-transform:uppercase;color:var(--text-mute);margin:16px 0 10px;">Visit History</h4>
+          <div class="timeline" style="margin-bottom:6px;">
+            ${visits.slice(0,15).map(v=>`<div class="timeline-item done">
+              <div class="dotmark"></div>
+              <div class="ttl">&#128205; ${Util.escapeHtml(v.visitType||'Visit')} ${Field.badge(v.status, Field.VISIT_COLOR)}</div>
+              <div class="meta">${Util.fmtDateTime(v.startAt)}${v.staff?' &middot; '+Util.escapeHtml(v.staff):''}${v.startAddress?' &middot; '+Util.escapeHtml(v.startAddress):''}</div>
+              ${v.notes?`<div class="note">${Util.escapeHtml(v.notes)}</div>`:''}
+              ${v.outcome?`<div class="note">Outcome: ${Util.escapeHtml(v.outcome)}</div>`:''}
+            </div>`).join('')}
+          </div>`;
+        })()}
 
         <h4 style="font-size:12.5px;text-transform:uppercase;color:var(--text-mute);margin:16px 0 10px;">Customer Timeline</h4>
         ${timeline.length ? `<div class="timeline">
@@ -2823,7 +3013,7 @@ const Quotations = {
         <div class="field"><label>Customer *</label><select id="q_cust"><option value="">Select customer...</option>${custOptions}</select></div>
         <div class="field"><label>Date</label><input type="date" id="q_date" value="${rec?rec.date:Util.todayISO()}"></div>
       </div>
-      <div class="field"><label>Status</label><select id="q_status">${['Draft','Sent','Accepted','Rejected'].map(s=>`<option ${rec&&rec.status===s?'selected':''}>${s}</option>`).join('')}</select></div>
+      <div class="field"><label>Status</label><select id="q_status">${DROPDOWNS.quotationStatus.map(s=>`<option ${(rec?rec.status:'Draft')===s?'selected':''}>${s}</option>`).join('')}</select></div>
       <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:16px 0 8px;">Line Items</h4>
       <datalist id="dl_products">${Store.data.products.map(p=>`<option value="${Util.escapeHtml(p.name)}">`).join('')}</datalist>
       <div id="q_items"></div>
@@ -2876,18 +3066,28 @@ const Quotations = {
     const gst = Number(document.getElementById('q_gst').value||0);
     const subtotal = items.reduce((s,it)=>s+(it.qty*it.rate),0);
     const total = subtotal*(1+gst/100);
+    const prev = id ? Store.data.quotations.find(x=>x.id===id) : null;
+    const newStatus = document.getElementById('q_status').value;
     const rec = {
       id: id || (Store.data.settings.quoPrefix||'Q-') + String(Store.data.settings.quoNext||1).padStart(4,'0'),
       customerId: custId, customerName: cust.name, phone: cust.phone,
       date: document.getElementById('q_date').value,
-      status: document.getElementById('q_status').value,
+      status: newStatus,
+      requirementId: (prev&&prev.requirementId) || this._fromRequirementId || '',
       items, gst, subtotal, total
     };
     if(id){ const i=Store.data.quotations.findIndex(x=>x.id===id); Store.data.quotations[i]=rec; }
     else { Store.data.quotations.unshift(rec); Store.data.settings.quoNext = (Store.data.settings.quoNext||1)+1; await Store.save('settings'); }
     await Store.save('quotations');
-    await Customers.logTimeline(custId, 'Quotation Sent', rec.id+' — '+Util.fmtMoney(total).replace('&#8377;','Rs.'), {silent:true});
-    await Activity.log(id?'Updated quotation':'Created quotation', rec.id+' for '+cust.name);
+    /* Log the real status in the customer timeline, and only when the
+       status actually changed (or it's a brand-new quotation) - editing
+       line items on an unchanged Draft shouldn't spam the timeline with
+       repeated "Quotation Sent" entries, as the old hardcoded version did. */
+    if(!prev || prev.status!==newStatus){
+      await Customers.logTimeline(custId, 'Quotation Sent', rec.id+' — '+newStatus+' — '+Util.fmtMoney(total).replace('&#8377;','Rs.'), {silent:true});
+    }
+    await Activity.log(id?'Updated quotation':'Created quotation', rec.id+' for '+cust.name+' ('+newStatus+')');
+    this._fromRequirementId = '';
     UI.closeModal(); UI.toast('Quotation saved'); Router.render('quotations');
   },
   async remove(id){
@@ -6950,6 +7150,1430 @@ const Attendance = {
 Views.attendance = ()=>Attendance.render();
 
 /* =====================================================================
+   FIELD SALES MODULE
+   Visits, Requirements, Travel Log, Location Finder, Field Map, and the
+   "My Day" field-staff plan. Built entirely on top of the existing
+   architecture: Store.data.visits / requirements / travelLogs are plain
+   jays_crm_store-backed collections (Store.save/loadKey already handle
+   them - see Store.loadAll above); Customers/CustPicker/Followups/
+   Activity/UI/Paginate/DROPDOWNS/Reports are reused as-is, never
+   duplicated. assignedTo (on the customer) / staff (on visits & travel)
+   is how field data is scoped to a person, exactly like the rest of
+   the app already scopes work by assignedTo - there is no separate
+   "Field Staff" role table; give a Sales user the Field Sales menu
+   permissions in Users & Roles and they see this module.
+===================================================================== */
+
+/* ---------------------------------------------------------------------
+   OFFLINE QUEUE — field staff often have weak/no signal. New visits,
+   requirements and travel-log entries are written into Store.data
+   immediately (so the UI works offline), then an ordinary Store.save()
+   is attempted. If that fails (or the browser is already offline), the
+   record is also mirrored into localStorage under its collection so it
+   survives the tab/browser being closed, and is retried automatically
+   when the connection returns. Because Store.save() re-uploads the
+   whole (small) collection, a retry after several offline creates just
+   re-uploads everything once - nothing is ever created twice.
+=========================================================================== */
+const FieldSync = {
+  COLLECTIONS: ['visits','requirements','travelLogs'],
+  lsKey(c){ return 'jays_offline_'+c; },
+  getPending(c){ try{ return JSON.parse(localStorage.getItem(this.lsKey(c))||'[]'); }catch(e){ return []; } },
+  setPending(c, arr){ try{ localStorage.setItem(this.lsKey(c), JSON.stringify(arr)); }catch(e){} },
+  pendingCount(){ return this.COLLECTIONS.reduce((n,c)=>n+this.getPending(c).length,0); },
+  async createAndSave(collection, rec){
+    const ok = navigator.onLine ? await Store.save(collection) : false;
+    if(!ok){
+      const pending = this.getPending(collection);
+      pending.push(rec.id);
+      this.setPending(collection, pending);
+      UI.toast('🟡 Saved on this device — will sync automatically when back online');
+    }
+    this.refreshBadges();
+    return ok;
+  },
+  async syncAll(silent){
+    if(!navigator.onLine) return;
+    let syncedAny = false;
+    for(const c of this.COLLECTIONS){
+      const pending = this.getPending(c);
+      if(!pending.length) continue;
+      const ok = await Store.save(c);
+      if(ok){ this.setPending(c, []); syncedAny = true; }
+    }
+    this.refreshBadges();
+    if(syncedAny && !silent) UI.toast('🟢 Offline field data synced');
+  },
+  refreshBadges(){
+    document.querySelectorAll('.field-sync-badge').forEach(el=>{
+      const n = this.pendingCount();
+      el.textContent = n ? ('🟡 '+n+' pending sync') : '🟢 All synced';
+      el.className = 'field-sync-badge badge ' + (n? 'badge-amber':'badge-green');
+    });
+  }
+};
+window.addEventListener('online', ()=>FieldSync.syncAll());
+setInterval(()=>{ if(navigator.onLine) FieldSync.syncAll(true); }, 60000);
+
+const Field = {
+  VISIT_COLOR: {Planned:'blue', Started:'amber', Completed:'green', Cancelled:'red'},
+  REQ_COLOR: {'New':'blue','Quotation Required':'amber','Quotation Sent':'amber','Negotiation':'violet','Won':'green','Lost':'red'},
+  badge(status, colorMap){
+    const cls = (colorMap && colorMap[status]) || 'gray';
+    return `<span class="badge badge-${cls}">${Util.escapeHtml(status||'—')}</span>`;
+  },
+  syncBadgeHTML(){ return `<span class="field-sync-badge badge ${FieldSync.pendingCount()?'badge-amber':'badge-green'}" style="margin-left:8px;">${FieldSync.pendingCount()?('🟡 '+FieldSync.pendingCount()+' pending sync'):'🟢 All synced'}</span>`; },
+  me(){ return (Auth.session && (Auth.session.name||Auth.session.username)) || ''; },
+  haversineKm(lat1,lng1,lat2,lng2){
+    if([lat1,lng1,lat2,lng2].some(v=>v===undefined||v===null||v===''||isNaN(Number(v)))) return null;
+    lat1=Number(lat1);lng1=Number(lng1);lat2=Number(lat2);lng2=Number(lng2);
+    const R = 6371, toRad = d=>d*Math.PI/180;
+    const dLat = toRad(lat2-lat1), dLng = toRad(lng2-lng1);
+    const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLng/2)**2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  },
+  /* Best-effort device position. Never throws - callers get null coords
+     on denial/timeout/unsupported browsers and degrade gracefully. */
+  getPosition(){
+    return new Promise(resolve=>{
+      if(!navigator.geolocation){ resolve(null); return; }
+      navigator.geolocation.getCurrentPosition(
+        pos=>resolve({lat:pos.coords.latitude, lng:pos.coords.longitude, accuracy:pos.coords.accuracy}),
+        ()=>resolve(null),
+        {enableHighAccuracy:true, timeout:12000}
+      );
+    });
+  },
+  /* Best-effort reverse geocode via OpenStreetMap Nominatim (free, no API
+     key). Purely cosmetic (a human-readable address next to the raw
+     coordinates) - any failure here is swallowed and the caller just
+     shows the lat/lng instead. */
+  async reverseGeocode(lat, lng){
+    try{
+      const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=16`, {headers:{'Accept':'application/json'}});
+      if(!res.ok) return null;
+      const data = await res.json();
+      return data && data.display_name ? data.display_name : null;
+    }catch(e){ return null; }
+  },
+  /* Downscales + JPEG-compresses a captured/selected photo before it goes
+     into a visit/requirement record (which are plain JSON rows), so a
+     phone camera photo doesn't blow up the collection size the way the
+     Project Opportunity import once did. Configurable size cap. */
+  compressImage(file, maxDim, quality){
+    maxDim = maxDim || 1024; quality = quality || 0.6;
+    return new Promise((resolve, reject)=>{
+      if(!file || !file.type || !file.type.startsWith('image/')){ reject(new Error('Not an image')); return; }
+      const reader = new FileReader();
+      reader.onload = ()=>{
+        const img = new Image();
+        img.onload = ()=>{
+          let w = img.width, h = img.height;
+          if(w>h && w>maxDim){ h = Math.round(h*maxDim/w); w = maxDim; }
+          else if(h>maxDim){ w = Math.round(w*maxDim/h); h = maxDim; }
+          const canvas = document.createElement('canvas');
+          canvas.width = w; canvas.height = h;
+          canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+          resolve(canvas.toDataURL('image/jpeg', quality));
+        };
+        img.onerror = reject;
+        img.src = reader.result;
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  },
+  /* Voice-to-text dictation for any textarea, via the browser's built-in
+     Web Speech API (Chrome/Android; gracefully absent on browsers that
+     don't support it - the button simply isn't shown). Appends the
+     recognised text to whatever is already in the field rather than
+     replacing it, so staff can dictate in short bursts. */
+  speechSupported(){ return !!(window.SpeechRecognition || window.webkitSpeechRecognition); },
+  voiceBtnHTML(targetId){
+    if(!this.speechSupported()) return '';
+    return `<button type="button" class="btn btn-outline btn-sm" style="margin-top:6px;" id="${targetId}_voiceBtn" onclick="Field.toggleVoice('${targetId}')">&#127908; Hold to Dictate</button>`;
+  },
+  _recognition: null,
+  toggleVoice(targetId){
+    const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if(!Rec){ UI.toast('Voice input not supported on this device/browser'); return; }
+    const btn = document.getElementById(targetId+'_voiceBtn');
+    if(this._recognition){ this._recognition.stop(); return; }
+    const rec = new Rec();
+    rec.lang = 'en-IN'; rec.interimResults = false; rec.maxAlternatives = 1;
+    rec.onresult = (e)=>{
+      const text = Array.from(e.results).map(r=>r[0].transcript).join(' ');
+      const el = document.getElementById(targetId);
+      if(el) el.value = (el.value ? el.value+' ' : '') + text;
+    };
+    const reset = ()=>{ this._recognition=null; if(btn){ btn.classList.remove('btn-primary'); btn.innerHTML='&#127908; Hold to Dictate'; } };
+    rec.onend = reset;
+    rec.onerror = ()=>{ reset(); UI.toast('Voice input error — check microphone permission'); };
+    this._recognition = rec;
+    if(btn){ btn.classList.add('btn-primary'); btn.innerHTML='&#128308; Listening… tap to stop'; }
+    try{ rec.start(); }catch(e){ reset(); }
+  },
+  /* "Nearby Opportunities" - from a customer's own saved location (not
+     the device's), so it works whether or not staff are actually
+     standing there right now. Shown as a small widget in the customer
+     drawer ("while you're here, these are close by"). */
+  showNearbyFrom(customerId){
+    const base = Store.data.customers.find(c=>c.id===customerId);
+    const box = document.getElementById('nearbyFrom_'+customerId);
+    if(!base || !box) return;
+    const near = Store.data.customers.filter(c=>c.id!==customerId && c.lat && c.lng)
+      .map(c=>({c, km:Field.haversineKm(base.lat, base.lng, c.lat, c.lng)}))
+      .filter(x=>x.km!==null && x.km<=5).sort((a,b)=>a.km-b.km).slice(0,4);
+    box.innerHTML = near.length ? near.map(x=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid #F3F5F8;">
+      <div><b style="font-size:12.5px;">${Util.escapeHtml(x.c.name)}</b><span class="cell-mute" style="font-size:11.5px;"> — ${x.km<1?Math.round(x.km*1000)+' m':x.km.toFixed(1)+' km'}</span></div>
+      <div style="display:flex;gap:4px;">
+        <a class="icon-btn" title="Call" href="tel:${Util.escapeHtml(x.c.phone)}">&#128222;</a>
+        <a class="icon-btn" title="Navigate" target="_blank" href="https://www.google.com/maps/dir/?api=1&destination=${x.c.lat},${x.c.lng}">&#128663;</a>
+        <button class="icon-btn" title="Visit" onclick="UI.closeDrawer();Field.Visits.openStartForm('${x.c.id}')">&#128100;</button>
+      </div>
+    </div>`).join('') : `<div class="cell-mute" style="font-size:12px;">No other customers with a saved location within 5 km.</div>`;
+  },
+  photoStripHTML(photos, removeCb){
+    if(!photos || !photos.length) return '';
+    return `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
+      ${photos.map((p,i)=>`<div style="position:relative;"><img src="${p}" style="width:64px;height:64px;object-fit:cover;border-radius:8px;border:1px solid var(--border,#E2E6ED);">
+        <button type="button" onclick="${removeCb}(${i})" style="position:absolute;top:-6px;right:-6px;background:#DC2626;color:#fff;border:none;border-radius:50%;width:18px;height:18px;font-size:11px;line-height:1;cursor:pointer;">&times;</button>
+      </div>`).join('')}
+    </div>`;
+  },
+  /* Call / WhatsApp / Navigate quick-actions for a real customer record,
+     reusing the same tel:/waLink/Google-Maps patterns used everywhere
+     else in the app (Customer 360, Follow-ups, etc). Used inside the
+     Visit Start/Complete modals so field staff don't have to leave the
+     visit flow to reach the customer. Returns '' when there's no real
+     customer attached yet (a text-only lead has no phone/GPS to act on). */
+  quickActionsHTML(cust){
+    if(!cust) return '';
+    return `<div class="field">
+      <label>Quick Actions</label>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        ${cust.phone? `<a class="btn btn-outline btn-sm" style="text-decoration:none;" href="tel:${Util.escapeHtml(cust.phone)}">&#128222; Call</a>` : ''}
+        ${cust.phone? `<a class="btn btn-wa btn-sm" style="text-decoration:none;" target="_blank" href="${Util.waLink(cust.phone, 'Hi '+cust.name+', this is Jays Trading and Business Solution.')}">&#128172; WhatsApp</a>` : ''}
+        ${cust.lat&&cust.lng? `<a class="btn btn-outline btn-sm" style="text-decoration:none;" target="_blank" href="https://www.google.com/maps/dir/?api=1&destination=${cust.lat},${cust.lng}">&#128663; Navigate</a>` : ''}
+      </div>
+    </div>`;
+  }
+};
+
+/* ---------------------------------------------------------------------
+   VISIT ACTIVITY RECORDER
+=========================================================================== */
+Field.Visits = {
+  draftPhotos: [],
+  listTab: 'today',
+  /* mm:ss (or h:mm:ss past an hour) elapsed since a visit's startAt,
+     used for the live in-progress timer below. */
+  elapsedLabel(startAt){
+    const ms = Date.now() - new Date(startAt).getTime();
+    const totalSec = Math.max(0, Math.floor(ms/1000));
+    const h = Math.floor(totalSec/3600), m = Math.floor((totalSec%3600)/60), s = totalSec%60;
+    const mm = String(m).padStart(2,'0'), ss = String(s).padStart(2,'0');
+    return h>0 ? h+':'+mm+':'+ss : mm+':'+ss;
+  },
+  /* Ticks every live-timer cell once a second while any 'Started' visit
+     is on screen. Self-clearing: once the Visits view is navigated away
+     from (no more data-live-timer cells in the DOM), the next tick stops
+     its own interval instead of leaking it. */
+  tickTimers(){
+    const els = document.querySelectorAll('[data-live-timer]');
+    if(!els.length){ if(Field.Visits._timerHandle){ clearInterval(Field.Visits._timerHandle); Field.Visits._timerHandle=null; } return; }
+    els.forEach(el=>{ const start = el.getAttribute('data-start'); if(start) el.textContent = Field.Visits.elapsedLabel(start); });
+  },
+  render(){
+    if(this._timerHandle){ clearInterval(this._timerHandle); this._timerHandle=null; }
+    const today = Util.todayISO();
+    const me = Field.me();
+    const scope = Auth.isAdmin() ? Store.data.visits : Store.data.visits.filter(v=>!v.staff || v.staff===me);
+    const groups = {
+      today: scope.filter(v=>(v.startAt||'').slice(0,10)===today || (v.plannedDate===today && v.status==='Planned')),
+      planned: scope.filter(v=>v.status==='Planned'),
+      completed: scope.filter(v=>v.status==='Completed'),
+      all: scope
+    };
+    const list = (groups[this.listTab]||groups.today).slice().sort((a,b)=>(b.startAt||b.plannedDate||'').localeCompare(a.startAt||a.plannedDate||''));
+    const pg = Paginate.slice('visits', list);
+    document.getElementById('content').innerHTML = `
+      <div class="tabs">
+        <button class="tab-btn ${this.listTab==='today'?'active':''}" onclick="Field.Visits.setTab('today')">Today <span class="cnt">${groups.today.length}</span></button>
+        <button class="tab-btn ${this.listTab==='planned'?'active':''}" onclick="Field.Visits.setTab('planned')">Planned <span class="cnt">${groups.planned.length}</span></button>
+        <button class="tab-btn ${this.listTab==='completed'?'active':''}" onclick="Field.Visits.setTab('completed')">Completed <span class="cnt">${groups.completed.length}</span></button>
+        <button class="tab-btn ${this.listTab==='all'?'active':''}" onclick="Field.Visits.setTab('all')">All <span class="cnt">${groups.all.length}</span></button>
+      </div>
+      <div class="toolbar">
+        ${Field.syncBadgeHTML()}
+        <div class="toolbar-spacer"></div>
+        <button class="btn btn-outline btn-sm" onclick="Field.Visits.openPlanForm(null)">&#128197; Plan a Visit</button>
+        <button class="btn btn-primary btn-sm" onclick="Field.Visits.openStartForm(null)">&#65291; Start Visit</button>
+      </div>
+      <div class="card">
+        <div class="table-wrap">
+        ${list.length ? `<table><thead><tr><th class="col-actions">Actions</th><th>Customer / Lead</th><th>Type</th><th>Status</th><th>Start</th><th>Duration</th><th>Outcome</th></tr></thead><tbody>
+          ${pg.pageItems.map(v=>{
+            const cust = v.customerId ? Store.data.customers.find(c=>c.id===v.customerId) : null;
+            const name = cust ? cust.name : (v.leadName || 'Unnamed lead');
+            return `<tr>
+            <td class="col-actions"><div class="row-action-btns">
+              ${v.status==='Planned' ? `<button class="icon-btn" style="color:#0E9F76;" title="Start" onclick="Field.Visits.startPlanned('${v.id}')">&#9654;</button>` : ''}
+              ${v.status==='Started' ? `<button class="icon-btn" style="color:#0E9F76;" title="Complete" onclick="Field.Visits.openCompleteForm('${v.id}')">&#10003;</button>` : ''}
+              ${(v.status==='Planned'||v.status==='Started') ? `<button class="icon-btn" style="color:#DC2626;" title="Cancel" onclick="Field.Visits.cancelVisit('${v.id}')">&#10005;</button>` : ''}
+              ${cust ? `<button class="icon-btn" title="Customer" onclick="Customers.openDetail('${cust.id}')">&#128100;</button>` : ''}
+            </div></td>
+            <td class="cell-main">${Util.escapeHtml(name)}</td>
+            <td>${Util.escapeHtml(v.visitType||'—')}</td>
+            <td>${Field.badge(v.status, Field.VISIT_COLOR)}${v.status==='Started'? `<span title="${v.startLat?'GPS location captured at start':'No GPS captured'}" style="display:inline-block;width:7px;height:7px;border-radius:50%;margin-left:6px;background:${v.startLat?'#16a34a':'#9CA3AF'};${v.startLat?'animation:pulse 1.5s infinite;':''}"></span>` : ''}</td>
+            <td class="cell-mute">${v.startAt?Util.fmtDateTime(v.startAt):(v.plannedDate?Util.fmtDate(v.plannedDate):'—')}</td>
+            <td class="cell-mute">${v.status==='Started' ? `<span data-live-timer data-start="${v.startAt}" style="color:#16a34a;font-weight:600;">${this.elapsedLabel(v.startAt)}</span>` : (v.durationMin?v.durationMin+' min':'—')}</td>
+            <td class="cell-mute">${Util.escapeHtml(v.outcome||'—')}</td>
+          </tr>`;}).join('')}
+          </tbody></table>
+          ${Paginate.controlsHTML('visits', pg, "Field.Visits.render()")}` : `<div class="empty-state"><div class="ic">&#128100;</div><div class="t">No visits here yet</div><div class="d">Start a visit when you're at a customer, or plan one for later.</div>
+          <button class="btn btn-primary btn-sm" onclick="Field.Visits.openStartForm(null)">&#65291; Start Visit</button></div>`}
+        </div>
+      </div>
+    `;
+    if(pg.pageItems.some(v=>v.status==='Started')) this._timerHandle = setInterval(()=>Field.Visits.tickTimers(), 1000);
+  },
+  setTab(t){ this.listTab=t; Paginate.get('visits').page=1; this.render(); },
+  /* Shared picker for "which customer/lead is this visit for" - reuses
+     CustPicker; also allows a quick on-the-spot name+phone for a brand
+     new lead met in the field with no CRM record yet. */
+  custOrLeadFieldsHTML(customerId){
+    return `
+      <div class="field"><label>Customer / Lead (search existing)</label>${CustPicker.html('fv', customerId, '', 'Search name, phone, or Area / Panchayath...')}</div>
+      <div class="hint" style="margin:-4px 0 10px;">No record yet? Leave the search blank and fill a quick name + phone below instead.</div>
+      <div class="form-row">
+        <div class="field"><label>New Lead Name</label><input id="fv_leadName" placeholder="If not selecting an existing customer"></div>
+        <div class="field"><label>New Lead Phone</label><input id="fv_leadPhone"></div>
+      </div>`;
+  },
+  openPlanForm(customerId){
+    this.draftPhotos = [];
+    UI.openModal('Plan a Visit', `
+      ${this.custOrLeadFieldsHTML(customerId)}
+      <div class="form-row">
+        <div class="field"><label>Visit Type</label><select id="fv_type">${selectOptions(DROPDOWNS.visitType, 'Customer Visit')}</select></div>
+        <div class="field"><label>Planned Date *</label><input type="date" id="fv_plannedDate" value="${Util.todayISO()}"></div>
+      </div>
+      <div class="field"><label>Purpose</label><input id="fv_purpose" placeholder="e.g. Discuss playground equipment requirement"></div>
+    `, `
+      <button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="Field.Visits.savePlanned()">Save Plan</button>
+    `);
+  },
+  async savePlanned(){
+    const customerId = document.getElementById('fv_customerId').value || null;
+    let cust = customerId ? Store.data.customers.find(c=>c.id===customerId) : null;
+    const leadName = document.getElementById('fv_leadName').value.trim();
+    const leadPhone = document.getElementById('fv_leadPhone').value.trim();
+    if(!cust && !leadName){ UI.toast('Select a customer or enter a new lead name'); return; }
+    const plannedDate = document.getElementById('fv_plannedDate').value;
+    if(!plannedDate){ UI.toast('Planned date is required'); return; }
+    if(!cust && leadName) cust = await this.resolveLeadToCustomer(leadName, leadPhone, null);
+    const rec = {
+      id: Util.uid('VIS', Store.data.visits),
+      customerId: cust?cust.id:(customerId||''), leadName: cust?'':leadName, leadPhone: cust?'':leadPhone,
+      visitType: document.getElementById('fv_type').value,
+      purpose: document.getElementById('fv_purpose').value.trim(),
+      status: 'Planned', plannedDate,
+      staff: Field.me(),
+      createdBy: Field.me(), createdAt: new Date().toISOString(), updatedBy: Field.me(), updatedAt: new Date().toISOString()
+    };
+    Store.data.visits.unshift(rec);
+    await FieldSync.createAndSave('visits', rec);
+    await Activity.log('Visit planned', (cust?cust.name:leadName)+' on '+plannedDate);
+    UI.closeModal(); UI.toast('Visit planned');
+    Router.render(UI.currentView);
+  },
+  openStartForm(customerId){
+    this.draftPhotos = [];
+    const cust = customerId ? Store.data.customers.find(c=>c.id===customerId) : null;
+    UI.openModal('Start Visit', `
+      ${Field.quickActionsHTML(cust)}
+      ${this.custOrLeadFieldsHTML(customerId)}
+      <div class="form-row">
+        <div class="field"><label>Visit Type</label><select id="fv_type">${selectOptions(DROPDOWNS.visitType, 'Customer Visit')}</select></div>
+        <div class="field"><label>Purpose</label><input id="fv_purpose" placeholder="e.g. Site survey for water ATM"></div>
+      </div>
+      <div class="hint" id="fv_distanceHint">Your current GPS location will be captured automatically when you start.</div>
+    `, `
+      <button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="Field.Visits.startNow()">&#9654; Start Visit</button>
+    `);
+    /* If this visit is for a customer with a saved GPS location, show
+       how far the staff member currently is from it - a quick sanity
+       check before they log a site visit from the wrong place. */
+    if(cust && cust.lat && cust.lng){
+      Field.getPosition().then(pos=>{
+        const hint = document.getElementById('fv_distanceHint');
+        if(!hint || !pos) return;
+        const km = Field.haversineKm(pos.lat, pos.lng, cust.lat, cust.lng);
+        if(km!==null) hint.textContent = 'You are approximately '+km.toFixed(km<1?2:1)+' km from '+cust.name+'’s saved location.';
+      });
+    }
+  },
+  async startNow(){
+    const customerId = document.getElementById('fv_customerId').value || null;
+    const cust = customerId ? Store.data.customers.find(c=>c.id===customerId) : null;
+    const leadName = document.getElementById('fv_leadName').value.trim();
+    const leadPhone = document.getElementById('fv_leadPhone').value.trim();
+    if(!cust && !leadName){ UI.toast('Select a customer or enter a new lead name'); return; }
+    const visitType = document.getElementById('fv_type').value;
+    const purpose = document.getElementById('fv_purpose').value.trim();
+    UI.closeModal();
+    await this.startWithDetails(customerId, leadName, leadPhone, visitType, purpose);
+  },
+  /* Turns a quick in-visit "New Lead Name / Phone" pair into a REAL
+     Store.data.customers record (reusing the same duplicate-prevention
+     check as Quick Lead) instead of leaving it as text-only fields on the
+     Visit record. Silent (no confirm dialog) so it never interrupts the
+     field flow - an exact duplicate match is reused automatically rather
+     than creating a second record. Returns null when there's no lead
+     name to resolve (an existing customer was already picked). */
+  async resolveLeadToCustomer(leadName, leadPhone, pos){
+    if(!leadName) return null;
+    const dupes = Customers.findPossibleDuplicates(leadName, leadPhone, '');
+    if(dupes && dupes.length) return dupes[0];
+    const rec = {
+      id: Util.uid('C', Store.data.customers),
+      name: leadName, phone: leadPhone||'', whatsapp: '',
+      email: '', district: '', panchayath: '',
+      leadSource: 'Field Visit', customerType: '',
+      lat: pos?pos.lat:'', lng: pos?pos.lng:'',
+      assignedTo: Field.me(), status: 'New Lead',
+      lastContact: Util.todayISO(), notes: '',
+      createdDate: Util.todayISO(), createdBy: Field.me(), updatedBy: Field.me(), updatedAt: new Date().toISOString(),
+      timeline: [{id:'T'+Date.now(), date:Util.todayISO(), stage:'First Contact', note:'Captured during a field visit', by:Field.me()}]
+    };
+    Store.data.customers.unshift(rec);
+    await Store.save('customers');
+    return rec;
+  },
+  /* Shared by the Start Visit form and the Quick Lead "Save Lead & Start
+     Visit" one-tap flow - captures GPS, creates the visit, tags it onto
+     the staff member's currently open trip (if any, from Field.Travel),
+     and logs the customer timeline entry, all in one place. */
+  async startWithDetails(customerId, leadName, leadPhone, visitType, purpose){
+    let cust = customerId ? Store.data.customers.find(c=>c.id===customerId) : null;
+    UI.toast('Getting your location…');
+    const pos = await Field.getPosition();
+    if(!cust && leadName){
+      cust = await this.resolveLeadToCustomer(leadName, leadPhone, pos);
+      if(cust) customerId = cust.id;
+    }
+    let address = null;
+    if(pos) address = await Field.reverseGeocode(pos.lat, pos.lng);
+    const openTrip = Field.Travel.activeTrip();
+    const rec = {
+      id: Util.uid('VIS', Store.data.visits),
+      customerId: customerId||'', leadName: cust?'':leadName, leadPhone: cust?'':leadPhone,
+      visitType, purpose,
+      status: 'Started', startAt: new Date().toISOString(),
+      startLat: pos?pos.lat:'', startLng: pos?pos.lng:'', startAccuracy: pos?pos.accuracy:'', startAddress: address||'',
+      travelLogId: openTrip?openTrip.id:'',
+      staff: Field.me(),
+      createdBy: Field.me(), createdAt: new Date().toISOString(), updatedBy: Field.me(), updatedAt: new Date().toISOString()
+    };
+    Store.data.visits.unshift(rec);
+    await FieldSync.createAndSave('visits', rec);
+    if(cust) await Customers.logTimeline(cust.id, 'Site Visit', 'Visit started'+(purpose?': '+purpose:''), {silent:true});
+    await Activity.log('Visit started', (cust?cust.name:leadName)+' — '+visitType);
+    UI.toast('Visit started');
+    Router.render(UI.currentView);
+    return rec;
+  },
+  async startPlanned(id){
+    const v = Store.data.visits.find(x=>x.id===id);
+    if(!v) return;
+    UI.toast('Getting your location…');
+    const pos = await Field.getPosition();
+    let address = null;
+    if(pos) address = await Field.reverseGeocode(pos.lat, pos.lng);
+    v.status = 'Started'; v.startAt = new Date().toISOString();
+    v.startLat = pos?pos.lat:''; v.startLng = pos?pos.lng:''; v.startAccuracy = pos?pos.accuracy:''; v.startAddress = address||'';
+    const openTrip = Field.Travel.activeTrip();
+    if(openTrip) v.travelLogId = openTrip.id;
+    v.updatedBy = Field.me(); v.updatedAt = new Date().toISOString();
+    await FieldSync.createAndSave('visits', v);
+    const cust = v.customerId ? Store.data.customers.find(c=>c.id===v.customerId) : null;
+    if(cust) await Customers.logTimeline(cust.id, 'Site Visit', 'Visit started'+(v.purpose?': '+v.purpose:''), {silent:true});
+    UI.toast('Visit started');
+    Router.render(UI.currentView);
+  },
+  async cancelVisit(id){
+    if(!confirm('Cancel this visit?')) return;
+    const v = Store.data.visits.find(x=>x.id===id);
+    if(!v) return;
+    v.status = 'Cancelled'; v.updatedBy = Field.me(); v.updatedAt = new Date().toISOString();
+    await FieldSync.createAndSave('visits', v);
+    UI.toast('Visit cancelled');
+    Router.render(UI.currentView);
+  },
+  openCompleteForm(id){
+    const v = Store.data.visits.find(x=>x.id===id);
+    if(!v) return;
+    this.draftPhotos = v.photos ? v.photos.slice() : [];
+    const cust = v.customerId ? Store.data.customers.find(c=>c.id===v.customerId) : null;
+    UI.openModal('Complete Visit', `
+      ${Field.quickActionsHTML(cust)}
+      <div class="field"><label>Products Discussed</label><input id="fv_products" placeholder="e.g. Twin Bin, Outdoor Gym Set" value="${Util.escapeHtml(v.productsDiscussed||'')}"></div>
+      <div class="field"><label>Visit Notes</label><textarea id="fv_notes" placeholder="What happened during the visit?">${Util.escapeHtml(v.notes||'')}</textarea>${Field.voiceBtnHTML('fv_notes')}</div>
+      <div class="form-row">
+        <div class="field"><label>Visit Outcome</label><select id="fv_outcome" onchange="Field.Visits.updateOutcomeHint()">${selectOptions(DROPDOWNS.visitOutcome, v.outcome||'')}</select></div>
+        <div class="field"><label>Next Follow-up Date</label><input type="date" id="fv_nextDate" value="${v.nextFollowupDate||''}"></div>
+      </div>
+      <div class="field"><label>Next Action</label><input id="fv_nextAction" placeholder="e.g. Send quotation, call back next week" value="${Util.escapeHtml(v.nextAction||'')}"></div>
+      <div class="field">
+        <label>Site / Visit Photos</label>
+        <input type="file" id="fv_photoInput" accept="image/*" capture="environment" onchange="Field.Visits.addPhoto(this.files[0])">
+        <div id="fv_photoStrip">${Field.photoStripHTML(this.draftPhotos, 'Field.Visits.removePhoto')}</div>
+      </div>
+      <div class="hint" id="fv_outcomeHint" style="margin-top:8px;"></div>
+    `, `
+      <button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="Field.Visits.complete('${id}')">&#10003; Complete Visit</button>
+    `, true);
+    setTimeout(()=>this.updateOutcomeHint(), 0);
+  },
+  /* Outcome -> suggested next step, shown live under the Outcome field and
+     acted on automatically once the visit is saved (see complete()). This
+     is what turns "Requirement Collected" into an actual Requirement
+     record, "Quotation Needed" into an open Quotation form, etc, instead
+     of leaving staff to remember to do it themselves afterwards. */
+  OUTCOME_NEXT: {
+    'Requirement Collected': 'A Requirement will be opened for you to fill in after you save.',
+    'Quotation Needed': 'A Requirement (marked Quotation Required) will be opened for you to fill in after you save — office staff will review it and create the quotation.',
+    'Follow-up': 'Set a Next Follow-up Date below so it lands in the Follow-up Centre.',
+    'Not Interested': 'The customer will be timestamped as contacted; no further action is created.',
+    'Closed': 'No further action will be created.'
+  },
+  updateOutcomeHint(){
+    const sel = document.getElementById('fv_outcome');
+    const hint = document.getElementById('fv_outcomeHint');
+    if(!sel || !hint) return;
+    hint.textContent = this.OUTCOME_NEXT[sel.value] || '';
+  },
+  async addPhoto(file){
+    if(!file) return;
+    try{
+      const dataUrl = await Field.compressImage(file);
+      this.draftPhotos.push(dataUrl);
+      const strip = document.getElementById('fv_photoStrip');
+      if(strip) strip.innerHTML = Field.photoStripHTML(this.draftPhotos, 'Field.Visits.removePhoto');
+    }catch(e){ UI.toast('Could not add photo'); }
+  },
+  removePhoto(i){
+    this.draftPhotos.splice(i,1);
+    const strip = document.getElementById('fv_photoStrip');
+    if(strip) strip.innerHTML = Field.photoStripHTML(this.draftPhotos, 'Field.Visits.removePhoto');
+  },
+  async complete(id){
+    const v = Store.data.visits.find(x=>x.id===id);
+    if(!v) return;
+    UI.toast('Getting your location…');
+    const pos = await Field.getPosition();
+    v.status = 'Completed';
+    v.endAt = new Date().toISOString();
+    v.endLat = pos?pos.lat:''; v.endLng = pos?pos.lng:'';
+    v.durationMin = v.startAt ? Math.max(1, Math.round((new Date(v.endAt)-new Date(v.startAt))/60000)) : '';
+    v.productsDiscussed = document.getElementById('fv_products').value.trim();
+    v.notes = document.getElementById('fv_notes').value.trim();
+    v.outcome = document.getElementById('fv_outcome').value;
+    v.nextFollowupDate = document.getElementById('fv_nextDate').value;
+    v.nextAction = document.getElementById('fv_nextAction').value.trim();
+    v.photos = this.draftPhotos.slice();
+    v.updatedBy = Field.me(); v.updatedAt = new Date().toISOString();
+    await FieldSync.createAndSave('visits', v);
+    const cust = v.customerId ? Store.data.customers.find(c=>c.id===v.customerId) : null;
+    if(cust){
+      await Customers.logTimeline(cust.id, 'Site Visit', 'Visit completed'+(v.outcome?' — '+v.outcome:'')+(v.notes?': '+v.notes:''), {silent:true});
+      if(v.nextFollowupDate){
+        Store.data.followups.unshift({
+          id: Util.uid('F', Store.data.followups),
+          customerId: cust.id, customerName: cust.name, phone: cust.phone,
+          date: v.nextFollowupDate, purpose: v.nextAction || 'Field visit follow-up',
+          status: 'Pending', notes: 'Auto-created from visit '+v.id
+        });
+        await Store.save('followups');
+      }
+    }
+    await Activity.log('Visit completed', (cust?cust.name:v.leadName)+' — '+(v.outcome||''));
+    UI.closeModal(); UI.toast('Visit completed');
+    /* Outcome -> automatic next step (see OUTCOME_NEXT above for what's
+       shown to staff beforehand). Only fires when there's a real
+       customer record to attach the follow-on to. */
+    if(cust && v.outcome==='Requirement Collected') Field.Requirements.openForm(null, cust.id, 'New');
+    else if(cust && v.outcome==='Quotation Needed') Field.Requirements.openForm(null, cust.id, 'Quotation Required');
+    else Router.render(UI.currentView);
+  }
+};
+Views.visits = ()=>Field.Visits.render();
+
+/* ---------------------------------------------------------------------
+   REQUIREMENT CAPTURE
+=========================================================================== */
+Field.Requirements = {
+  draftPhotos: [],
+  filterStatus: '',
+  render(){
+    let list = Store.data.requirements.slice();
+    if(this.filterStatus) list = list.filter(r=>r.status===this.filterStatus);
+    list.sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||''));
+    const pg = Paginate.slice('requirements', list);
+    const canQuote = hasMenuAccess('quotations') || Auth.isAdmin();
+    const counts = {};
+    DROPDOWNS.requirementStatus.forEach(s=>counts[s]=Store.data.requirements.filter(r=>r.status===s).length);
+    document.getElementById('content').innerHTML = `
+      <div class="toolbar" style="flex-wrap:wrap;">
+        ${DROPDOWNS.requirementStatus.map(s=>`<button class="tab-btn ${this.filterStatus===s?'active':''}" onclick="Field.Requirements.setFilter('${this.filterStatus===s?'':s}')">${s} <span class="cnt">${counts[s]||0}</span></button>`).join('')}
+        <div class="toolbar-spacer"></div>
+        <button class="btn btn-primary btn-sm" onclick="Field.Requirements.openForm(null,null)">&#65291; Add Requirement</button>
+      </div>
+      <div class="card">
+        <div class="table-wrap">
+        ${list.length ? `<table><thead><tr><th class="col-actions">Actions</th><th>Customer</th><th>Title / Product</th><th>Qty</th><th>Priority</th><th>Status</th><th>Expected Date</th></tr></thead><tbody>
+          ${pg.pageItems.map(r=>{
+            const cust = Store.data.customers.find(c=>c.id===r.customerId);
+            return `<tr>
+            <td class="col-actions"><div class="row-action-btns">
+              <button class="icon-btn" title="Edit" onclick="Field.Requirements.openForm('${r.id}','${r.customerId}')">&#9998;</button>
+              ${r.customerId&&canQuote? `<button class="icon-btn" style="color:#8B5CF6;" title="Create Quotation" onclick="Field.Requirements.createQuotation('${r.id}')">&#128196;</button>` : ''}
+              <button class="icon-btn" title="Delete" onclick="Field.Requirements.remove('${r.id}')">&#128465;</button>
+            </div></td>
+            <td class="cell-main">${Util.escapeHtml(cust?cust.name:'—')}</td>
+            <td>${Util.escapeHtml(r.title||r.product||'—')}</td>
+            <td class="cell-mute">${r.qty?Util.escapeHtml(String(r.qty))+' '+Util.escapeHtml(r.unit||''):'—'}</td>
+            <td class="cell-mute">${Util.escapeHtml(r.priority||'—')}</td>
+            <td>${Field.badge(r.status, Field.REQ_COLOR)}</td>
+            <td class="cell-mute">${r.expectedDate?Util.fmtDate(r.expectedDate):'—'}</td>
+          </tr>`;}).join('')}
+          </tbody></table>
+          ${Paginate.controlsHTML('requirements', pg, "Field.Requirements.render()")}` : `<div class="empty-state"><div class="ic">&#128221;</div><div class="t">No requirements collected yet</div><div class="d">Add one from a customer's profile or during a visit.</div></div>`}
+        </div>
+      </div>
+    `;
+  },
+  setFilter(s){ this.filterStatus=s; Paginate.get('requirements').page=1; this.render(); },
+  openForm(id, customerId, defaultStatus){
+    const rec = id ? Store.data.requirements.find(x=>x.id===id) : null;
+    this.draftPhotos = rec && rec.photos ? rec.photos.slice() : [];
+    const v = rec || {customerId:customerId||'', title:'', product:'', qty:'', unit:'Nos', specification:'', budget:'', expectedDate:'', competitor:'', status:defaultStatus||'New', priority:'Medium', notes:''};
+    const canQuote = hasMenuAccess('quotations') || Auth.isAdmin();
+    UI.openModal(rec?'Edit Requirement':'Add Requirement', `
+      <div class="field"><label>Customer *</label>${CustPicker.html('freq', v.customerId, '', 'Search name, phone, or Area / Panchayath...')}</div>
+      <div class="form-row">
+        <div class="field"><label>Requirement Title *</label><input id="freq_title" value="${Util.escapeHtml(v.title)}" placeholder="e.g. Playground equipment for park"></div>
+        <div class="field"><label>Product / Category</label><input id="freq_product" list="dl_reqproduct" value="${Util.escapeHtml(v.product)}"></div>
+      </div>
+      <datalist id="dl_reqproduct">${DROPDOWNS.productCategories.map(c=>`<option value="${Util.escapeHtml(c)}">`).join('')}</datalist>
+      <div class="form-row">
+        <div class="field"><label>Quantity</label><input type="number" id="freq_qty" value="${v.qty}"></div>
+        <div class="field"><label>Unit</label><input id="freq_unit" value="${Util.escapeHtml(v.unit||'Nos')}"></div>
+      </div>
+      <div class="field"><label>Specification</label><textarea id="freq_spec" placeholder="Size, material, colour, standard...">${Util.escapeHtml(v.specification||'')}</textarea></div>
+      <div class="form-row">
+        <div class="field"><label>Approx. Budget (&#8377;)</label><input type="number" id="freq_budget" value="${v.budget}"></div>
+        <div class="field"><label>Expected Purchase Date</label><input type="date" id="freq_expected" value="${v.expectedDate||''}"></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>Competitor / Brand (if known)</label><input id="freq_competitor" value="${Util.escapeHtml(v.competitor||'')}"></div>
+        <div class="field"><label>Priority</label><select id="freq_priority">${selectOptions(DROPDOWNS.requirementPriority, v.priority)}</select></div>
+      </div>
+      <div class="field"><label>Status</label><select id="freq_status">${DROPDOWNS.requirementStatus.map(s=>`<option ${s===v.status?'selected':''}>${s}</option>`).join('')}</select></div>
+      <div class="field"><label>Staff Notes</label><textarea id="freq_notes">${Util.escapeHtml(v.notes||'')}</textarea>${Field.voiceBtnHTML('freq_notes')}</div>
+      <div class="field">
+        <label>Photos / Attachments</label>
+        <input type="file" id="freq_photoInput" accept="image/*" onchange="Field.Requirements.addPhoto(this.files[0])">
+        <div id="freq_photoStrip">${Field.photoStripHTML(this.draftPhotos, 'Field.Requirements.removePhoto')}</div>
+      </div>
+    `, `
+      <button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button>
+      ${id&&v.customerId&&canQuote? `<button class="btn btn-outline" onclick="Field.Requirements.createQuotation('${id}')">&#128196; Create Quotation</button>` : ''}
+      <button class="btn btn-primary" onclick="Field.Requirements.save('${id||''}')">Save Requirement</button>
+    `, true);
+  },
+  /* Hands off to the existing Quotations module rather than building a
+     second quoting flow - just pre-selects the customer and marks the
+     requirement "Quotation Sent" once the quotation form is open. */
+  createQuotation(id){
+    if(!(hasMenuAccess('quotations') || Auth.isAdmin())){ UI.toast("You don't have permission to create quotations"); return; }
+    const r = Store.data.requirements.find(x=>x.id===id);
+    if(!r || !r.customerId) return;
+    UI.closeModal();
+    go('quotations');
+    Quotations.openForm(null, r.customerId);
+    setTimeout(()=>{
+      if(!Quotations.draftItems) return;
+      Quotations.draftItems[0] = {name: r.product||r.title||'', qty: Number(r.qty)||1, rate: 0};
+      Quotations.renderLines();
+    }, 0);
+    if(r.status==='New' || r.status==='Quotation Required'){
+      r.status = 'Quotation Sent'; r.updatedBy = Field.me(); r.updatedAt = new Date().toISOString();
+      FieldSync.createAndSave('requirements', r);
+    }
+  },
+  async addPhoto(file){
+    if(!file) return;
+    try{
+      const dataUrl = await Field.compressImage(file);
+      this.draftPhotos.push(dataUrl);
+      const strip = document.getElementById('freq_photoStrip');
+      if(strip) strip.innerHTML = Field.photoStripHTML(this.draftPhotos, 'Field.Requirements.removePhoto');
+    }catch(e){ UI.toast('Could not add photo'); }
+  },
+  removePhoto(i){
+    this.draftPhotos.splice(i,1);
+    const strip = document.getElementById('freq_photoStrip');
+    if(strip) strip.innerHTML = Field.photoStripHTML(this.draftPhotos, 'Field.Requirements.removePhoto');
+  },
+  async save(id){
+    const customerId = document.getElementById('freq_customerId').value;
+    const cust = Store.data.customers.find(c=>c.id===customerId);
+    if(!cust){ UI.toast('Please select a customer'); return; }
+    const title = document.getElementById('freq_title').value.trim();
+    if(!title){ UI.toast('Requirement title is required'); return; }
+    const prev = id ? Store.data.requirements.find(x=>x.id===id) : null;
+    const rec = {
+      id: id || Util.uid('REQ', Store.data.requirements),
+      customerId, title,
+      product: document.getElementById('freq_product').value.trim(),
+      qty: Number(document.getElementById('freq_qty').value)||'',
+      unit: document.getElementById('freq_unit').value.trim(),
+      specification: document.getElementById('freq_spec').value.trim(),
+      budget: Number(document.getElementById('freq_budget').value)||'',
+      expectedDate: document.getElementById('freq_expected').value,
+      competitor: document.getElementById('freq_competitor').value.trim(),
+      priority: document.getElementById('freq_priority').value,
+      status: document.getElementById('freq_status').value,
+      notes: document.getElementById('freq_notes').value.trim(),
+      photos: this.draftPhotos.slice(),
+      createdBy: (prev&&prev.createdBy) || Field.me(), createdAt: (prev&&prev.createdAt) || new Date().toISOString(),
+      updatedBy: Field.me(), updatedAt: new Date().toISOString()
+    };
+    if(id){ const idx = Store.data.requirements.findIndex(x=>x.id===id); Store.data.requirements[idx]=rec; }
+    else Store.data.requirements.unshift(rec);
+    await FieldSync.createAndSave('requirements', rec);
+    await Customers.logTimeline(customerId, 'Note', 'Requirement '+(id?'updated':'added')+': '+title, {silent:true});
+    await Activity.log(id?'Updated requirement':'Added requirement', cust.name+' — '+title);
+    UI.closeModal(); UI.toast('Saved');
+    Router.render(UI.currentView);
+  },
+  async remove(id){
+    if(!confirm('Delete this requirement?')) return;
+    Store.data.requirements = Store.data.requirements.filter(x=>x.id!==id);
+    await Store.save('requirements');
+    UI.toast('Deleted');
+    Router.render(UI.currentView);
+  }
+};
+Views.requirements = ()=>Field.Requirements.render();
+
+/* ---------------------------------------------------------------------
+   OFFICE FOLLOW-UP / REQUIREMENTS QUEUE — where office/sales staff review
+   everything field staff captured (requirements + due follow-ups) across
+   ALL staff (not scoped to "my" records, unlike Field.Requirements) and
+   decide, one record at a time, whether a quotation is warranted. Quotation
+   creation itself is never automatic — it stays a deliberate action, gated
+   by the same hasMenuAccess('quotations') permission check used elsewhere.
+=========================================================================== */
+Field.OfficeQueue = {
+  tab: 'awaiting',
+  setTab(t){ this.tab = t; Router.render(UI.currentView); },
+  render(){
+    const today = new Date().toISOString().slice(0,10);
+    const reqs = Store.data.requirements.slice().sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||''));
+    const newReqs = reqs.filter(r=>r.status==='New');
+    const quoteReq = reqs.filter(r=>r.status==='Quotation Required');
+    const awaiting = reqs.filter(r=>r.status==='New'||r.status==='Quotation Required');
+    const dueFU = Store.data.followups.filter(f=>f.status==='Pending' && f.date && f.date<=today);
+    const overdueFU = dueFU.filter(f=>f.date<today);
+    const canQuote = hasMenuAccess('quotations') || Auth.isAdmin();
+    let list = awaiting;
+    if(this.tab==='new') list = newReqs;
+    else if(this.tab==='quotereq') list = quoteReq;
+
+    document.getElementById('content').innerHTML = `
+      ${dashboardCardsHTML('Office Follow-up Overview', [
+        {label:'New Requirements', value:newReqs.length, onclick:"Field.OfficeQueue.setTab('new')"},
+        {label:'Quotation Required', value:quoteReq.length, color:'var(--amber,#d97706)', onclick:"Field.OfficeQueue.setTab('quotereq')"},
+        {label:'Awaiting Office Action', value:awaiting.length, color:'var(--blue,#2563eb)', onclick:"Field.OfficeQueue.setTab('awaiting')"},
+        {label:'Follow-ups Due / Overdue', value:dueFU.length, color: overdueFU.length?'var(--red,#dc2626)':undefined, onclick:"Field.OfficeQueue.setTab('followups')"}
+      ])}
+      <div class="toolbar" style="flex-wrap:wrap;">
+        <button class="tab-btn ${this.tab==='awaiting'?'active':''}" onclick="Field.OfficeQueue.setTab('awaiting')">Awaiting Action <span class="cnt">${awaiting.length}</span></button>
+        <button class="tab-btn ${this.tab==='new'?'active':''}" onclick="Field.OfficeQueue.setTab('new')">New <span class="cnt">${newReqs.length}</span></button>
+        <button class="tab-btn ${this.tab==='quotereq'?'active':''}" onclick="Field.OfficeQueue.setTab('quotereq')">Quotation Required <span class="cnt">${quoteReq.length}</span></button>
+        <button class="tab-btn ${this.tab==='followups'?'active':''}" onclick="Field.OfficeQueue.setTab('followups')">Follow-ups Due/Overdue <span class="cnt">${dueFU.length}</span></button>
+      </div>
+      <div class="card">
+        <div class="table-wrap">
+        ${this.tab==='followups' ? this.followupsTableHTML(dueFU, today) : this.requirementsTableHTML(list, canQuote)}
+        </div>
+      </div>
+    `;
+  },
+  requirementsTableHTML(list, canQuote){
+    if(!list.length) return `<div class="empty-state"><div class="ic">&#128203;</div><div class="t">Nothing here</div><div class="d">Requirements submitted by field staff will appear here for office review.</div></div>`;
+    return `<table><thead><tr><th class="col-actions">Actions</th><th>Customer</th><th>Title / Product</th><th>Qty</th><th>Status</th><th>Submitted By</th><th>Date</th></tr></thead><tbody>
+      ${list.map(r=>{
+        const cust = Store.data.customers.find(c=>c.id===r.customerId);
+        return `<tr>
+        <td class="col-actions"><div class="row-action-btns">
+          <button class="icon-btn" title="Open" onclick="Field.Requirements.openForm('${r.id}','${r.customerId}')">&#9998;</button>
+          ${cust? `<button class="icon-btn" title="Customer 360" onclick="Customers.openDetail('${cust.id}')">&#128100;</button>` : ''}
+          ${r.customerId&&canQuote? `<button class="icon-btn" style="color:#8B5CF6;" title="Create Quotation" onclick="Field.Requirements.createQuotation('${r.id}')">&#128196;</button>` : ''}
+        </div></td>
+        <td>${Util.escapeHtml(cust?cust.name:'—')}</td>
+        <td>${Util.escapeHtml(r.title||r.product||'')}</td>
+        <td>${r.qty||''} ${Util.escapeHtml(r.unit||'')}</td>
+        <td>${Field.badge(r.status, Field.REQ_COLOR)}</td>
+        <td class="cell-mute">${Util.escapeHtml(r.createdBy||'')}</td>
+        <td class="cell-mute">${r.createdAt?Util.fmtDate(r.createdAt.slice(0,10)):'—'}</td>
+      </tr>`;
+      }).join('')}
+    </tbody></table>`;
+  },
+  followupsTableHTML(list, today){
+    if(!list.length) return `<div class="empty-state"><div class="ic">&#9200;</div><div class="t">No follow-ups due</div><div class="d">Everything is up to date.</div></div>`;
+    return `<table><thead><tr><th class="col-actions">Actions</th><th>Customer</th><th>Purpose</th><th>Due Date</th><th>Status</th></tr></thead><tbody>
+      ${list.map(f=>{
+        const cust = f.customerId ? Store.data.customers.find(c=>c.id===f.customerId) : null;
+        const overdue = f.date && f.date<today;
+        return `<tr>
+        <td class="col-actions"><div class="row-action-btns">
+          <button class="icon-btn" title="Open Follow-ups" onclick="go('followupcentre')">&#9200;</button>
+          ${cust? `<button class="icon-btn" title="Customer 360" onclick="Customers.openDetail('${cust.id}')">&#128100;</button>` : ''}
+        </div></td>
+        <td>${Util.escapeHtml(f.customerName||(cust?cust.name:'—'))}</td>
+        <td>${Util.escapeHtml(f.purpose||'')}</td>
+        <td style="${overdue?'color:var(--red,#dc2626);font-weight:600;':''}">${Util.fmtDate(f.date)}</td>
+        <td>${overdue?'Overdue':'Due'}</td>
+      </tr>`;
+      }).join('')}
+    </tbody></table>`;
+  }
+};
+Views.officequeue = ()=>Field.OfficeQueue.render();
+
+/* ---------------------------------------------------------------------
+   QUICK LEAD — a short, field-friendly capture form (a handful of fields,
+   not the full office Lead/Customer form) with a one-tap "Save Lead &
+   Start Visit" that creates the customer, an optional first requirement,
+   and immediately starts a GPS-tracked visit, all in one action. The
+   full Customers.openForm/save is reused for the actual record (no
+   second lead-storage path), so duplicate detection, timeline, and
+   Store persistence all behave exactly like any other lead.
+=========================================================================== */
+Field.QuickLead = {
+  open(){
+    UI.openModal('Quick Lead (Field)', `
+      <div class="form-row">
+        <div class="field"><label>Name *</label><input id="ql_name"></div>
+        <div class="field"><label>Mobile *</label><input id="ql_phone" type="tel"></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>WhatsApp (if different)</label><input id="ql_whatsapp" type="tel"></div>
+        <div class="field"><label>Company / Area</label><input id="ql_company"></div>
+      </div>
+      <div class="field">
+        <label>Location</label>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <input id="ql_gpsLabel" readonly value="Not captured" style="flex:1;">
+          <button type="button" class="btn btn-outline btn-sm" onclick="Field.QuickLead.captureGPS()">&#128205; Capture</button>
+        </div>
+        <input type="hidden" id="ql_lat"><input type="hidden" id="ql_lng">
+      </div>
+      <div class="form-row">
+        <div class="field"><label>Interested Product</label><input id="ql_product" list="dl_reqproduct"></div>
+        <div class="field"><label>Est. Quantity</label><input id="ql_qty" type="number"></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>Expected Purchase</label><input type="date" id="ql_expected"></div>
+        <div class="field"><label>Priority</label><select id="ql_priority">${selectOptions(DROPDOWNS.requirementPriority,'Medium')}</select></div>
+      </div>
+      <div class="field"><label>Requirement / Notes</label><textarea id="ql_notes" placeholder="What do they need?"></textarea>${Field.voiceBtnHTML('ql_notes')}</div>
+    `, `
+      <button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button>
+      <button class="btn btn-outline" onclick="Field.QuickLead.save(false)">Save Lead</button>
+      <button class="btn btn-primary" onclick="Field.QuickLead.save(true)">Save Lead &amp; Start Visit</button>
+    `);
+  },
+  captureGPS(){
+    if(!navigator.geolocation){ UI.toast('GPS not available on this device/browser'); return; }
+    UI.toast('Getting location…');
+    navigator.geolocation.getCurrentPosition(pos=>{
+      document.getElementById('ql_gpsLabel').value = pos.coords.latitude.toFixed(5)+', '+pos.coords.longitude.toFixed(5);
+      document.getElementById('ql_lat').value = pos.coords.latitude;
+      document.getElementById('ql_lng').value = pos.coords.longitude;
+      UI.toast('Location captured');
+    }, err=>{ UI.toast('Could not get location: '+(err.message||'permission denied')); }, {enableHighAccuracy:true, timeout:12000});
+  },
+  async save(startVisit){
+    const name = document.getElementById('ql_name').value.trim();
+    const phone = document.getElementById('ql_phone').value.trim();
+    if(!name || !phone){ UI.toast('Name and mobile are required'); return; }
+    const whatsapp = document.getElementById('ql_whatsapp').value.trim();
+    const dupes = Customers.findPossibleDuplicates(name, phone, whatsapp);
+    if(dupes.length && !confirm('Possible duplicate found: '+dupes.map(d=>d.name+' ('+d.phone+')').join(', ')+'.\n\nCreate this as a new record anyway?')) return;
+    const product = document.getElementById('ql_product').value.trim();
+    const qty = document.getElementById('ql_qty').value;
+    const notes = document.getElementById('ql_notes').value.trim();
+    const rec = {
+      id: Util.uid('C', Store.data.customers),
+      name, phone, whatsapp,
+      email: '', district: '', panchayath: document.getElementById('ql_company').value.trim(),
+      leadSource: 'Field Visit', customerType: '',
+      lat: document.getElementById('ql_lat').value||'', lng: document.getElementById('ql_lng').value||'',
+      assignedTo: '', status: 'New Lead',
+      lastContact: Util.todayISO(), notes,
+      createdDate: Util.todayISO(), createdBy: Field.me(), updatedBy: Field.me(), updatedAt: new Date().toISOString(),
+      timeline: [{id:'T'+Date.now(), date:Util.todayISO(), stage:'First Contact', note:'Quick Lead captured in the field', by:Field.me()}]
+    };
+    Store.data.customers.unshift(rec);
+    const ok = await Store.save('customers');
+    if(!ok){ UI.toast('Save failed — check your connection and try again.'); return; }
+    await Activity.log('Added lead/customer', name+' ('+phone+') — Quick Lead');
+    if(product || qty){
+      const req = {
+        id: Util.uid('REQ', Store.data.requirements),
+        customerId: rec.id, title: product||'Field requirement', product, qty: Number(qty)||'',
+        unit: 'Nos', specification: '', budget: '', expectedDate: document.getElementById('ql_expected').value,
+        competitor: '', priority: document.getElementById('ql_priority').value, status: 'New', notes, photos: [],
+        createdBy: Field.me(), createdAt: new Date().toISOString(), updatedBy: Field.me(), updatedAt: new Date().toISOString()
+      };
+      Store.data.requirements.unshift(req);
+      await FieldSync.createAndSave('requirements', req);
+    }
+    UI.closeModal();
+    UI.toast('Lead saved');
+    if(startVisit){
+      await Field.Visits.startWithDetails(rec.id, '', '', 'New Lead', product?('Interested in '+product):'');
+    } else {
+      Router.render(UI.currentView);
+    }
+  }
+};
+
+/* ---------------------------------------------------------------------
+   TRAVEL LOG
+=========================================================================== */
+Field.Travel = {
+  /* The staff member's currently open (not-yet-ended) trip, if any - visits
+     started while a trip is open are tagged onto it (see Field.Visits.
+     startWithDetails/startPlanned), so a trip becomes a real multi-stop
+     journey (Start Trip -> stops -> End Trip) without a separate object. */
+  activeTrip(){
+    const me = Field.me();
+    return Store.data.travelLogs.find(t=>t.staff===me && !t.endAt) || null;
+  },
+  stopsFor(tripId){
+    return Store.data.visits.filter(v=>v.travelLogId===tripId);
+  },
+  render(){
+    const me = Field.me();
+    const scope = Auth.isAdmin() ? Store.data.travelLogs : Store.data.travelLogs.filter(t=>t.staff===me);
+    const today = Util.todayISO();
+    const thisMonth = today.slice(0,7);
+    const todays = scope.filter(t=>(t.startAt||'').slice(0,10)===today);
+    const monthly = scope.filter(t=>(t.startAt||'').slice(0,7)===thisMonth);
+    const sum = (arr,f)=>arr.reduce((s,t)=>s+(Number(f(t))||0),0);
+    const list = scope.slice().sort((a,b)=>(b.startAt||'').localeCompare(a.startAt||''));
+    const pg = Paginate.slice('travel', list);
+    document.getElementById('content').innerHTML = `
+      ${dashboardCardsHTML('Today', [
+        {label:'Trips', value: todays.length},
+        {label:'Distance (km)', value: sum(todays,t=>t.distanceKm).toFixed(1)},
+        {label:'Expense', value: Util.fmtMoney(sum(todays,t=>t.expense))},
+      ])}
+      ${dashboardCardsHTML('This Month', [
+        {label:'Trips', value: monthly.length},
+        {label:'Distance (km)', value: sum(monthly,t=>t.distanceKm).toFixed(1)},
+        {label:'Expense', value: Util.fmtMoney(sum(monthly,t=>t.expense))},
+        {label:'Customers Visited', value: new Set(monthly.filter(t=>t.customerId).map(t=>t.customerId)).size}
+      ])}
+      <div class="toolbar">
+        ${Field.syncBadgeHTML()}
+        <div class="toolbar-spacer"></div>
+        <button class="btn btn-primary btn-sm" onclick="Field.Travel.openStartForm()">&#65291; Start Journey</button>
+      </div>
+      <div class="card">
+        <div class="table-wrap">
+        ${list.length ? `<table><thead><tr><th class="col-actions">Actions</th><th>Customer/Purpose</th><th>Mode</th><th>Start</th><th>End</th><th>Stops</th><th>Distance (km)</th><th>Expense</th></tr></thead><tbody>
+          ${pg.pageItems.map(t=>{
+            const cust = t.customerId ? Store.data.customers.find(c=>c.id===t.customerId) : null;
+            const stops = this.stopsFor(t.id).length;
+            return `<tr>
+            <td class="col-actions"><div class="row-action-btns">
+              ${!t.endAt ? `<button class="icon-btn" style="color:#0E9F76;" title="End Journey" onclick="Field.Travel.openEndForm('${t.id}')">&#10003;</button>` : `<button class="icon-btn" title="Correct" onclick="Field.Travel.openCorrectForm('${t.id}')">&#9998;</button>`}
+            </div></td>
+            <td class="cell-main">${Util.escapeHtml(cust?cust.name:(t.purpose||'—'))}</td>
+            <td>${Util.escapeHtml(t.mode||'—')}</td>
+            <td class="cell-mute">${t.startAt?Util.fmtDateTime(t.startAt):'—'}</td>
+            <td class="cell-mute">${t.endAt?Util.fmtDateTime(t.endAt):'<span class="badge badge-amber">Ongoing</span>'}</td>
+            <td class="mono">${stops||'—'}</td>
+            <td class="mono">${t.distanceKm?Number(t.distanceKm).toFixed(1):'—'}</td>
+            <td class="mono">${t.expense?Util.fmtMoney(t.expense):'—'}</td>
+          </tr>`;}).join('')}
+          </tbody></table>
+          ${Paginate.controlsHTML('travel', pg, "Field.Travel.render()")}` : `<div class="empty-state"><div class="ic">&#128664;</div><div class="t">No trips logged yet</div></div>`}
+        </div>
+      </div>
+    `;
+  },
+  openStartForm(){
+    const open = this.activeTrip();
+    if(open){ UI.toast('You already have an open trip — end it before starting a new one'); this.openEndForm(open.id); return; }
+    UI.openModal('Start Journey', `
+      <div class="field"><label>Purpose</label><input id="ft_purpose" placeholder="e.g. Site visits, GEM CRAC collection"></div>
+      <div class="field"><label>Related Customer (optional)</label>${CustPicker.html('ft', '', '', 'Search name, phone, or Area / Panchayath...')}</div>
+      <div class="field"><label>Travel Mode</label><select id="ft_mode">${selectOptions(DROPDOWNS.travelMode, 'Bike')}</select></div>
+    `, `
+      <button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="Field.Travel.startJourney()">&#9654; Start Journey</button>
+    `);
+  },
+  async startJourney(){
+    UI.closeModal();
+    UI.toast('Getting your location…');
+    const pos = await Field.getPosition();
+    const rec = {
+      id: Util.uid('TRV', Store.data.travelLogs),
+      purpose: document.getElementById('ft_purpose').value.trim(),
+      customerId: document.getElementById('ft_customerId').value || '',
+      mode: document.getElementById('ft_mode').value,
+      startAt: new Date().toISOString(), startLat: pos?pos.lat:'', startLng: pos?pos.lng:'',
+      endAt: '', endLat: '', endLng: '', distanceKm: '', expense: '', remarks: '',
+      staff: Field.me(), corrections: [],
+      createdBy: Field.me(), createdAt: new Date().toISOString(), updatedBy: Field.me(), updatedAt: new Date().toISOString()
+    };
+    Store.data.travelLogs.unshift(rec);
+    await FieldSync.createAndSave('travelLogs', rec);
+    await Activity.log('Journey started', rec.purpose||rec.mode);
+    UI.toast('Journey started');
+    Router.render(UI.currentView);
+  },
+  openEndForm(id){
+    const t = Store.data.travelLogs.find(x=>x.id===id);
+    if(!t) return;
+    const stops = this.stopsFor(t.id);
+    const areas = [...new Set(stops.map(v=>{ const c=v.customerId?Store.data.customers.find(x=>x.id===v.customerId):null; return c?c.panchayath:''; }).filter(Boolean))];
+    const durationMin = t.startAt ? Math.max(1, Math.round((Date.now()-new Date(t.startAt))/60000)) : 0;
+    const hrs = Math.floor(durationMin/60), mins = durationMin%60;
+    UI.openModal('End Journey', `
+      <div class="card card-pad" style="margin-bottom:12px;background:var(--bg-soft,#F6F8FB);">
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;text-align:center;font-size:12.5px;">
+          <div><div style="font-weight:800;font-size:16px;">${stops.length}</div><div class="cell-mute">Stops</div></div>
+          <div><div style="font-weight:800;font-size:16px;">${hrs}h ${mins}m</div><div class="cell-mute">Duration</div></div>
+          <div><div style="font-weight:800;font-size:16px;">${areas.length||'—'}</div><div class="cell-mute">Area(s)</div></div>
+        </div>
+        ${areas.length? `<div class="cell-mute" style="font-size:12px;margin-top:8px;text-align:center;">${areas.map(Util.escapeHtml).join(', ')}</div>`:''}
+      </div>
+      <div class="field"><label>Distance Travelled (km) — auto, editable</label><input type="number" id="ft_distance" value="" placeholder="Calculating…"></div>
+      <div class="field"><label>Travel Expense (&#8377;)</label><input type="number" id="ft_expense" value=""></div>
+      <div class="field"><label>Remarks</label><textarea id="ft_remarks"></textarea></div>
+    `, `
+      <button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="Field.Travel.endJourney('${id}')">&#10003; End Journey</button>
+    `);
+    Field.getPosition().then(pos=>{
+      if(!pos) return;
+      const km = Field.haversineKm(t.startLat, t.startLng, pos.lat, pos.lng);
+      const inp = document.getElementById('ft_distance');
+      if(inp && km!==null) inp.value = km.toFixed(1);
+      Field.Travel._endPos = pos;
+    });
+  },
+  async endJourney(id){
+    const t = Store.data.travelLogs.find(x=>x.id===id);
+    if(!t) return;
+    const pos = this._endPos;
+    t.endAt = new Date().toISOString();
+    t.endLat = pos?pos.lat:''; t.endLng = pos?pos.lng:'';
+    t.distanceKm = Number(document.getElementById('ft_distance').value)||0;
+    t.expense = Number(document.getElementById('ft_expense').value)||0;
+    t.remarks = document.getElementById('ft_remarks').value.trim();
+    t.updatedBy = Field.me(); t.updatedAt = new Date().toISOString();
+    this._endPos = null;
+    const stops = this.stopsFor(t.id).length;
+    await FieldSync.createAndSave('travelLogs', t);
+    await Activity.log('Journey ended', (t.purpose||t.mode)+' — '+t.distanceKm+' km, '+stops+' stop(s)');
+    UI.closeModal(); UI.toast('Journey ended — '+t.distanceKm+' km, '+stops+' stop(s)');
+    Router.render(UI.currentView);
+  },
+  /* Manual correction with a visible audit trail - never silently
+     overwrites the original figures. */
+  openCorrectForm(id){
+    const t = Store.data.travelLogs.find(x=>x.id===id);
+    if(!t) return;
+    UI.openModal('Correct Trip Details', `
+      <div class="form-row">
+        <div class="field"><label>Distance (km)</label><input type="number" id="ftc_distance" value="${t.distanceKm}"></div>
+        <div class="field"><label>Expense (&#8377;)</label><input type="number" id="ftc_expense" value="${t.expense}"></div>
+      </div>
+      <div class="field"><label>Mode</label><select id="ftc_mode">${selectOptions(DROPDOWNS.travelMode, t.mode)}</select></div>
+      <div class="field"><label>Reason for correction</label><input id="ftc_reason" placeholder="Why is this being changed?"></div>
+      ${t.corrections&&t.corrections.length? `<div class="hint" style="margin-top:8px;">${t.corrections.length} previous correction(s) on file.</div>`:''}
+    `, `
+      <button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="Field.Travel.saveCorrect('${id}')">Save Correction</button>
+    `);
+  },
+  async saveCorrect(id){
+    const t = Store.data.travelLogs.find(x=>x.id===id);
+    if(!t) return;
+    const newDist = Number(document.getElementById('ftc_distance').value)||0;
+    const newExp = Number(document.getElementById('ftc_expense').value)||0;
+    const newMode = document.getElementById('ftc_mode').value;
+    const reason = document.getElementById('ftc_reason').value.trim();
+    if(!t.corrections) t.corrections = [];
+    t.corrections.push({by:Field.me(), at:new Date().toISOString(), reason, from:{distanceKm:t.distanceKm, expense:t.expense, mode:t.mode}, to:{distanceKm:newDist, expense:newExp, mode:newMode}});
+    t.distanceKm = newDist; t.expense = newExp; t.mode = newMode;
+    t.updatedBy = Field.me(); t.updatedAt = new Date().toISOString();
+    await FieldSync.createAndSave('travelLogs', t);
+    UI.closeModal(); UI.toast('Corrected');
+    Router.render(UI.currentView);
+  }
+};
+Views.travel = ()=>Field.Travel.render();
+
+/* ---------------------------------------------------------------------
+   LOCATION FINDER
+=========================================================================== */
+Field.Location = {
+  last: null,
+  render(){
+    document.getElementById('content').innerHTML = `
+      <div class="card card-pad" style="text-align:center;padding:36px 20px;">
+        <div style="font-size:38px;">&#128205;</div>
+        <h3 style="margin:10px 0 6px;">Find My Location</h3>
+        <div class="cell-mute" style="margin-bottom:18px;">Uses your device's GPS. You'll be asked for location permission the first time.</div>
+        <button class="btn btn-primary" onclick="Field.Location.find()">&#128205; Get My Location</button>
+        <div id="flResult" style="margin-top:20px;text-align:left;"></div>
+      </div>
+    `;
+  },
+  async find(){
+    const box = document.getElementById('flResult');
+    if(box) box.innerHTML = `<div class="cell-mute" style="text-align:center;">Getting location…</div>`;
+    const pos = await Field.getPosition();
+    if(!pos){ if(box) box.innerHTML = `<div class="empty-state"><div class="d">Could not get your location. Check that location permission is allowed for this site.</div></div>`; return; }
+    this.last = pos;
+    const address = await Field.reverseGeocode(pos.lat, pos.lng);
+    if(!box) return;
+    box.innerHTML = `
+      <div class="card card-pad">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:13px;margin-bottom:12px;">
+          <div><div class="cell-mute" style="font-size:11px;">LATITUDE</div><div class="mono">${pos.lat.toFixed(6)}</div></div>
+          <div><div class="cell-mute" style="font-size:11px;">LONGITUDE</div><div class="mono">${pos.lng.toFixed(6)}</div></div>
+          <div><div class="cell-mute" style="font-size:11px;">ACCURACY</div><div>&plusmn; ${Math.round(pos.accuracy||0)} m</div></div>
+          <div><div class="cell-mute" style="font-size:11px;">ADDRESS</div><div>${address?Util.escapeHtml(address):'Not available'}</div></div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <a class="btn btn-outline btn-sm" style="text-decoration:none;" target="_blank" href="https://www.google.com/maps?q=${pos.lat},${pos.lng}">&#128506; Open in Google Maps</a>
+        </div>
+        <iframe style="width:100%;height:260px;border:0;border-radius:10px;margin-top:14px;" src="https://www.openstreetmap.org/export/embed.html?bbox=${pos.lng-0.01}%2C${pos.lat-0.01}%2C${pos.lng+0.01}%2C${pos.lat+0.01}&marker=${pos.lat}%2C${pos.lng}"></iframe>
+      </div>
+    `;
+  }
+};
+Views.findlocation = ()=>Field.Location.render();
+
+/* ---------------------------------------------------------------------
+   FIELD MAP — Leaflet + OpenStreetMap tiles (no API key needed)
+=========================================================================== */
+Field.Map = {
+  radiusKm: 5,
+  leafletMap: null,
+  filter: 'all',
+  render(){
+    document.getElementById('content').innerHTML = `
+      <div class="toolbar" style="flex-wrap:wrap;">
+        ${[['all','All'],['leads','Leads'],['customers','Customers'],['today','Today’s Visits'],['overdue','Overdue Follow-ups']].map(([k,l])=>`<button class="tab-btn ${this.filter===k?'active':''}" onclick="Field.Map.setFilter('${k}')">${l}</button>`).join('')}
+        <div class="toolbar-spacer"></div>
+        <label class="hint">Nearby radius:</label>
+        <select id="fm_radius" onchange="Field.Map.setRadius(this.value)">
+          ${[1,5,10].map(r=>`<option value="${r}" ${r===this.radiusKm?'selected':''}>${r} km</option>`).join('')}
+        </select>
+        <button class="btn btn-outline btn-sm" onclick="Field.Map.locateMe()">&#128205; Locate Me</button>
+      </div>
+      <div class="hint" style="margin-bottom:8px;">&#128992; Leads &nbsp; &#128994; Customers &nbsp; &#128309; Today's Visits &nbsp; &#128308; Overdue Follow-ups &nbsp; &#128993; You</div>
+      <div class="card" style="overflow:hidden;">
+        <div id="fieldMapBox" style="height:420px;width:100%;"></div>
+      </div>
+      <div id="fm_nearList" style="margin-top:14px;"></div>
+    `;
+    setTimeout(()=>this.init(), 0);
+  },
+  setFilter(f){ this.filter = f; this.init(); },
+  setRadius(v){ this.radiusKm = Number(v); this.locateMe(); },
+  init(){
+    const box = document.getElementById('fieldMapBox');
+    if(!box || typeof L==='undefined') return;
+    if(this.leafletMap){ this.leafletMap.remove(); this.leafletMap = null; }
+    const withCoords = Store.data.customers.filter(c=>c.lat && c.lng);
+    const center = withCoords.length ? [Number(withCoords[0].lat), Number(withCoords[0].lng)] : [10.8505, 76.2711]; // Kerala fallback
+    this.leafletMap = L.map('fieldMapBox').setView(center, withCoords.length?9:7);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {attribution:'&copy; OpenStreetMap contributors', maxZoom:19}).addTo(this.leafletMap);
+    const leadStatuses = ['New Lead','First Contact','Call Not Taken'];
+    const custStatuses = ['Payment Received','Converted Customer'];
+    const today = Util.todayISO();
+    const overdueCustIds = new Set(Store.data.followups.filter(f=>f.status!=='Done' && f.date && f.date<today).map(f=>f.customerId));
+
+    if(this.filter==='all' || this.filter==='leads' || this.filter==='customers'){
+      withCoords.forEach(c=>{
+        const isLead = leadStatuses.includes(c.status);
+        const isCust = custStatuses.includes(c.status);
+        if(this.filter==='leads' && !isLead) return;
+        if(this.filter==='customers' && !isCust) return;
+        const color = isLead ? '#EB5A28' : (isCust ? '#0E9F76' : '#3B82C4');
+        const marker = L.circleMarker([Number(c.lat), Number(c.lng)], {radius:8, color, fillColor:color, fillOpacity:0.85, weight:2}).addTo(this.leafletMap);
+        marker.bindPopup(`<b>${Util.escapeHtml(c.name)}</b><br>${Util.escapeHtml(c.status||'')}<br>${Util.escapeHtml(c.panchayath||'')}<br><a href="#" onclick="UI.closeModal();Customers.openDetail('${c.id}');return false;">Open</a>`);
+      });
+    }
+    if(this.filter==='all' || this.filter==='today'){
+      Store.data.visits.filter(v=>v.startLat && v.startLng && (v.startAt||'').slice(0,10)===today).forEach(v=>{
+        L.circleMarker([Number(v.startLat), Number(v.startLng)], {radius:6, color:'#2563EB', fillColor:'#2563EB', fillOpacity:0.9, weight:2}).addTo(this.leafletMap)
+          .bindPopup(`<b>Visit</b><br>${Util.escapeHtml(v.visitType||'')}<br>${Util.fmtDateTime(v.startAt)}`);
+      });
+    }
+    if(this.filter==='all' || this.filter==='overdue'){
+      withCoords.filter(c=>overdueCustIds.has(c.id)).forEach(c=>{
+        L.circleMarker([Number(c.lat), Number(c.lng)], {radius:9, color:'#DC2626', fillColor:'#DC2626', fillOpacity:0.9, weight:2}).addTo(this.leafletMap)
+          .bindPopup(`<b>${Util.escapeHtml(c.name)}</b><br>Overdue follow-up<br><a href="#" onclick="UI.closeModal();go('followupcentre');return false;">Open Follow-ups</a>`);
+      });
+    }
+  },
+  async locateMe(){
+    const pos = await Field.getPosition();
+    const listBox = document.getElementById('fm_nearList');
+    if(!pos){ UI.toast('Could not get your location'); return; }
+    if(this.leafletMap){
+      L.circleMarker([pos.lat,pos.lng], {radius:9, color:'#8B5CF6', fillColor:'#8B5CF6', fillOpacity:1, weight:2}).addTo(this.leafletMap).bindPopup('You are here').openPopup();
+      this.leafletMap.setView([pos.lat,pos.lng], 12);
+    }
+    const near = Store.data.customers.filter(c=>c.lat&&c.lng).map(c=>({c, km:Field.haversineKm(pos.lat,pos.lng,c.lat,c.lng)})).filter(x=>x.km!==null && x.km<=this.radiusKm).sort((a,b)=>a.km-b.km);
+    if(listBox) listBox.innerHTML = near.length ? `<div class="card"><div class="table-wrap"><table><thead><tr><th>Customer</th><th>Distance</th><th>Status</th><th></th></tr></thead><tbody>
+      ${near.map(x=>`<tr><td class="cell-main">${Util.escapeHtml(x.c.name)}</td><td class="mono">${x.km.toFixed(1)} km</td><td>${statusBadge(x.c.status)}</td>
+        <td><a class="btn btn-outline btn-sm" style="text-decoration:none;" target="_blank" href="https://www.google.com/maps/dir/?api=1&destination=${x.c.lat},${x.c.lng}">Navigate</a></td></tr>`).join('')}
+      </tbody></table></div></div>` : `<div class="empty-state"><div class="d">No customers with saved GPS locations within ${this.radiusKm} km.</div></div>`;
+  }
+};
+Views.fieldmap = ()=>Field.Map.render();
+
+/* ---------------------------------------------------------------------
+   TODAY'S FIELD PLAN / "MY DAY" — doubles as the Field Staff dashboard
+=========================================================================== */
+Field.Plan = {
+  async render(){
+    const me = Field.me();
+    const today = Util.todayISO();
+    const isAdmin = Auth.isAdmin();
+    const myVisits = isAdmin ? Store.data.visits : Store.data.visits.filter(v=>v.staff===me);
+    const myFollowups = Store.data.followups.filter(f=>{ const c=Store.data.customers.find(x=>x.id===f.customerId); return isAdmin || !c || !c.assignedTo || c.assignedTo===me; });
+    const myCustomers = isAdmin ? Store.data.customers : Store.data.customers.filter(c=>!c.assignedTo || c.assignedTo===me);
+    const myTravel = isAdmin ? Store.data.travelLogs : Store.data.travelLogs.filter(t=>t.staff===me);
+    const myReqs = isAdmin ? Store.data.requirements : Store.data.requirements.filter(r=>{ const c=Store.data.customers.find(x=>x.id===r.customerId); return !c || !c.assignedTo || c.assignedTo===me; });
+
+    const plannedToday = myVisits.filter(v=>v.status==='Planned' && v.plannedDate===today);
+    const startedToday = myVisits.filter(v=>(v.startAt||'').slice(0,10)===today);
+    const completedToday = startedToday.filter(v=>v.status==='Completed');
+    const overdueFU = myFollowups.filter(f=>f.status!=='Done' && f.date && f.date<today);
+    const todayFU = myFollowups.filter(f=>f.status!=='Done' && f.date===today);
+    const newLeadsToday = myCustomers.filter(c=>c.createdDate===today);
+    const activeLeads = myCustomers.filter(c=>!['Converted Customer','Not Interested','Closed Lost'].includes(c.status));
+    const visitedCustIdsWeek = new Set();
+    const weekAgo = new Date(Date.now()-7*86400000).toISOString().slice(0,10);
+    myVisits.forEach(v=>{ if(v.customerId && (v.startAt||'').slice(0,10)>=weekAgo) visitedCustIdsWeek.add(v.customerId); });
+    const distanceToday = myTravel.filter(t=>(t.startAt||'').slice(0,10)===today).reduce((s,t)=>s+(Number(t.distanceKm)||0),0);
+    const reqToday = myReqs.filter(r=>(r.createdAt||'').slice(0,10)===today);
+
+    /* Customers needing attention - assigned/active customers with no
+       visit in 30+ days (or never visited at all). More useful to a
+       field-staff dashboard than a plain customer list. */
+    const needsAttention = myCustomers
+      .filter(c=>!['Not Interested','Closed Lost','Converted Customer'].includes(c.status))
+      .map(c=>{
+        const visits = myVisits.filter(v=>v.customerId===c.id && v.status==='Completed');
+        const last = visits.sort((a,b)=>(b.endAt||b.startAt||'').localeCompare(a.endAt||a.startAt||''))[0];
+        const lastDate = last ? (last.endAt||last.startAt) : null;
+        const days = lastDate ? Math.round((Date.now()-new Date(lastDate).getTime())/86400000) : null;
+        return {c, days};
+      })
+      .filter(x=>x.days===null || x.days>=30)
+      .sort((a,b)=>(b.days===null?9999:b.days)-(a.days===null?9999:a.days))
+      .slice(0,8);
+
+    /* "My Day" chronological feed - every timestamped field event today,
+       merged and sorted, so staff and managers get a real activity log
+       rather than just stat cards. */
+    const feed = [];
+    myVisits.forEach(v=>{
+      const cust = v.customerId ? Store.data.customers.find(x=>x.id===v.customerId) : null;
+      const label = cust ? cust.name : (v.leadName||'Lead');
+      if(v.startAt && v.startAt.slice(0,10)===today) feed.push({t:v.startAt, text:'Visit started — '+label+(v.visitType?' ('+v.visitType+')':'')});
+      if(v.endAt && v.endAt.slice(0,10)===today) feed.push({t:v.endAt, text:'Visit completed — '+label+(v.outcome?': '+v.outcome:'')});
+    });
+    myTravel.forEach(t=>{
+      if(t.startAt && t.startAt.slice(0,10)===today) feed.push({t:t.startAt, text:'Journey started'+(t.purpose?' — '+t.purpose:'')});
+      if(t.endAt && t.endAt.slice(0,10)===today) feed.push({t:t.endAt, text:'Journey ended — '+(t.distanceKm||0)+' km'});
+    });
+    myReqs.forEach(r=>{
+      if(r.createdAt && r.createdAt.slice(0,10)===today){
+        const cust = Store.data.customers.find(x=>x.id===r.customerId);
+        feed.push({t:r.createdAt, text:'Requirement collected — '+(r.title||r.product||'')+(cust?' ('+cust.name+')':'')});
+      }
+    });
+    myCustomers.forEach(c=>{
+      if(c.createdDate===today) feed.push({t:(c.createdDate)+'T00:00:01', text:'New lead added — '+c.name});
+    });
+    feed.sort((a,b)=>a.t.localeCompare(b.t));
+
+    const hour = new Date().getHours();
+    const greeting = hour<12?'Good Morning':hour<17?'Good Afternoon':'Good Evening';
+
+    document.getElementById('content').innerHTML = `
+      <div class="dash-head">
+        <div class="dash-greet">
+          <div class="wave">&#128075;</div>
+          <div><h2>${greeting}, ${Util.escapeHtml(me||'there')}</h2><div class="sub">Here's your field plan for today.</div></div>
+        </div>
+      </div>
+
+      <div class="toolbar" style="flex-wrap:wrap;margin-bottom:16px;">
+        <button class="btn btn-primary btn-sm" onclick="Field.Visits.openStartForm(null)">&#65291; Start Visit</button>
+        <button class="btn btn-outline btn-sm" onclick="Field.QuickLead.open()">&#65291; Quick Lead</button>
+        <button class="btn btn-outline btn-sm" onclick="Field.Requirements.openForm(null,null)">&#65291; Requirement</button>
+        <button class="btn btn-outline btn-sm" onclick="Field.Travel.openStartForm()">&#65291; Start Travel</button>
+        <button class="btn btn-outline btn-sm" onclick="go('findlocation')">&#128205; Find Location</button>
+      </div>
+
+      ${dashboardCardsHTML('Today', [
+        {label:'Planned Visits', value: plannedToday.length, color:'#3B82C4'},
+        {label:'Visits Completed', value: completedToday.length, color:'#0E9F76'},
+        {label:'Pending Follow-ups', value: todayFU.length, color:'#E8A33D'},
+        {label:'Overdue Follow-ups', value: overdueFU.length, color:'#DC2626'},
+        {label:'New Leads Today', value: newLeadsToday.length, color:'#8B5CF6'},
+        {label:'Requirements Today', value: reqToday.length, color:'#8B5CF6'},
+        {label:'Distance Travelled (km)', value: distanceToday.toFixed(1), color:'#3B82C4'},
+        {label:'Customers Visited (7d)', value: visitedCustIdsWeek.size, color:'#0E9F76'},
+        {label:'Active Leads', value: activeLeads.length, color:'#EB5A28'}
+      ])}
+
+      <div class="card card-pad" style="margin-bottom:16px;">
+        <div class="card-head" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;"><h3 style="margin:0;font-size:14px;">&#128197; Today's Planned Visits</h3><button class="btn btn-outline btn-sm" onclick="Field.Visits.openPlanForm(null)">&#65291; Plan Visit</button></div>
+        ${plannedToday.length ? plannedToday.map(v=>{
+          const cust = v.customerId ? Store.data.customers.find(c=>c.id===v.customerId) : null;
+          return `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 4px;border-bottom:1px solid #F3F5F8;">
+            <div><b style="font-size:13px;">${Util.escapeHtml(cust?cust.name:v.leadName)}</b><div class="cell-mute" style="font-size:12px;">${Util.escapeHtml(v.visitType||'')} ${v.purpose?'— '+Util.escapeHtml(v.purpose):''}</div></div>
+            <div style="display:flex;gap:6px;">
+              ${cust&&cust.lat&&cust.lng?`<a class="btn btn-outline btn-sm" style="text-decoration:none;" target="_blank" href="https://www.google.com/maps/dir/?api=1&destination=${cust.lat},${cust.lng}">Navigate</a>`:''}
+              <button class="btn btn-primary btn-sm" onclick="Field.Visits.startPlanned('${v.id}')">Start</button>
+            </div>
+          </div>`;
+        }).join('') : `<div class="empty-state" style="padding:16px;"><div class="d">No visits planned for today yet.</div></div>`}
+      </div>
+
+      <div class="grid grid-2">
+        <div class="card card-pad">
+          <h3 style="margin:0 0 10px;font-size:14px;">&#9200; Overdue Follow-ups</h3>
+          ${overdueFU.length ? overdueFU.slice(0,10).map(f=>`<div style="padding:6px 0;border-bottom:1px solid #F3F5F8;cursor:pointer;" onclick="go('followupcentre')"><b style="font-size:12.8px;">${Util.escapeHtml(f.customerName)}</b><div class="cell-mute" style="font-size:11.5px;">${Util.fmtDate(f.date)} — ${Util.escapeHtml(f.purpose||'')}</div></div>`).join('') : `<div class="cell-mute" style="font-size:12.5px;">Nothing overdue — nice work!</div>`}
+        </div>
+        <div class="card card-pad">
+          <h3 style="margin:0 0 10px;font-size:14px;">&#128205; Nearby Customers</h3>
+          <div id="planNearby" class="cell-mute" style="font-size:12.5px;">Tap to check nearby customers.</div>
+          <button class="btn btn-outline btn-sm" style="margin-top:8px;" onclick="Field.Plan.loadNearby()">&#128205; Check Nearby</button>
+        </div>
+      </div>
+
+      <div class="card card-pad" style="margin:16px 0;">
+        <h3 style="margin:0 0 10px;font-size:14px;">&#9888; Customers Needing Attention</h3>
+        ${needsAttention.length ? needsAttention.map(x=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #F3F5F8;">
+          <div><b style="font-size:12.8px;cursor:pointer;" onclick="Customers.openDetail('${x.c.id}')">${Util.escapeHtml(x.c.name)}</b><div class="cell-mute" style="font-size:11.5px;">${x.days===null?'Never visited':x.days+' days since last visit'}</div></div>
+          <button class="btn btn-outline btn-sm" onclick="Field.Visits.openStartForm('${x.c.id}')">Visit</button>
+        </div>`).join('') : `<div class="cell-mute" style="font-size:12.5px;">Everyone's been visited recently.</div>`}
+      </div>
+
+      <div class="card card-pad" style="margin-bottom:16px;">
+        <h3 style="margin:0 0 10px;font-size:14px;">&#128337; My Day</h3>
+        ${feed.length ? `<div class="timeline">${feed.map(e=>`<div class="timeline-item done"><div class="dotmark"></div><div class="ttl">${new Date(e.t).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})} — ${Util.escapeHtml(e.text)}</div></div>`).join('')}</div>` : `<div class="cell-mute" style="font-size:12.5px;">Nothing logged yet today — start a visit or journey to begin your timeline.</div>`}
+      </div>
+    `;
+  },
+  async loadNearby(){
+    const box = document.getElementById('planNearby');
+    if(box) box.textContent = 'Getting your location…';
+    const pos = await Field.getPosition();
+    if(!pos){ if(box) box.textContent = 'Could not get your location.'; return; }
+    const me = Field.me(); const isAdmin = Auth.isAdmin();
+    const near = Store.data.customers.filter(c=>c.lat&&c.lng&&(isAdmin||!c.assignedTo||c.assignedTo===me))
+      .map(c=>({c, km:Field.haversineKm(pos.lat,pos.lng,c.lat,c.lng)})).filter(x=>x.km!==null&&x.km<=5).sort((a,b)=>a.km-b.km).slice(0,6);
+    if(!box) return;
+    box.innerHTML = near.length ? near.map(x=>`<div style="display:flex;justify-content:space-between;padding:4px 0;"><span>${Util.escapeHtml(x.c.name)}</span><span class="mono">${x.km.toFixed(1)} km</span></div>`).join('') : 'No customers with saved GPS within 5 km.';
+  }
+};
+Views.fieldhome = ()=>Field.Plan.render();
+
+/* ---------------------------------------------------------------------
+   FIELD REPORTS
+=========================================================================== */
+Field.Reports = {
+  render(){
+    const visits = Store.data.visits, reqs = Store.data.requirements, travel = Store.data.travelLogs, followups = Store.data.followups, customers = Store.data.customers;
+    const byReqStatus = {}; reqs.forEach(r=>{ const k=r.status||'New'; byReqStatus[k]=(byReqStatus[k]||0)+1; });
+    const completed = visits.filter(v=>v.status==='Completed').length;
+
+    /* Combined staff-performance table - one row per staff member seen in
+       any field collection, with every metric a manager would want side
+       by side (visits, leads created, requirements, follow-ups, distance). */
+    const staffNames = new Set();
+    visits.forEach(v=>v.staff&&staffNames.add(v.staff));
+    travel.forEach(t=>t.staff&&staffNames.add(t.staff));
+    customers.forEach(c=>c.assignedTo&&staffNames.add(c.assignedTo));
+    const staffRows = [...staffNames].sort().map(name=>{
+      const staffVisits = visits.filter(v=>v.staff===name);
+      const staffLeads = customers.filter(c=>c.assignedTo===name && c.leadSource==='Field Visit').length;
+      const staffReqs = reqs.filter(r=>{ const c=customers.find(x=>x.id===r.customerId); return c && c.assignedTo===name; }).length;
+      const staffFU = followups.filter(f=>{ const c=customers.find(x=>x.id===f.customerId); return c && c.assignedTo===name; }).length;
+      const staffDist = travel.filter(t=>t.staff===name).reduce((s,t)=>s+(Number(t.distanceKm)||0),0);
+      return {name, visits: staffVisits.length, completed: staffVisits.filter(v=>v.status==='Completed').length, leads: staffLeads, reqs: staffReqs, followups: staffFU, distance: staffDist};
+    });
+
+    document.getElementById('content').innerHTML = `
+      ${dashboardCardsHTML('Field Activity Overview', [
+        {label:'Total Visits', value: visits.length},
+        {label:'Completed Visits', value: completed},
+        {label:'Requirements Collected', value: reqs.length},
+        {label:'Requirements Won', value: reqs.filter(r=>r.status==='Won').length, color:'#0E9F76'},
+        {label:'Total Trips', value: travel.length},
+        {label:'Total Distance (km)', value: travel.reduce((s,t)=>s+(Number(t.distanceKm)||0),0).toFixed(1)},
+      ])}
+      <div class="toolbar">
+        <button class="btn btn-outline btn-sm" onclick="Field.Reports.export('visits')">&#128190; Export Visits</button>
+        <button class="btn btn-outline btn-sm" onclick="Field.Reports.export('requirements')">&#128190; Export Requirements</button>
+        <button class="btn btn-outline btn-sm" onclick="Field.Reports.export('travel')">&#128190; Export Travel Log</button>
+      </div>
+      <div class="card" style="margin-bottom:16px;">
+        <div class="card-head"><h3>Staff Field Performance</h3></div>
+        <div class="table-wrap"><table><thead><tr><th>Staff</th><th>Visits</th><th>Completed</th><th>Leads (Field)</th><th>Requirements</th><th>Follow-ups</th><th>Distance (km)</th></tr></thead><tbody>
+          ${staffRows.length ? staffRows.map(s=>`<tr><td class="cell-main">${Util.escapeHtml(s.name)}</td><td>${s.visits}</td><td>${s.completed}</td><td>${s.leads}</td><td>${s.reqs}</td><td>${s.followups}</td><td class="mono">${s.distance.toFixed(1)}</td></tr>`).join('') : '<tr><td colspan="7" class="cell-mute">No field activity recorded yet</td></tr>'}
+        </tbody></table></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>Requirements by Status</h3></div><div class="table-wrap"><table><thead><tr><th>Status</th><th>Count</th></tr></thead><tbody>
+          ${Object.keys(byReqStatus).length ? Object.keys(byReqStatus).sort((a,b)=>byReqStatus[b]-byReqStatus[a]).map(k=>`<tr><td class="cell-main">${Util.escapeHtml(k)}</td><td>${byReqStatus[k]}</td></tr>`).join('') : '<tr><td colspan="2" class="cell-mute">No data</td></tr>'}
+        </tbody></table></div>
+      </div>
+    `;
+  },
+  export(kind){ Reports.exportView(kind==='travel'?'travel':kind); }
+};
+Views.fieldreports = ()=>Field.Reports.render();
+
+/* =====================================================================
    PROJECT OPPORTUNITY FINDER  (namespace: OppFinder)
    Ported from the standalone "JAYS Project Opportunity Finder PRO" tool
    directly into the CRM's own architecture - same Store, same
@@ -7901,6 +9525,12 @@ const Reports = {
     } else if(view==='attendance'){
       const list = Auth.isAdmin() ? Store.data.attendance : Store.data.attendance.filter(a=>a.userId===Auth.session.id);
       rows = list.map(a=>({Date:a.date, Employee:a.name||a.username, Location:a.location||'', Status:a.status, 'Login Time':a.loginTime?Util.fmtDateTime(a.loginTime):'', 'Logout Time':a.logoutTime?Util.fmtDateTime(a.logoutTime):'', Notes:a.notes||''}));
+    } else if(view==='visits'||view==='fieldhome'){
+      rows = Store.data.visits.map(v=>{ const c=v.customerId?Store.data.customers.find(x=>x.id===v.customerId):null; return {ID:v.id, Customer:c?c.name:(v.leadName||''), Staff:v.staff||'', Type:v.visitType||'', Status:v.status, Start:v.startAt?Util.fmtDateTime(v.startAt).replace(/<[^>]+>/g,''):'', End:v.endAt?Util.fmtDateTime(v.endAt).replace(/<[^>]+>/g,''):'', 'Duration (min)':v.durationMin||'', Outcome:v.outcome||'', 'Next Action':v.nextAction||'', 'Next Follow-up':v.nextFollowupDate||'', Notes:v.notes||''}; });
+    } else if(view==='requirements'){
+      rows = Store.data.requirements.map(r=>{ const c=Store.data.customers.find(x=>x.id===r.customerId); return {ID:r.id, Customer:c?c.name:'', Title:r.title||'', Product:r.product||'', Qty:r.qty||'', Unit:r.unit||'', Budget:r.budget||'', 'Expected Date':r.expectedDate||'', Competitor:r.competitor||'', Priority:r.priority||'', Status:r.status, Notes:r.notes||''}; });
+    } else if(view==='travel'){
+      rows = Store.data.travelLogs.map(t=>{ const c=t.customerId?Store.data.customers.find(x=>x.id===t.customerId):null; return {ID:t.id, Staff:t.staff||'', Purpose:t.purpose||'', Customer:c?c.name:'', Mode:t.mode||'', Start:t.startAt?Util.fmtDateTime(t.startAt).replace(/<[^>]+>/g,''):'', End:t.endAt?Util.fmtDateTime(t.endAt).replace(/<[^>]+>/g,''):'', 'Distance (km)':t.distanceKm||'', Expense:t.expense||'', Remarks:t.remarks||''}; });
     } else {
       rows = Store.data.customers.map(x=>({ID:x.id, Name:x.name, Phone:x.phone, Status:x.status}));
     }
@@ -8007,7 +9637,8 @@ const Backup = {
       oppProducts: Store.data.oppProducts, oppImportHistory: Store.data.oppImportHistory,
       oppKeywordGroups: Store.data.oppKeywordGroups,
       attendance: Store.data.attendance, leaveRequests: Store.data.leaveRequests,
-      bidDocs: Store.data.bidDocs
+      bidDocs: Store.data.bidDocs,
+      visits: Store.data.visits, requirements: Store.data.requirements, travelLogs: Store.data.travelLogs
     };
   },
   downloadJSON(){
@@ -8034,7 +9665,7 @@ const Backup = {
     try{
       const text = await file.text();
       const data = JSON.parse(text);
-      ['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs'].forEach(k=>{
+      ['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs'].forEach(k=>{
         if(data[k]!==undefined) Store.data[k] = data[k];
       });
       // oppProjects lives in its own indexed table now, not the
@@ -8042,7 +9673,7 @@ const Backup = {
       // the dedicated full-replace path so opp_projects_rows (what
       // imports actually merge against) gets restored too, not just
       // the legacy blob.
-      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs'].map(k=>Store.save(k)));
+      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs'].map(k=>Store.save(k)));
       if(data['oppProjects']!==undefined) await Store.replaceAllOppProjects(Store.data.oppProjects);
       await Activity.log('Data restored', 'Restored from backup file '+file.name);
       UI.toast('Data restored successfully');
