@@ -394,7 +394,10 @@
      from every page, desktop and mobile, without duplicating any of the
      existing "Add" forms - it just opens the same openForm() calls each
      module already has. */
-  .qc-wrap{position:fixed;right:22px;bottom:22px;z-index:195;display:flex;flex-direction:column;align-items:flex-end;gap:10px;}
+  /* z-index raised past Leaflet's internal max (~1000, see .modal-overlay's
+     comment) - this button sits bottom-right, the same corner Leaflet
+     parks its zoom/attribution controls, on pages like Field Map. */
+  .qc-wrap{position:fixed;right:22px;bottom:22px;z-index:1200;display:flex;flex-direction:column;align-items:flex-end;gap:10px;}
   @media(max-width:880px){ .qc-wrap{right:14px;bottom:74px;} }
   .qc-fab{width:52px;height:52px;border-radius:50%;border:0;background:linear-gradient(135deg,var(--orange),var(--orange-dark,#c2410c));
     color:#fff;font-size:24px;line-height:1;cursor:pointer;box-shadow:0 8px 20px rgba(235,90,40,0.4);
@@ -443,7 +446,16 @@
   .empty-state .d{font-size:12.5px;max-width:340px;margin:0 auto 14px;}
 
   /* ---------- MODAL ---------- */
-  .modal-overlay{position:fixed;inset:0;background:rgba(10,16,28,0.5);display:none;align-items:center;justify-content:center;z-index:100;padding:20px;}
+  /* z-index:2000, not 100: Leaflet's own CSS gives its internal panes and
+     popups z-index values up to 700 (and its zoom/attribution controls
+     1000), and .leaflet-container never sets its own z-index, so those
+     values aren't contained to the map - they compete directly with
+     page-level elements like this overlay. At z-index:100 the map (and
+     its popups) rendered ON TOP of this modal instead of behind it
+     whenever a modal was opened while a Leaflet map (Field Map or Office
+     Finder's map view) was the page underneath. 2000 comfortably clears
+     Leaflet's highest value with room to spare. */
+  .modal-overlay{position:fixed;inset:0;background:rgba(10,16,28,0.5);display:none;align-items:center;justify-content:center;z-index:2000;padding:20px;}
   .modal{background:#fff;border-radius:16px;max-width:560px;width:100%;max-height:88vh;overflow-y:auto;box-shadow:0 30px 70px rgba(0,0,0,0.3);}
   .modal.wide{max-width:820px;}
   .modal-head{display:flex;align-items:center;justify-content:space-between;padding:18px 22px;border-bottom:1px solid var(--border);position:sticky;top:0;background:#fff;z-index:2;}
@@ -455,7 +467,7 @@
   .form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
   @media(max-width:560px){.form-row{grid-template-columns:1fr;}}
 
-  .toast{position:fixed;bottom:20px;right:20px;background:var(--navy);color:#fff;padding:12px 18px;border-radius:10px;font-size:13px;font-weight:600;box-shadow:0 10px 30px rgba(0,0,0,0.25);z-index:200;display:none;align-items:center;gap:8px;}
+  .toast{position:fixed;bottom:20px;right:20px;background:var(--navy);color:#fff;padding:12px 18px;border-radius:10px;font-size:13px;font-weight:600;box-shadow:0 10px 30px rgba(0,0,0,0.25);z-index:2100;display:none;align-items:center;gap:8px;}
 
   .tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin-bottom:16px;flex-wrap:wrap;}
   .tab-btn{padding:9px 14px;font-size:13px;font-weight:700;color:var(--text-mute);background:none;border:none;border-bottom:2px solid transparent;margin-bottom:-1px;}
@@ -463,8 +475,11 @@
   .tab-btn .cnt{background:#EEF1F5;color:var(--text-mute);padding:1px 7px;border-radius:20px;font-size:10.5px;margin-left:5px;}
   .tab-btn.active .cnt{background:var(--orange-light);color:var(--orange-dark);}
 
-  .drawer-overlay{position:fixed;inset:0;background:rgba(10,16,28,0.45);display:none;z-index:100;}
-  .drawer{position:fixed;top:0;right:0;bottom:0;width:440px;max-width:92vw;background:#fff;box-shadow:-10px 0 40px rgba(0,0,0,0.2);overflow-y:auto;z-index:101;}
+  /* Same Leaflet-leaking-z-index issue as .modal-overlay above (see the
+     comment there) - a drawer opened over Field Map / Office Finder's map
+     view needs to clear Leaflet's highest internal z-index (~1000) too. */
+  .drawer-overlay{position:fixed;inset:0;background:rgba(10,16,28,0.45);display:none;z-index:1900;}
+  .drawer{position:fixed;top:0;right:0;bottom:0;width:440px;max-width:92vw;background:#fff;box-shadow:-10px 0 40px rgba(0,0,0,0.2);overflow-y:auto;z-index:1901;}
   @media(max-width:900px){.drawer{width:100%;}}
 
   .chart-legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px;justify-content:center;}
