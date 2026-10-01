@@ -7357,17 +7357,29 @@ const Field = {
      build-time sandbox - and respects Nominatim's usage policy with the
      queue below (max ~1 request/second, results cached permanently once
      found so the same place is never looked up twice). Never invents a
-     result: returns null on any failure, ambiguity, or no match. */
+     result on a genuine no-match: resolves null. But a genuine "nothing
+     found" (HTTP 200, empty array) is NOT the same thing as Nominatim's
+     free public server throttling/blocking a run that queries it hundreds
+     of times in a row (a non-OK HTTP status, or the fetch itself failing)
+     - those come back as {blocked:true, httpStatus} instead of null, so a
+     bulk caller can tell "this office really isn't in OpenStreetMap" apart
+     from "the service stopped answering us" and react very differently
+     (one is normal and expected across ~1000 small village offices; the
+     other means the whole run needs to stop before it reports hundreds of
+     real places as "not found" that were never actually checked). */
   _geocodeQueue: Promise.resolve(),
   forwardGeocode(query){
     return new Promise(resolve=>{
       this._geocodeQueue = this._geocodeQueue.then(async ()=>{
         try{
           const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=in&q=${encodeURIComponent(query)}`, {headers:{'Accept':'application/json'}});
-          const data = res.ok ? await res.json() : null;
-          const hit = data && data[0];
-          resolve(hit ? {lat:Number(hit.lat), lng:Number(hit.lon), address:hit.display_name} : null);
-        }catch(e){ resolve(null); }
+          if(!res.ok){ resolve({ blocked:true, httpStatus: res.status }); }
+          else{
+            const data = await res.json();
+            const hit = data && data[0];
+            resolve(hit ? {lat:Number(hit.lat), lng:Number(hit.lon), address:hit.display_name} : null);
+          }
+        }catch(e){ resolve({ blocked:true, httpStatus: 0 }); }
         await new Promise(r=>setTimeout(r, 1100));
       });
     });
@@ -8590,7 +8602,14 @@ Field.OfficeFinder = {
      Field.forwardGeocode) and - if found - saves it into the shared
      Store.data.lsgOfficeGeo cache so every field staff member benefits
      from this one lookup from now on. No-ops (and returns the cached
-     copy) if already geocoded; never invents a result on failure. */
+     copy) if already geocoded; never invents a result on failure.
+     If Nominatim itself is blocking/throttling us (see forwardGeocode's
+     {blocked:true} signal) rather than genuinely having no match, that's
+     flagged on the returned office as _geocodeBlocked so a bulk caller
+     can tell the two apart - a lone "Look it up now" tap just quietly
+     shows "not found" either way, but a 1000-office bulk run needs to
+     stop instead of reporting hundreds of real places as not-found when
+     they were never actually looked up. */
   geocoding: {},
   async geocodeOffice(id){
     const base = this.ensureData().find(x=>x.id===id);
@@ -8600,12 +8619,18 @@ Field.OfficeFinder = {
     if(this.geocoding[id]) return this.geocoding[id];
     this.geocoding[id] = (async ()=>{
       const hit = await Field.forwardGeocode(base.name+', '+base.district+' district, Kerala, India');
-      if(hit){
+      let result;
+      if(hit && hit.blocked){
+        result = Object.assign({}, base, { _geocodeBlocked:true, _httpStatus:hit.httpStatus });
+      } else if(hit){
         Store.data.lsgOfficeGeo[id] = {lat:hit.lat, lng:hit.lng, address:hit.address, geocodedAt:new Date().toISOString(), source:'OpenStreetMap/Nominatim'};
         await Store.save('lsgOfficeGeo');
+        result = this.withGeo(base);
+      } else {
+        result = base;
       }
       delete this.geocoding[id];
-      return hit ? this.withGeo(base) : base;
+      return result;
     })();
     return this.geocoding[id];
   },
@@ -8629,9 +8654,17 @@ Field.OfficeFinder = {
     const todo = this.filtered().map(x=>x.o).filter(o=>!Store.data.lsgOfficeGeo[o.id]);
     if(!todo.length){ UI.toast('Everything in view is already located'); return; }
     UI.toast('Looking up '+todo.length+' office location(s)… this can take a minute');
-    let done = 0;
+    let done = 0, consecutiveBlocked = 0;
     for(const o of todo){
-      await this.geocodeOffice(o.id);
+      const result = await this.geocodeOffice(o.id);
+      if(result && result._geocodeBlocked){
+        consecutiveBlocked++;
+        if(consecutiveBlocked >= 6){
+          this.render();
+          UI.toast('OpenStreetMap stopped answering (it blocks sustained bulk use) — the rest are still unlocated, not confirmed missing. Try again in a few hours.');
+          return;
+        }
+      } else { consecutiveBlocked = 0; }
       done++;
       if(done % 5 === 0 || done===todo.length) this.render();
     }
@@ -8651,22 +8684,52 @@ Field.OfficeFinder = {
      source, so stopping partway through and re-running later is free to
      do and never re-looks-up the same office twice. */
   _bulkFreeCancel: false,
+  _bulkFreeRunning: false,
   async bulkGeocodeFree(onProgress){
+    if(this._bulkFreeRunning) return { ok:false, error:'A free bulk geocode is already running — wait for it to finish (or stop it) before starting another.' };
     const all = this.ensureData();
     const todo = all.filter(o=>!Store.data.lsgOfficeGeo[o.id]);
     if(!todo.length) return { ok:true, geocoded:0, failed:0, skipped:all.length, message:'Every office is already located.' };
 
+    this._bulkFreeRunning = true;
     this._bulkFreeCancel = false;
-    let geocoded = 0, failed = 0;
-    for(let i=0; i<todo.length; i++){
-      if(this._bulkFreeCancel) break;
-      const o = todo[i];
-      const before = !!Store.data.lsgOfficeGeo[o.id];
-      await this.geocodeOffice(o.id);
-      if(!before && Store.data.lsgOfficeGeo[o.id]) geocoded++; else if(!before) failed++;
-      if((i+1) % 10 === 0 || i===todo.length-1){
-        if(onProgress) onProgress({ done:i+1, total:todo.length, geocoded, failed });
+    let geocoded = 0, failed = 0, consecutiveBlocked = 0;
+    try{
+      for(let i=0; i<todo.length; i++){
+        if(this._bulkFreeCancel) break;
+        const o = todo[i];
+        const before = !!Store.data.lsgOfficeGeo[o.id];
+        const result = await this.geocodeOffice(o.id);
+        if(before){
+          /* geocoded by something else (another tab/session sharing the
+             same org-wide cache) while we were mid-run - don't double-count. */
+        } else if(result && result._geocodeBlocked){
+          failed++;
+          consecutiveBlocked++;
+          /* 6 blocked responses in a row (HTTP error / non-OK status, not a
+             genuine zero-result) means OpenStreetMap's free public server is
+             throttling or rejecting this run outright, not that the next
+             ~hundreds of real government offices all don't exist. Stopping
+             here and saying so plainly beats silently reporting hundreds of
+             real places as "not found" that were never actually checked. */
+          if(consecutiveBlocked >= 6){
+            this.render();
+            return {
+              ok:false,
+              error:'OpenStreetMap stopped answering after '+(i+1-consecutiveBlocked)+' successful lookup(s) (its free public service blocks sustained bulk use like this). The offices reported as "not found" just now were never actually checked - they\'re still unlocated, not confirmed missing. Wait a few hours and try again with a smaller batch (use "Locate offices in view" by district instead), or set up a free LocationIQ/Geoapify account for reliable bulk geocoding.',
+              geocoded, failed, done:i+1, total:todo.length
+            };
+          }
+        } else {
+          consecutiveBlocked = 0;
+          if(result && result.lat!=null) geocoded++; else failed++;
+        }
+        if((i+1) % 10 === 0 || i===todo.length-1){
+          if(onProgress) onProgress({ done:i+1, total:todo.length, geocoded, failed });
+        }
       }
+    } finally {
+      this._bulkFreeRunning = false;
     }
     this.render();
     return { ok:true, geocoded, failed, cancelled:this._bulkFreeCancel, skipped: all.length-todo.length };
@@ -8703,7 +8766,9 @@ Field.OfficeFinder = {
      REQUEST_DENIED/INVALID_REQUEST status, which means the key or billing
      itself is the problem, not any individual office. */
   _bulkGoogleCancel: false,
+  _bulkGoogleRunning: false,
   async bulkGeocodeGoogle(onProgress){
+    if(this._bulkGoogleRunning) return { ok:false, error:'A Google Maps bulk geocode is already running — wait for it to finish (or stop it) before starting another.' };
     const apiKey = (Store.data.settings.googleMapsApiKey||'').trim();
     if(!apiKey) return { ok:false, error:'Save a Google Maps API key in Settings first.' };
     try{ await Field.loadGoogleMapsScript(apiKey); }
@@ -8713,28 +8778,33 @@ Field.OfficeFinder = {
     const todo = all.filter(o=>!Store.data.lsgOfficeGeo[o.id]);
     if(!todo.length) return { ok:true, geocoded:0, failed:0, skipped:all.length, message:'Every office is already located.' };
 
+    this._bulkGoogleRunning = true;
     this._bulkGoogleCancel = false;
     let geocoded = 0, failed = 0;
-    for(let i=0; i<todo.length; i++){
-      if(this._bulkGoogleCancel) break;
-      const o = todo[i];
-      let result = await this.geocodeOfficeGoogle(o.id);
-      if(result.status==='REQUEST_DENIED' || result.status==='INVALID_REQUEST'){
-        await Store.save('lsgOfficeGeo');
-        return { ok:false, error:'Google rejected the request (status: '+result.status+') — check that the API key is valid, billing is enabled, and the Geocoding API is turned on for it.', geocoded, failed };
+    try{
+      for(let i=0; i<todo.length; i++){
+        if(this._bulkGoogleCancel) break;
+        const o = todo[i];
+        let result = await this.geocodeOfficeGoogle(o.id);
+        if(result.status==='REQUEST_DENIED' || result.status==='INVALID_REQUEST'){
+          await Store.save('lsgOfficeGeo');
+          return { ok:false, error:'Google rejected the request (status: '+result.status+') — check that the API key is valid, billing is enabled, and the Geocoding API is turned on for it.', geocoded, failed };
+        }
+        if(result.status==='OVER_QUERY_LIMIT'){
+          await new Promise(r=>setTimeout(r, 2000));
+          result = await this.geocodeOfficeGoogle(o.id);
+        }
+        if(result.lat!=null) geocoded++; else failed++;
+        if((i+1) % 10 === 0 || i===todo.length-1){
+          await Store.save('lsgOfficeGeo');
+          if(onProgress) onProgress({ done:i+1, total:todo.length, geocoded, failed });
+        }
+        await new Promise(r=>setTimeout(r, 150));
       }
-      if(result.status==='OVER_QUERY_LIMIT'){
-        await new Promise(r=>setTimeout(r, 2000));
-        result = await this.geocodeOfficeGoogle(o.id);
-      }
-      if(result.lat!=null) geocoded++; else failed++;
-      if((i+1) % 10 === 0 || i===todo.length-1){
-        await Store.save('lsgOfficeGeo');
-        if(onProgress) onProgress({ done:i+1, total:todo.length, geocoded, failed });
-      }
-      await new Promise(r=>setTimeout(r, 150));
+      await Store.save('lsgOfficeGeo');
+    } finally {
+      this._bulkGoogleRunning = false;
     }
-    await Store.save('lsgOfficeGeo');
     this.render();
     return { ok:true, geocoded, failed, cancelled:this._bulkGoogleCancel, skipped: all.length-todo.length };
   },
@@ -11545,6 +11615,7 @@ const SettingsView = {
       status.textContent = `Locating… ${p.done} / ${p.total} (found ${p.geocoded}, not found ${p.failed}) — about ${Math.ceil((p.total-p.done)*1.1/60)} min left`;
     });
     stopBtn.style.display = 'none'; btn.disabled = false; btn.innerHTML = '&#127758; Locate All Offices (Free)';
+    if(!result.ok){ UI.toast(result.error); if(status) status.textContent = result.error; return; }
     if(result.message){ UI.toast(result.message); if(status) status.textContent = result.message; return; }
     if(result.cancelled){ UI.toast('Stopped — '+result.geocoded+' office(s) located so far'); await Activity.log('Bulk geocoded office locations (stopped early)', result.geocoded+' located via OpenStreetMap'); }
     else { UI.toast('Done — located '+result.geocoded+' office(s)'+(result.failed?(', '+result.failed+' not found'):'')); await Activity.log('Bulk geocoded office locations', result.geocoded+' located via OpenStreetMap'); }
