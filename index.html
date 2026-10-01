@@ -8638,6 +8638,39 @@ Field.OfficeFinder = {
     UI.toast('Done — located '+done+' office(s)');
     this.render();
   },
+  /* Free, no-key, no-billing bulk pass over the ENTIRE office dataset
+     (not just the current filters, unlike geocodeVisible above) using the
+     same rate-limited OpenStreetMap/Nominatim queue every other free
+     lookup in this module already shares (Field.forwardGeocode, ~1
+     request/second). This is the answer for an admin who doesn't want to
+     hand Google a billing card just to pre-populate the location cache:
+     it costs nothing and needs no sign-up, just takes longer (roughly
+     20-25 minutes for the full ~1000+ office dataset, since Nominatim's
+     usage policy caps it at ~1 lookup/second) - run it once, from Settings,
+     and leave the tab open. Skips anything already cached from either
+     source, so stopping partway through and re-running later is free to
+     do and never re-looks-up the same office twice. */
+  _bulkFreeCancel: false,
+  async bulkGeocodeFree(onProgress){
+    const all = this.ensureData();
+    const todo = all.filter(o=>!Store.data.lsgOfficeGeo[o.id]);
+    if(!todo.length) return { ok:true, geocoded:0, failed:0, skipped:all.length, message:'Every office is already located.' };
+
+    this._bulkFreeCancel = false;
+    let geocoded = 0, failed = 0;
+    for(let i=0; i<todo.length; i++){
+      if(this._bulkFreeCancel) break;
+      const o = todo[i];
+      const before = !!Store.data.lsgOfficeGeo[o.id];
+      await this.geocodeOffice(o.id);
+      if(!before && Store.data.lsgOfficeGeo[o.id]) geocoded++; else if(!before) failed++;
+      if((i+1) % 10 === 0 || i===todo.length-1){
+        if(onProgress) onProgress({ done:i+1, total:todo.length, geocoded, failed });
+      }
+    }
+    this.render();
+    return { ok:true, geocoded, failed, cancelled:this._bulkFreeCancel, skipped: all.length-todo.length };
+  },
   /* Alternative, optional geocoding source using an admin's own Google
      Maps API key (Settings > Office Location Data), for the one-time
      "Bulk Geocode All Office Locations" admin action below. Everyday
@@ -11386,16 +11419,27 @@ Views.settings = function(){
       <button class="btn btn-primary" onclick="SettingsView.saveBidPrefs()">Save Bid Preferences</button>
     </div>
     <div class="card card-pad" style="max-width:520px;margin-top:16px;">
-      <h3 style="margin:0 0 4px;font-size:14px;">Office Location Data (Google Maps)</h3>
-      <div class="hint" style="margin-bottom:12px;">
-        Optional. Powers one-time bulk geocoding of all ${LSG_OFFICES_RAW.length} Kerala LSG office locations for the "Nearby Offices" field feature, using your own Google Maps API key — without it, offices are still looked up for free, one at a time with no key needed, from OpenStreetMap as field staff come across them. Get a key from the <a href="https://console.cloud.google.com/google/maps-apis" target="_blank" rel="noopener">Google Cloud Console</a> (enable the Geocoding API and add billing — Google's recurring monthly free credit comfortably covers this dataset).
+      <h3 style="margin:0 0 4px;font-size:14px;">Office Location Data</h3>
+      <div class="hint" style="margin-bottom:12px;">${Object.keys(Store.data.lsgOfficeGeo||{}).length} of ${LSG_OFFICES_RAW.length} Kerala LSG office locations are located so far, for the "Nearby Offices" field feature. Two ways to fill in the rest — use whichever suits you, or both.</div>
+
+      <div style="padding:12px;border:1px solid var(--border,#1d2b40);border-radius:8px;margin-bottom:14px;">
+        <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#127758; Free — OpenStreetMap (no account, no card, no cost)</div>
+        <div class="hint" style="margin-bottom:10px;">Looks up every un-located office using the same free service field staff already use one-at-a-time. No sign-up or payment details needed at all. It's rate-limited to be a good citizen of a free public service, so the full dataset takes roughly 20-25 minutes — leave this tab open while it runs, or stop and resume anytime; nothing already found is looked up twice.</div>
+        <div class="hint" id="freeGeocodeStatus" style="margin-bottom:8px;"></div>
+        <button class="btn btn-outline" id="freeBulkGeocodeBtn" onclick="SettingsView.runBulkFreeGeocode()">&#127758; Locate All Offices (Free)</button>
+        <button class="btn btn-outline" id="freeBulkGeocodeStopBtn" style="display:none;color:var(--red,#dc2626);border-color:var(--red,#dc2626);" onclick="Field.OfficeFinder._bulkFreeCancel=true;">Stop</button>
       </div>
-      <div class="field"><label>Google Maps API Key</label><input id="s_googleMapsApiKey" type="password" value="${Util.escapeHtml(s.googleMapsApiKey||'')}" placeholder="AIza..."></div>
-      <button class="btn btn-primary" onclick="SettingsView.saveGoogleMapsKey()">Save API Key</button>
-      <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border,#1d2b40);">
-        <div class="hint" id="googleGeocodeStatus" style="margin-bottom:8px;">${Object.keys(Store.data.lsgOfficeGeo||{}).length} of ${LSG_OFFICES_RAW.length} offices located so far (any source).</div>
-        <button class="btn btn-outline" id="googleBulkGeocodeBtn" onclick="SettingsView.runBulkGoogleGeocode()">&#128269; Bulk Geocode All Office Locations</button>
-        <button class="btn btn-outline" id="googleBulkGeocodeStopBtn" style="display:none;color:var(--red,#dc2626);border-color:var(--red,#dc2626);" onclick="Field.OfficeFinder._bulkGoogleCancel=true;">Stop</button>
+
+      <div style="padding:12px;border:1px solid var(--border,#1d2b40);border-radius:8px;">
+        <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#128176; Optional — Google Maps (faster, needs your own billing-enabled key)</div>
+        <div class="hint" style="margin-bottom:10px;">Only worth setting up if you want the whole dataset done in minutes instead of ~20, or want Google's address data specifically. Requires a Google Cloud billing account (a card on file) even though their recurring monthly free credit comfortably covers this dataset — the free OpenStreetMap option above needs none of that. Get a key from the <a href="https://console.cloud.google.com/google/maps-apis" target="_blank" rel="noopener">Google Cloud Console</a> (enable the Geocoding API).</div>
+        <div class="field"><label>Google Maps API Key</label><input id="s_googleMapsApiKey" type="password" value="${Util.escapeHtml(s.googleMapsApiKey||'')}" placeholder="AIza..."></div>
+        <button class="btn btn-outline btn-sm" onclick="SettingsView.saveGoogleMapsKey()">Save API Key</button>
+        <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border,#1d2b40);">
+          <div class="hint" id="googleGeocodeStatus" style="margin-bottom:8px;"></div>
+          <button class="btn btn-outline" id="googleBulkGeocodeBtn" onclick="SettingsView.runBulkGoogleGeocode()">&#128269; Bulk Geocode All Office Locations</button>
+          <button class="btn btn-outline" id="googleBulkGeocodeStopBtn" style="display:none;color:var(--red,#dc2626);border-color:var(--red,#dc2626);" onclick="Field.OfficeFinder._bulkGoogleCancel=true;">Stop</button>
+        </div>
       </div>
     </div>
     <div class="card card-pad" style="max-width:520px;margin-top:16px;border-left:4px solid var(--red,#dc2626);">
@@ -11491,6 +11535,20 @@ const SettingsView = {
     await Store.save('settings');
     await Activity.log('Settings updated', 'Google Maps API key changed');
     UI.toast('API key saved');
+  },
+  async runBulkFreeGeocode(){
+    const btn = document.getElementById('freeBulkGeocodeBtn');
+    const stopBtn = document.getElementById('freeBulkGeocodeStopBtn');
+    const status = document.getElementById('freeGeocodeStatus');
+    btn.disabled = true; btn.textContent = 'Locating…'; stopBtn.style.display = 'inline-block';
+    const result = await Field.OfficeFinder.bulkGeocodeFree((p)=>{
+      status.textContent = `Locating… ${p.done} / ${p.total} (found ${p.geocoded}, not found ${p.failed}) — about ${Math.ceil((p.total-p.done)*1.1/60)} min left`;
+    });
+    stopBtn.style.display = 'none'; btn.disabled = false; btn.innerHTML = '&#127758; Locate All Offices (Free)';
+    if(result.message){ UI.toast(result.message); if(status) status.textContent = result.message; return; }
+    if(result.cancelled){ UI.toast('Stopped — '+result.geocoded+' office(s) located so far'); await Activity.log('Bulk geocoded office locations (stopped early)', result.geocoded+' located via OpenStreetMap'); }
+    else { UI.toast('Done — located '+result.geocoded+' office(s)'+(result.failed?(', '+result.failed+' not found'):'')); await Activity.log('Bulk geocoded office locations', result.geocoded+' located via OpenStreetMap'); }
+    Router.render('settings');
   },
   async runBulkGoogleGeocode(){
     if(!(Store.data.settings.googleMapsApiKey||'').trim()){ UI.toast('Save a Google Maps API key above first'); return; }
