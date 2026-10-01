@@ -8817,6 +8817,7 @@ Field.OfficeFinder = {
     this.q = ''; this.type = '';
     this.district = opts.district || '';
     this.fromCustomerId = opts.fromCustomerId || null;
+    this.anchor = null;
     this.mode = 'list';
     Paginate.get('officefinder').page = 1;
     go('officefinder');
@@ -8825,14 +8826,26 @@ Field.OfficeFinder = {
   setDistrict(v){ this.district = v; Paginate.get('officefinder').page=1; this.render(); },
   setType(t){ this.type = (this.type===t? '' : t); Paginate.get('officefinder').page=1; this.render(); },
   setMode(m){ this.mode = m; this.render(); },
+  /* Distances normally use the staff member's own live GPS position
+     (myPos). "Nearest Offices to This" (nearestTo below) instead anchors
+     every distance on a chosen OFFICE's location - e.g. "which offices
+     are closest to the one I'm standing at right now" for planning a
+     route on to the next visit. The two are mutually exclusive (most
+     recent wins): picking an anchor office clears myPos and vice versa,
+     so the distance column and "Distance from ___" label always mean one
+     consistent thing at a time, never a mix of the two. */
+  anchor: null,
+  refPos(){ return this.anchor ? {lat:this.anchor.lat, lng:this.anchor.lng} : this.myPos; },
+  refLabel(){ return this.anchor ? this.anchor.name : 'you'; },
   filtered(){
     const q = this.q.trim().toLowerCase();
     let list = this.ensureData();
+    if(this.anchor) list = list.filter(o=>o.id!==this.anchor.id);
     if(this.district) list = list.filter(o=>o.district===this.district);
     if(this.type) list = list.filter(o=>o.type===this.type);
     if(q) list = list.filter(o=>o.name.toLowerCase().includes(q));
-    const withPos = this.myPos;
-    list = list.map(o=>this.withGeo(o)).map(o=>({ o, km: (withPos && o.lat!=null && o.lng!=null) ? Field.haversineKm(withPos.lat, withPos.lng, o.lat, o.lng) : null }));
+    const refPos = this.refPos();
+    list = list.map(o=>this.withGeo(o)).map(o=>({ o, km: (refPos && o.lat!=null && o.lng!=null) ? Field.haversineKm(refPos.lat, refPos.lng, o.lat, o.lng) : null }));
     const anyDistance = list.some(x=>x.km!==null);
     if(anyDistance) list.sort((a,b)=>{ if(a.km===null) return 1; if(b.km===null) return -1; return a.km-b.km; });
     else list.sort((a,b)=>a.o.name.localeCompare(b.o.name));
@@ -8845,14 +8858,55 @@ Field.OfficeFinder = {
     /* Only the coordinates needed for an on-device distance calculation
        are kept, in memory, for this screen - never saved to a record or
        sent anywhere. */
+    this.anchor = null;
     this.myPos = pos;
     UI.toast('Location found — showing nearest offices first');
     this.render();
   },
+  /* "Nearest Offices to This" - from Office Details, anchors the whole
+     list on the selected office instead of the staff member's own GPS, so
+     you can ask "what's closest to THIS office" rather than "what's
+     closest to me". Clears district/type/search so the comparison runs
+     across the full dataset (the nearest office to a given one is just as
+     likely to be in a neighbouring district), and geocodes the chosen
+     office on the spot if it isn't located yet - same never-invent-data
+     rule as everywhere else: if that lookup fails, it says so and leaves
+     the view alone rather than anchoring on a guess. */
+  async nearestTo(id){
+    let o = this.getOffice(id);
+    if(!o) return;
+    UI.closeModal();
+    if(o.lat==null){
+      UI.toast('Locating this office first…');
+      const result = await this.geocodeOffice(id);
+      o = this.getOffice(id);
+      if(o.lat==null){
+        UI.toast(result && result._geocodeBlocked
+          ? 'OpenStreetMap is temporarily blocking lookups — try again in a while, or set a Google Maps key in Settings.'
+          : 'Could not find a location for this office yet — nearest-office distances need it to be located first.');
+        return;
+      }
+    }
+    this.anchor = { id:o.id, name:o.name, lat:o.lat, lng:o.lng };
+    this.myPos = null;
+    this.q = ''; this.district = ''; this.type = ''; this.fromCustomerId = null;
+    this.mode = 'list';
+    Paginate.get('officefinder').page = 1;
+    go('officefinder');
+  },
+  clearAnchor(){
+    this.anchor = null;
+    Paginate.get('officefinder').page = 1;
+    this.render();
+  },
   render(){
     this.ensureData();
-    const cust = this.fromCustomerId ? Store.data.customers.find(c=>c.id===this.fromCustomerId) : null;
+    const cust = (!this.anchor && this.fromCustomerId) ? Store.data.customers.find(c=>c.id===this.fromCustomerId) : null;
     document.getElementById('content').innerHTML = `
+      ${this.anchor? `<div class="card card-pad" style="margin-bottom:10px;background:var(--navy2,#111f33);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+        <div><div class="cell-mute" style="font-size:11px;">NEAREST OFFICES TO</div><div style="font-weight:700;font-size:13.5px;">&#128205; ${Util.escapeHtml(this.anchor.name)}</div></div>
+        <button class="btn btn-outline btn-sm" onclick="Field.OfficeFinder.clearAnchor()">&#10005; Back to normal view</button>
+      </div>` : ''}
       ${cust? `<div class="hint" style="margin-bottom:10px;">Showing offices near <b>${Util.escapeHtml(cust.name)}</b>${cust.district?' ('+Util.escapeHtml(cust.district)+')':''}. <a href="#" onclick="Field.OfficeFinder.fromCustomerId=null;Field.OfficeFinder.render();return false;">Clear</a></div>` : ''}
       <div class="field" style="margin-bottom:8px;">
         <input id="of_search" placeholder="Search office name…" value="${Util.escapeHtml(this.q)}" oninput="Field.OfficeFinder.setQuery(this.value)">
@@ -8870,7 +8924,7 @@ Field.OfficeFinder = {
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">
         ${this.types().map(t=>`<button class="tab-btn ${this.type===t?'active':''}" onclick="Field.OfficeFinder.setType('${Util.escapeHtml(t)}')">${Util.escapeHtml(t)}</button>`).join('')}
       </div>
-      ${!this.myPos ? `<div class="hint" style="margin-bottom:10px;">Tap "Near Me" to sort offices by distance. Offices without GPS data yet are shown alphabetically — tap "Locate offices in view" to look them up live from OpenStreetMap.</div>` : ''}
+      ${(!this.myPos && !this.anchor) ? `<div class="hint" style="margin-bottom:10px;">Tap "Near Me" to sort offices by distance, or open an office's details and tap "Nearest Offices to This" to measure from that office instead. Offices without GPS data yet are shown alphabetically — tap "Locate offices in view" to look them up live from OpenStreetMap.</div>` : ''}
       <div id="of_body"></div>
     `;
     if(this.mode==='map') this.renderMapView(); else this.renderList();
@@ -8930,7 +8984,9 @@ Field.OfficeFinder = {
     const o = this.getOffice(id);
     if(!o) return;
     this._openDetailId = id;
-    const km = this.myPos && o.lat!=null && o.lng!=null ? Field.haversineKm(this.myPos.lat, this.myPos.lng, o.lat, o.lng) : null;
+    const refPos = this.refPos();
+    const isAnchorItself = this.anchor && this.anchor.id === id;
+    const km = (refPos && !isAnchorItself && o.lat!=null && o.lng!=null) ? Field.haversineKm(refPos.lat, refPos.lng, o.lat, o.lng) : null;
     const isGeocoding = !!this.geocoding[id];
     UI.openModal(o.name, `
       <div class="field"><label>Local Body Type</label><div>${Util.escapeHtml(o.type)}</div></div>
@@ -8944,12 +9000,13 @@ Field.OfficeFinder = {
         <div class="field"><label>Latitude</label><div>${o.lat!=null?o.lat:'Not available'}</div></div>
         <div class="field"><label>Longitude</label><div>${o.lng!=null?o.lng:'Not available'}</div></div>
       </div>
-      <div class="field"><label>Distance from you</label><div>${km!==null?km.toFixed(km<1?2:1)+' km':(this.myPos?'Not available (no GPS data for this office yet)':'Tap "Near Me" on the list to see distance')}</div></div>
+      ${!isAnchorItself ? `<div class="field"><label>Distance from ${Util.escapeHtml(this.refLabel())}</label><div>${km!==null?km.toFixed(km<1?2:1)+' km':(refPos?'Not available (no GPS data for this office yet)':'Tap "Near Me" on the list, or "Nearest Offices to This" on another office, to see distance')}</div></div>` : ''}
       ${o.lat!=null? `<div class="hint">Location via ${Util.escapeHtml(o.source||'OpenStreetMap')}, looked up ${o.geocodedAt?Util.fmtDate(o.geocodedAt.slice(0,10)):'earlier'} — approximate, not an official address.</div>` : (isGeocoding? `<div class="hint">Looking this office up on OpenStreetMap…</div>` : `<div class="hint">No GPS data yet for this office. <a href="#" onclick="Field.OfficeFinder.lookUpNow('${o.id}');return false;">Look it up now</a></div>`)}
     `, `
       <button class="btn btn-outline" onclick="UI.closeModal()">Close</button>
       <button class="btn btn-outline" onclick="Field.OfficeFinder.copyLocation('${o.id}')">&#128203; Copy</button>
       <button class="btn btn-outline" onclick="Field.OfficeFinder.shareLocation('${o.id}')">&#128228; Share</button>
+      ${!isAnchorItself ? `<button class="btn btn-outline" onclick="Field.OfficeFinder.nearestTo('${o.id}')">&#128205; Nearest Offices to This</button>` : ''}
       <button class="btn btn-primary" onclick="Field.OfficeFinder.navigateTo('${o.id}')">&#128663; Navigate</button>
     `);
   },
@@ -8971,11 +9028,12 @@ Field.OfficeFinder = {
     if(!box || typeof L==='undefined') return;
     if(this.leafletMap){ this.leafletMap.remove(); this.leafletMap = null; }
     const withCoords = this.filtered().map(x=>x.o).filter(o=>o.lat!=null && o.lng!=null);
-    const center = this.myPos ? [this.myPos.lat, this.myPos.lng] : (withCoords.length ? [withCoords[0].lat, withCoords[0].lng] : [10.8505, 76.2711]);
-    this.leafletMap = L.map('officeMapBox').setView(center, this.myPos||withCoords.length ? 11 : 7);
+    const refPos = this.refPos();
+    const center = refPos ? [refPos.lat, refPos.lng] : (withCoords.length ? [withCoords[0].lat, withCoords[0].lng] : [10.8505, 76.2711]);
+    this.leafletMap = L.map('officeMapBox').setView(center, refPos||withCoords.length ? 11 : 7);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {attribution:'&copy; OpenStreetMap contributors', maxZoom:19}).addTo(this.leafletMap);
-    if(this.myPos){
-      L.circleMarker([this.myPos.lat, this.myPos.lng], {radius:9, color:'#8B5CF6', fillColor:'#8B5CF6', fillOpacity:1, weight:2}).addTo(this.leafletMap).bindPopup('You are here').openPopup();
+    if(refPos){
+      L.circleMarker([refPos.lat, refPos.lng], {radius:9, color:'#8B5CF6', fillColor:'#8B5CF6', fillOpacity:1, weight:2}).addTo(this.leafletMap).bindPopup(this.anchor ? Util.escapeHtml(this.anchor.name) : 'You are here').openPopup();
     }
     withCoords.forEach(o=>{
       L.circleMarker([o.lat, o.lng], {radius:8, color:'#EB5A28', fillColor:'#EB5A28', fillOpacity:0.85, weight:2}).addTo(this.leafletMap)
