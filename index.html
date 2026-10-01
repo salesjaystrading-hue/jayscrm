@@ -1045,6 +1045,7 @@ const Store = {
       bidDocPrefix: 'BD-', bidDocNext: 1,
       companyAddress: '', companyWebsite: '', companyGSTIN: '', companyUdyam: '',
       companyLogo: '', signatureImage: '',
+      googleMapsApiKey: '',
       defaultGstEnabled: false, defaultGstRate: 18, defaultValidityDays: 15,
       preferredOppDistricts: '',
       preferredBidKeywords: 'Waste Bin, Twin Bin, Outdoor Gym, Furniture, School Furniture, Water ATM, Incinerator, Raincoat, Safety Equipment',
@@ -7371,6 +7372,55 @@ const Field = {
       });
     });
   },
+  /* Loads the Google Maps JavaScript API once, using the API key an admin
+     saved in Settings > Office Location Data. Only needed for the optional
+     "Bulk Geocode All Office Locations" admin action below - everyday
+     field use still defaults to the free forwardGeocode (OpenStreetMap)
+     above and needs no key at all. The loaded promise is cached so a
+     1000+-office bulk run never re-injects the script; if the saved key
+     changes after it's already loaded, Google's JS API has no supported
+     way to swap keys on a live page, so callers are told to refresh. */
+  _googleMapsLoad: null,
+  _googleMapsLoadedKey: null,
+  loadGoogleMapsScript(apiKey){
+    if(!apiKey) return Promise.reject(new Error('No Google Maps API key is saved in Settings yet.'));
+    if(this._googleMapsLoad && this._googleMapsLoadedKey === apiKey) return this._googleMapsLoad;
+    if(this._googleMapsLoad && this._googleMapsLoadedKey !== apiKey) return Promise.reject(new Error('Google Maps was already loaded with a different API key this session — refresh the page to use the new key.'));
+    this._googleMapsLoadedKey = apiKey;
+    this._googleMapsLoad = new Promise((resolve, reject)=>{
+      if(window.google && window.google.maps && window.google.maps.Geocoder){ resolve(); return; }
+      const cbName = '__gmapsLoadCb_' + Date.now();
+      window[cbName] = ()=>{ delete window[cbName]; resolve(); };
+      const s = document.createElement('script');
+      s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&v=weekly&callback=${cbName}`;
+      s.async = true;
+      s.onerror = ()=>reject(new Error('Could not load Google Maps — check the API key and your internet connection.'));
+      document.head.appendChild(s);
+    });
+    return this._googleMapsLoad;
+  },
+  /* Forward geocode via Google's Geocoder - an alternative, higher-accuracy
+     source for the admin bulk action, used only after loadGoogleMapsScript
+     above has resolved. Same never-invent-data contract as forwardGeocode:
+     lat/lng/address come back null on no-match or failure rather than
+     guessing. status is also returned so a caller can tell a genuine
+     "no results" apart from a bad API key/billing problem or a temporary
+     rate limit, and react to each differently. */
+  geocodeViaGoogle(query){
+    return new Promise((resolve)=>{
+      try{
+        const geocoder = new google.maps.Geocoder();
+        geocoder.geocode({ address: query, region: 'in', componentRestrictions: {country:'IN'} }, (results, status)=>{
+          if(status==='OK' && results && results[0]){
+            const r = results[0];
+            resolve({ lat: r.geometry.location.lat(), lng: r.geometry.location.lng(), address: r.formatted_address, status });
+          } else {
+            resolve({ lat: null, lng: null, address: null, status });
+          }
+        });
+      }catch(e){ resolve({ lat:null, lng:null, address:null, status:'EXCEPTION' }); }
+    });
+  },
   /* Downscales + JPEG-compresses a captured/selected photo before it goes
      into a visit/requirement record (which are plain JSON rows), so a
      phone camera photo doesn't blow up the collection size the way the
@@ -8530,7 +8580,7 @@ Field.OfficeFinder = {
   withGeo(o){
     const g = Store.data.lsgOfficeGeo && Store.data.lsgOfficeGeo[o.id];
     if(!g) return o;
-    return Object.assign({}, o, {lat:g.lat, lng:g.lng, address:g.address||null, geocodedAt:g.geocodedAt});
+    return Object.assign({}, o, {lat:g.lat, lng:g.lng, address:g.address||null, geocodedAt:g.geocodedAt, source:g.source||null});
   },
   getOffice(id){
     const o = this.ensureData().find(x=>x.id===id);
@@ -8587,6 +8637,73 @@ Field.OfficeFinder = {
     }
     UI.toast('Done — located '+done+' office(s)');
     this.render();
+  },
+  /* Alternative, optional geocoding source using an admin's own Google
+     Maps API key (Settings > Office Location Data), for the one-time
+     "Bulk Geocode All Office Locations" admin action below. Everyday
+     field use still defaults to the free OpenStreetMap lookups above -
+     this exists because Google's address data is often more complete for
+     Kerala LSG offices, and a one-off key-funded bulk pass can cover the
+     whole 1000+ office dataset in minutes instead of staff slowly
+     building up the cache office-by-office over months. Writes into the
+     exact same Store.data.lsgOfficeGeo cache, same shape, same
+     never-invent-data rule - just source:'Google Maps' instead of
+     'OpenStreetMap/Nominatim' - so withGeo/navUrl/distance/map pins need
+     zero changes to use whichever source located a given office. */
+  async geocodeOfficeGoogle(id, opts){
+    opts = opts || {};
+    const base = this.ensureData().find(x=>x.id===id);
+    if(!base) return { status:'NOT_FOUND', lat:null, lng:null };
+    if(!opts.force && Store.data.lsgOfficeGeo[id]) return { status:'ALREADY_CACHED', lat:null, lng:null };
+    const hit = await Field.geocodeViaGoogle(base.name+', '+base.district+' district, Kerala, India');
+    if(hit.lat!=null){
+      Store.data.lsgOfficeGeo[id] = { lat:hit.lat, lng:hit.lng, address:hit.address, geocodedAt:new Date().toISOString(), source:'Google Maps' };
+    }
+    return hit;
+  },
+  /* Admin-only, one-time bulk pass over every office that isn't located
+     yet (skips anything already cached, from either source, so re-running
+     this costs nothing extra). Saves the cache every 10 lookups so a
+     closed tab or a stopped run never loses progress, reports running
+     progress via onProgress for the Settings page to show, and aborts
+     immediately (rather than burning through 1000+ requests) on a
+     REQUEST_DENIED/INVALID_REQUEST status, which means the key or billing
+     itself is the problem, not any individual office. */
+  _bulkGoogleCancel: false,
+  async bulkGeocodeGoogle(onProgress){
+    const apiKey = (Store.data.settings.googleMapsApiKey||'').trim();
+    if(!apiKey) return { ok:false, error:'Save a Google Maps API key in Settings first.' };
+    try{ await Field.loadGoogleMapsScript(apiKey); }
+    catch(e){ return { ok:false, error:e.message }; }
+
+    const all = this.ensureData();
+    const todo = all.filter(o=>!Store.data.lsgOfficeGeo[o.id]);
+    if(!todo.length) return { ok:true, geocoded:0, failed:0, skipped:all.length, message:'Every office is already located.' };
+
+    this._bulkGoogleCancel = false;
+    let geocoded = 0, failed = 0;
+    for(let i=0; i<todo.length; i++){
+      if(this._bulkGoogleCancel) break;
+      const o = todo[i];
+      let result = await this.geocodeOfficeGoogle(o.id);
+      if(result.status==='REQUEST_DENIED' || result.status==='INVALID_REQUEST'){
+        await Store.save('lsgOfficeGeo');
+        return { ok:false, error:'Google rejected the request (status: '+result.status+') — check that the API key is valid, billing is enabled, and the Geocoding API is turned on for it.', geocoded, failed };
+      }
+      if(result.status==='OVER_QUERY_LIMIT'){
+        await new Promise(r=>setTimeout(r, 2000));
+        result = await this.geocodeOfficeGoogle(o.id);
+      }
+      if(result.lat!=null) geocoded++; else failed++;
+      if((i+1) % 10 === 0 || i===todo.length-1){
+        await Store.save('lsgOfficeGeo');
+        if(onProgress) onProgress({ done:i+1, total:todo.length, geocoded, failed });
+      }
+      await new Promise(r=>setTimeout(r, 150));
+    }
+    await Store.save('lsgOfficeGeo');
+    this.render();
+    return { ok:true, geocoded, failed, cancelled:this._bulkGoogleCancel, skipped: all.length-todo.length };
   },
   /* Entry point used by every integration point (My Day, Field Map, Start
      Visit, Customer drawer, Quick Actions) - opts can pre-set a district
@@ -8725,7 +8842,7 @@ Field.OfficeFinder = {
         <div class="field"><label>Longitude</label><div>${o.lng!=null?o.lng:'Not available'}</div></div>
       </div>
       <div class="field"><label>Distance from you</label><div>${km!==null?km.toFixed(km<1?2:1)+' km':(this.myPos?'Not available (no GPS data for this office yet)':'Tap "Near Me" on the list to see distance')}</div></div>
-      ${o.lat!=null? `<div class="hint">Location via OpenStreetMap, looked up ${o.geocodedAt?Util.fmtDate(o.geocodedAt.slice(0,10)):'earlier'} — approximate, not an official address.</div>` : (isGeocoding? `<div class="hint">Looking this office up on OpenStreetMap…</div>` : `<div class="hint">No GPS data yet for this office. <a href="#" onclick="Field.OfficeFinder.lookUpNow('${o.id}');return false;">Look it up now</a></div>`)}
+      ${o.lat!=null? `<div class="hint">Location via ${Util.escapeHtml(o.source||'OpenStreetMap')}, looked up ${o.geocodedAt?Util.fmtDate(o.geocodedAt.slice(0,10)):'earlier'} — approximate, not an official address.</div>` : (isGeocoding? `<div class="hint">Looking this office up on OpenStreetMap…</div>` : `<div class="hint">No GPS data yet for this office. <a href="#" onclick="Field.OfficeFinder.lookUpNow('${o.id}');return false;">Look it up now</a></div>`)}
     `, `
       <button class="btn btn-outline" onclick="UI.closeModal()">Close</button>
       <button class="btn btn-outline" onclick="Field.OfficeFinder.copyLocation('${o.id}')">&#128203; Copy</button>
@@ -11268,6 +11385,19 @@ Views.settings = function(){
       </div>
       <button class="btn btn-primary" onclick="SettingsView.saveBidPrefs()">Save Bid Preferences</button>
     </div>
+    <div class="card card-pad" style="max-width:520px;margin-top:16px;">
+      <h3 style="margin:0 0 4px;font-size:14px;">Office Location Data (Google Maps)</h3>
+      <div class="hint" style="margin-bottom:12px;">
+        Optional. Powers one-time bulk geocoding of all ${LSG_OFFICES_RAW.length} Kerala LSG office locations for the "Nearby Offices" field feature, using your own Google Maps API key — without it, offices are still looked up for free, one at a time with no key needed, from OpenStreetMap as field staff come across them. Get a key from the <a href="https://console.cloud.google.com/google/maps-apis" target="_blank" rel="noopener">Google Cloud Console</a> (enable the Geocoding API and add billing — Google's recurring monthly free credit comfortably covers this dataset).
+      </div>
+      <div class="field"><label>Google Maps API Key</label><input id="s_googleMapsApiKey" type="password" value="${Util.escapeHtml(s.googleMapsApiKey||'')}" placeholder="AIza..."></div>
+      <button class="btn btn-primary" onclick="SettingsView.saveGoogleMapsKey()">Save API Key</button>
+      <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border,#1d2b40);">
+        <div class="hint" id="googleGeocodeStatus" style="margin-bottom:8px;">${Object.keys(Store.data.lsgOfficeGeo||{}).length} of ${LSG_OFFICES_RAW.length} offices located so far (any source).</div>
+        <button class="btn btn-outline" id="googleBulkGeocodeBtn" onclick="SettingsView.runBulkGoogleGeocode()">&#128269; Bulk Geocode All Office Locations</button>
+        <button class="btn btn-outline" id="googleBulkGeocodeStopBtn" style="display:none;color:var(--red,#dc2626);border-color:var(--red,#dc2626);" onclick="Field.OfficeFinder._bulkGoogleCancel=true;">Stop</button>
+      </div>
+    </div>
     <div class="card card-pad" style="max-width:520px;margin-top:16px;border-left:4px solid var(--red,#dc2626);">
       <h3 style="margin:0 0 4px;font-size:14px;">Project Opportunity Data</h3>
       <div class="hint" style="margin-bottom:12px;">Currently <b>${Store.data.oppProjects.length} project record(s)</b> saved. This only removes imported project rows and the import log \u2014 your saved "My Opportunities" tracking, product keyword list, and the keyword matching library are not affected.</div>
@@ -11355,6 +11485,29 @@ const SettingsView = {
     Store.data.settings.companyUdyam = document.getElementById('s_companyUdyam').value.trim();
     const ok = await Store.save('settings');
     if(ok){ await Activity.log('Settings updated', 'Rate/Offer PDF branding changed'); UI.toast('Branding saved'); }
+  },
+  async saveGoogleMapsKey(){
+    Store.data.settings.googleMapsApiKey = document.getElementById('s_googleMapsApiKey').value.trim();
+    await Store.save('settings');
+    await Activity.log('Settings updated', 'Google Maps API key changed');
+    UI.toast('API key saved');
+  },
+  async runBulkGoogleGeocode(){
+    if(!(Store.data.settings.googleMapsApiKey||'').trim()){ UI.toast('Save a Google Maps API key above first'); return; }
+    if(!confirm('This looks up every office that isn\'t located yet using your Google Maps API key, which draws on your Google Cloud billing (Google\'s monthly free credit normally covers this dataset). Continue?')) return;
+    const btn = document.getElementById('googleBulkGeocodeBtn');
+    const stopBtn = document.getElementById('googleBulkGeocodeStopBtn');
+    const status = document.getElementById('googleGeocodeStatus');
+    btn.disabled = true; btn.textContent = 'Geocoding…'; stopBtn.style.display = 'inline-block';
+    const result = await Field.OfficeFinder.bulkGeocodeGoogle((p)=>{
+      status.textContent = `Geocoding… ${p.done} / ${p.total} (located ${p.geocoded}, not found ${p.failed})`;
+    });
+    stopBtn.style.display = 'none'; btn.disabled = false; btn.innerHTML = '&#128269; Bulk Geocode All Office Locations';
+    if(!result.ok){ UI.toast(result.error); if(status) status.textContent = result.error; return; }
+    if(result.message){ UI.toast(result.message); }
+    else if(result.cancelled){ UI.toast('Stopped — '+result.geocoded+' office(s) located so far'); await Activity.log('Bulk geocoded office locations (stopped early)', result.geocoded+' located via Google Maps'); }
+    else { UI.toast('Done — located '+result.geocoded+' office(s)'+(result.failed?(', '+result.failed+' not found'):'')); await Activity.log('Bulk geocoded office locations', result.geocoded+' located via Google Maps'); }
+    Router.render('settings');
   },
   async saveBidPrefs(){
     Store.data.settings.preferredBidKeywords = document.getElementById('s_preferredBidKeywords').value.trim();
