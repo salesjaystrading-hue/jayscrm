@@ -8984,7 +8984,7 @@ Field.Map = {
     `;
     setTimeout(()=>this.init(), 0);
   },
-  setFilter(f){ this.filter = f; this.init(); },
+  setFilter(f){ this.filter = f; this.render(); },
   setRadius(v){ this.radiusKm = Number(v); this.locateMe(); },
   init(){
     const box = document.getElementById('fieldMapBox');
