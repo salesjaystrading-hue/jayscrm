@@ -9907,6 +9907,62 @@ const OppFinder = {
     a.href = URL.createObjectURL(blob); a.download = 'JAYS_Project_Opportunities.csv'; a.click();
     setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
   },
+
+  /* ---------------- PDF report (respects the active category/district/local body/score/status/date filters) ---------------- */
+  pdfLibsReady(){
+    return !!(window.jspdf && window.jspdf.jsPDF && typeof window.jspdf.jsPDF.API.autoTable === 'function');
+  },
+  downloadPDF(){
+    const list = this.filtered.length ? this.filtered : Store.data.oppProjects;
+    if(!list.length){ UI.toast('Nothing to export'); return; }
+    if(!this.pdfLibsReady()){ UI.toast('PDF library is still loading. Try again in a moment.'); return; }
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({unit:'mm', format:'a4', orientation:'landscape'});
+    const s = Store.data.settings || {};
+    const PW = doc.internal.pageSize.getWidth();
+    const M = 14;
+    const NAVY=[11,20,36], ORANGE=[235,90,40];
+    const f = this.filters;
+    const catLabel = f.type==='ALL' ? 'All Categories' : (OPP_CATEGORY_NAMES[f.type]||f.type);
+
+    let y = M;
+    doc.setFont('helvetica','bold'); doc.setFontSize(14); doc.setTextColor(NAVY[0],NAVY[1],NAVY[2]);
+    doc.text(String(s.companyName||'JAYS TRADING AND BUSINESS SOLUTION').toUpperCase(), M, y);
+    doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(90);
+    doc.text('Category: ' + catLabel + (f.district?('   District: '+f.district):'') + (f.localbody?('   Local Body: '+f.localbody):''), PW-M, y, {align:'right'});
+    y += 5;
+    doc.setFont('helvetica','bold'); doc.setFontSize(11); doc.setTextColor(40);
+    doc.text('Project Opportunity Report', M, y);
+    y += 3;
+    doc.setFillColor(NAVY[0],NAVY[1],NAVY[2]); doc.rect(M, y, PW-M*2, 1.1, 'F');
+    doc.setFillColor(ORANGE[0],ORANGE[1],ORANGE[2]); doc.rect(M, y+1.1, PW-M*2, 0.9, 'F');
+    y += 7;
+    const fundTotal = list.reduce((sum,r)=>sum+oppMoney(r['FundTotal']),0);
+    const balTotal = list.reduce((sum,r)=>sum+oppMoney(r['Balance']),0);
+    doc.setFont('helvetica','normal'); doc.setFontSize(8.5); doc.setTextColor(70);
+    doc.text('Generated: ' + new Date().toLocaleDateString('en-IN') + '   •   ' + list.length + ' project(s)   •   Total Fund ₹' + fundTotal.toLocaleString('en-IN') + '   •   Total Balance ₹' + balTotal.toLocaleString('en-IN'), M, y);
+    y += 5;
+
+    doc.autoTable({
+      startY: y, margin:{left:M, right:M},
+      head:[['Impl Code','Project Name','Local Body','District','Fund Total','Balance']],
+      body: list.map(r=>[
+        r['Impl Code']||'',
+        r['Project Name Eng']||r['Project Name Mal']||'',
+        r['LB Name']||'',
+        r['District']||'',
+        '₹'+oppMoney(r['FundTotal']).toLocaleString('en-IN'),
+        '₹'+oppMoney(r['Balance']).toLocaleString('en-IN')
+      ]),
+      theme:'grid', styles:{fontSize:8.5, cellPadding:2.2},
+      headStyles:{fillColor:NAVY, textColor:255},
+      columnStyles:{4:{halign:'right'},5:{halign:'right'}}
+    });
+
+    const fname = 'JAYS_Project_Opportunities_' + (f.type==='ALL'?'All':f.type) + '.pdf';
+    doc.save(fname);
+  },
+
   /* ---------------- render: shell + tabs ---------------- */
   switcherHTML(){
     const tabs = [['dashboard','&#127968; Dashboard'],['projects','&#128269; Projects'],
@@ -9997,7 +10053,7 @@ const OppFinder = {
         '<div class="field"><label>To Date</label><input type="date" id="oppTo" value="'+f.to+'" onchange="OppFinder.render()"></div>' +
         '<div class="field"><label>Quick Date</label><select onchange="OppFinder.quickDate(this.value)"><option value="">Select</option><option value="today">Today</option><option value="week">This Week</option><option value="month">This Month</option><option value="30">Last 30 Days</option></select></div>' +
       '</div>' +
-      '<div class="toolbar" style="margin-top:10px;"><div class="toolbar-spacer"></div><button class="btn btn-outline btn-sm" onclick="OppFinder.exportCSV(false)">Export CSV</button></div>' +
+      '<div class="toolbar" style="margin-top:10px;"><div class="toolbar-spacer"></div><button class="btn btn-outline btn-sm" onclick="OppFinder.downloadPDF()">Download PDF</button><button class="btn btn-outline btn-sm" onclick="OppFinder.exportCSV(false)">Export CSV</button></div>' +
     '</div>' +
     '<div class="card"><div class="card-pad" style="padding-bottom:0;"><span class="hint">'+this.filtered.length+' results \u2022 total value \u20B9'+this.filtered.reduce((s,r)=>s+oppMoney(r['FundTotal']),0).toLocaleString('en-IN')+'</span></div>' +
     '<div class="table-wrap"><table><thead><tr><th class="col-actions">Actions</th><th>Score</th><th>Opportunity</th><th>Project No</th><th>Impl Code</th><th>Project Name</th><th>Local Body</th><th>District</th><th>Sector</th><th>Status</th><th>Fund Total</th><th>Matched Keywords</th></tr></thead><tbody>' +
