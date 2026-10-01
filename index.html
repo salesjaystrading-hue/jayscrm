@@ -1118,49 +1118,105 @@ const Store = {
       return true;
     }catch(e){ console.error('opp replace-all failed', e); return false; }
   },
+  /* loadAll() used to be ~30 sequential `await this.loadKey(...)` calls,
+     each one a separate Supabase round-trip that waited for the previous
+     one to finish before even starting - on a mobile/field connection
+     those round-trip latencies stack up and login can take many seconds.
+     None of these keys depend on each other for the READ itself (they're
+     independent rows in jays_crm_store, plus the independent profiles-table
+     query and the independent opp_get_all RPC), so they're all fired at
+     once with Promise.all and awaited together - one round-trip's worth of
+     wall-clock time instead of thirty. The only real sequencing rule is
+     migrateWaTemplates(), which reads this.data.waTemplates/rateTemplates
+     and this.loadFailed['jays_watemplates']/['jays_ratetemplates'], so it
+     still runs strictly after the parallel batch (and therefore after
+     those two keys) resolves. Seed-fallback logic for customers/products/
+     settings is unchanged - each still checks its own loadFailed flag
+     before deciding to seed, just after its loadKey has resolved rather
+     than one-by-one in series. */
   async loadAll(){
     this.loadFailed = {};
-    this.data.customers = await this.loadKey('jays_customers', null);
+    const [
+      customers, products, quotations, payments, followups, tasks, notes,
+      activityLog, gemcrac, orders, complaints, bids, waTemplates, waHistory,
+      rateTemplates, rateDocs, rateTerms, rateDocTemplates, oppProjects,
+      oppTracking, oppProducts, oppImportHistory, oppKeywordGroups,
+      attendance, leaveRequests, bidDocs, visits, requirements, travelLogs,
+      lsgOfficeGeo, settings
+    ] = await Promise.all([
+      this.loadKey('jays_customers', null),
+      this.loadKey('jays_products', null),
+      this.loadKey('jays_quotations', []),
+      this.loadKey('jays_payments', []),
+      this.loadKey('jays_followups', []),
+      this.loadKey('jays_tasks', []),
+      this.loadKey('jays_notes', []),
+      this.loadKey('jays_activitylog', []),
+      this.loadKey('jays_gemcrac', []),
+      this.loadKey('jays_orders', []),
+      this.loadKey('jays_complaints', []),
+      this.loadKey('jays_bids', []),
+      this.loadKey('jays_watemplates', []),
+      this.loadKey('jays_wahistory', []),
+      this.loadKey('jays_ratetemplates', []),
+      this.loadKey('jays_ratedocs', []),
+      this.loadKey('jays_rateterms', []),
+      this.loadKey('jays_ratedoctemplates', []),
+      this.loadOppProjects(),
+      this.loadKey('jays_opptracking', {}),
+      this.loadKey('jays_oppproducts', []),
+      this.loadKey('jays_oppimporthistory', []),
+      this.loadKey('jays_oppkeywordgroups', []),
+      this.loadKey('jays_attendance', []),
+      this.loadKey('jays_leaverequests', []),
+      this.loadKey('jays_biddocs', []),
+      this.loadKey('jays_visits', []),
+      this.loadKey('jays_requirements', []),
+      this.loadKey('jays_travellogs', []),
+      this.loadKey('jays_lsgofficegeo', {}),
+      this.loadKey('jays_settings', null),
+      this.loadUsers(),
+    ]);
+
+    this.data.customers = customers;
     if(this.data.customers === null && !this.loadFailed['jays_customers']){ this.data.customers = SEED_CUSTOMERS.slice(); await this.saveKey('jays_customers', this.data.customers); }
     else if(this.data.customers === null){ this.data.customers = []; }
-    await this.loadUsers();
 
-    this.data.products = await this.loadKey('jays_products', null);
+    this.data.products = products;
     if(this.data.products === null && !this.loadFailed['jays_products']){ this.data.products = SEED_PRODUCTS.slice(); await this.saveKey('jays_products', this.data.products); }
     else if(this.data.products === null){ this.data.products = []; }
 
-    this.data.quotations = await this.loadKey('jays_quotations', []);
-    this.data.payments = await this.loadKey('jays_payments', []);
-    this.data.followups = await this.loadKey('jays_followups', []);
-    this.data.tasks = await this.loadKey('jays_tasks', []);
-    this.data.notes = await this.loadKey('jays_notes', []);
-    this.data.activityLog = await this.loadKey('jays_activitylog', []);
-    this.data.gemcrac = await this.loadKey('jays_gemcrac', []);
-    this.data.orders = await this.loadKey('jays_orders', []);
-    this.data.complaints = await this.loadKey('jays_complaints', []);
-    this.data.bids = await this.loadKey('jays_bids', []);
-    this.data.waTemplates = await this.loadKey('jays_watemplates', []);
-    this.data.waHistory = await this.loadKey('jays_wahistory', []);
-    this.data.rateTemplates = await this.loadKey('jays_ratetemplates', []);
-    this.data.rateDocs = await this.loadKey('jays_ratedocs', []);
-    this.data.rateTerms = await this.loadKey('jays_rateterms', []);
-    this.data.rateDocTemplates = await this.loadKey('jays_ratedoctemplates', []);
-    this.data.oppProjects = await this.loadOppProjects();
-    this.data.oppTracking = await this.loadKey('jays_opptracking', {});
-    this.data.oppProducts = await this.loadKey('jays_oppproducts', []);
-    this.data.oppImportHistory = await this.loadKey('jays_oppimporthistory', []);
-    this.data.oppKeywordGroups = await this.loadKey('jays_oppkeywordgroups', []);
-    this.data.attendance = await this.loadKey('jays_attendance', []);
-    this.data.leaveRequests = await this.loadKey('jays_leaverequests', []);
-    this.data.bidDocs = await this.loadKey('jays_biddocs', []);
-    this.data.visits = await this.loadKey('jays_visits', []);
-    this.data.requirements = await this.loadKey('jays_requirements', []);
-    this.data.travelLogs = await this.loadKey('jays_travellogs', []);
-    this.data.lsgOfficeGeo = await this.loadKey('jays_lsgofficegeo', {});
+    this.data.quotations = quotations;
+    this.data.payments = payments;
+    this.data.followups = followups;
+    this.data.tasks = tasks;
+    this.data.notes = notes;
+    this.data.activityLog = activityLog;
+    this.data.gemcrac = gemcrac;
+    this.data.orders = orders;
+    this.data.complaints = complaints;
+    this.data.bids = bids;
+    this.data.waTemplates = waTemplates;
+    this.data.waHistory = waHistory;
+    this.data.rateTemplates = rateTemplates;
+    this.data.rateDocs = rateDocs;
+    this.data.rateTerms = rateTerms;
+    this.data.rateDocTemplates = rateDocTemplates;
+    this.data.oppProjects = oppProjects;
+    this.data.oppTracking = oppTracking;
+    this.data.oppProducts = oppProducts;
+    this.data.oppImportHistory = oppImportHistory;
+    this.data.oppKeywordGroups = oppKeywordGroups;
+    this.data.attendance = attendance;
+    this.data.leaveRequests = leaveRequests;
+    this.data.bidDocs = bidDocs;
+    this.data.visits = visits;
+    this.data.requirements = requirements;
+    this.data.travelLogs = travelLogs;
+    this.data.lsgOfficeGeo = lsgOfficeGeo;
+
     await this.migrateWaTemplates();
 
-    const settingsFailedBefore = false;
-    const settings = await this.loadKey('jays_settings', null);
     if(settings === null && !this.loadFailed['jays_settings']){ this.data.settings = this.defaults(); await this.saveKey('jays_settings', this.data.settings); }
     else{ this.data.settings = settings || this.defaults(); }
 
@@ -1373,8 +1429,8 @@ const Auth = {
     }
     err.style.display='none';
     await Store.loadAll();
-    await Activity.log('Login', this.session.username+' signed in');
     App.boot();
+    Activity.log('Login', this.session.username+' signed in'); // fire-and-forget: boot shouldn't wait on an audit-log write
   },
   async loadProfile(userId){
     try{
