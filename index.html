@@ -987,7 +987,15 @@ const Store = {
        jays_crm_store-backed collections like every other module above,
        so the existing Store.save('visits')/loadKey() machinery just
        works for them with zero new persistence code. */
-    visits: [], requirements: [], travelLogs: []
+    visits: [], requirements: [], travelLogs: [],
+    /* Crowd-sourced, cached geocoding results for the Kerala LSG office
+       master data (see Field.OfficeFinder) - a plain object map keyed by
+       office id, same jays_crm_store-backed pattern as oppTracking above.
+       Populated client-side via live OpenStreetMap/Nominatim lookups (see
+       Field.forwardGeocode), never invented, and shared across every
+       field staff member once saved - so an office only ever needs to be
+       looked up once, by anyone, for the whole org to benefit. */
+    lsgOfficeGeo: {}
   },
   /* One-time, non-destructive lift of the old WhatsApp rate templates into
      the Rate Template Library. The source waTemplates rows are NEVER deleted
@@ -1148,6 +1156,7 @@ const Store = {
     this.data.visits = await this.loadKey('jays_visits', []);
     this.data.requirements = await this.loadKey('jays_requirements', []);
     this.data.travelLogs = await this.loadKey('jays_travellogs', []);
+    this.data.lsgOfficeGeo = await this.loadKey('jays_lsgofficegeo', {});
     await this.migrateWaTemplates();
 
     const settingsFailedBefore = false;
@@ -7284,6 +7293,28 @@ const Field = {
       return data && data.display_name ? data.display_name : null;
     }catch(e){ return null; }
   },
+  /* Forward geocode (name -> coordinates) via the same free OpenStreetMap
+     Nominatim service used by reverseGeocode above, restricted to India so
+     a generic place name doesn't resolve somewhere else in the world.
+     Runs in the field staff member's own browser - not Anthropic's or any
+     build-time sandbox - and respects Nominatim's usage policy with the
+     queue below (max ~1 request/second, results cached permanently once
+     found so the same place is never looked up twice). Never invents a
+     result: returns null on any failure, ambiguity, or no match. */
+  _geocodeQueue: Promise.resolve(),
+  forwardGeocode(query){
+    return new Promise(resolve=>{
+      this._geocodeQueue = this._geocodeQueue.then(async ()=>{
+        try{
+          const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=in&q=${encodeURIComponent(query)}`, {headers:{'Accept':'application/json'}});
+          const data = res.ok ? await res.json() : null;
+          const hit = data && data[0];
+          resolve(hit ? {lat:Number(hit.lat), lng:Number(hit.lon), address:hit.display_name} : null);
+        }catch(e){ resolve(null); }
+        await new Promise(r=>setTimeout(r, 1100));
+      });
+    });
+  },
   /* Downscales + JPEG-compresses a captured/selected photo before it goes
      into a visit/requirement record (which are plain JSON rows), so a
      phone camera photo doesn't blow up the collection size the way the
@@ -8399,17 +8430,22 @@ Views.fieldmap = ()=>Field.Map.render();
    search/browse/navigate, built on the LSG_OFFICES_RAW master data above.
 
    The source CSV has no latitude/longitude, address or phone for any
-   office, so "nearest first" / map pins / precise navigation can't be
-   computed yet - we never invent that data. Every distance/map code path
-   below is written against office.lat/office.lng regardless, so the
-   moment real coordinates are added to a row (lat/lng as a 7th/8th
-   element in LSG_OFFICES_RAW, or layered on after import), nearest-sort
-   and map markers switch on automatically with no further changes here.
-   Until then: list is sorted alphabetically within the chosen filters,
-   "Navigate" opens the device's map app with a name+district search
-   (which still lets the device's own map app geocode and route), and the
-   map view shows the staff member's own location with an honest note
-   about why office pins aren't there yet.
+   office - we never invent that data. Instead, coordinates/address are
+   looked up live, on demand, from OpenStreetMap (Field.forwardGeocode),
+   right in the field staff member's own browser, and cached permanently
+   in the shared Store.data.lsgOfficeGeo collection (synced like every
+   other collection in the app) - so once ANY staff member or session has
+   looked an office up, the whole org has it from then on, and it's never
+   looked up twice. "Locate offices in view" (per-district/filtered bulk
+   lookup) and "Look it up now" (single office, from Office Details) are
+   the two triggers; nothing is geocoded silently in the background.
+   Every distance/map/"nearest" code path is written against
+   office.lat/office.lng, which are null until a lookup succeeds, so they
+   read exactly the same whether the coordinates came from a future CSV
+   update or from live geocoding - no special-casing needed either way.
+   Until an office is located: it sorts alphabetically, "Navigate" opens
+   the device's map app with a name+district search instead of a precise
+   pin, and the map view simply has no marker for it yet.
 =========================================================================== */
 Field.OfficeFinder = {
   OFFICES: null,
@@ -8430,6 +8466,72 @@ Field.OfficeFinder = {
   },
   districts(){ return [...new Set(this.ensureData().map(o=>o.district))].sort(); },
   types(){ return [...new Set(this.ensureData().map(o=>o.type))]; },
+  /* Merges in any cached geocoding result (Store.data.lsgOfficeGeo, shared
+     org-wide via the usual Supabase-backed Store collections) on top of
+     the static CSV-derived office record. Looked up fresh every call so a
+     geocode that just completed is reflected immediately, with no need to
+     rebuild the base OFFICES array. */
+  withGeo(o){
+    const g = Store.data.lsgOfficeGeo && Store.data.lsgOfficeGeo[o.id];
+    if(!g) return o;
+    return Object.assign({}, o, {lat:g.lat, lng:g.lng, address:g.address||null, geocodedAt:g.geocodedAt});
+  },
+  getOffice(id){
+    const o = this.ensureData().find(x=>x.id===id);
+    return o ? this.withGeo(o) : null;
+  },
+  /* Looks an office up via live OpenStreetMap/Nominatim geocoding (see
+     Field.forwardGeocode) and - if found - saves it into the shared
+     Store.data.lsgOfficeGeo cache so every field staff member benefits
+     from this one lookup from now on. No-ops (and returns the cached
+     copy) if already geocoded; never invents a result on failure. */
+  geocoding: {},
+  async geocodeOffice(id){
+    const base = this.ensureData().find(x=>x.id===id);
+    if(!base) return null;
+    const cached = Store.data.lsgOfficeGeo[id];
+    if(cached) return this.withGeo(base);
+    if(this.geocoding[id]) return this.geocoding[id];
+    this.geocoding[id] = (async ()=>{
+      const hit = await Field.forwardGeocode(base.name+', '+base.district+' district, Kerala, India');
+      if(hit){
+        Store.data.lsgOfficeGeo[id] = {lat:hit.lat, lng:hit.lng, address:hit.address, geocodedAt:new Date().toISOString(), source:'OpenStreetMap/Nominatim'};
+        await Store.save('lsgOfficeGeo');
+      }
+      delete this.geocoding[id];
+      return hit ? this.withGeo(base) : base;
+    })();
+    return this.geocoding[id];
+  },
+  /* Bulk-geocodes every office currently in view (the active district +
+     type + search filters) that isn't cached yet, one at a time through
+     the same rate-limited queue as a single lookup - so selecting a
+     district and tapping this is the practical way to "pre-warm" a whole
+     area for the staff who work it, without ever bulk-scraping the full
+     1000+ office list in one go. */
+  /* Single on-demand lookup from the "Look it up now" link in Office
+     Details - re-opens the same details view once resolved so the result
+     appears in place, but only if the staff member hasn't already moved
+     on to a different office in the meantime. */
+  async lookUpNow(id){
+    UI.toast('Looking up on OpenStreetMap…');
+    await this.geocodeOffice(id);
+    if(this._openDetailId===id) this.openDetails(id);
+    this.render();
+  },
+  async geocodeVisible(){
+    const todo = this.filtered().map(x=>x.o).filter(o=>!Store.data.lsgOfficeGeo[o.id]);
+    if(!todo.length){ UI.toast('Everything in view is already located'); return; }
+    UI.toast('Looking up '+todo.length+' office location(s)… this can take a minute');
+    let done = 0;
+    for(const o of todo){
+      await this.geocodeOffice(o.id);
+      done++;
+      if(done % 5 === 0 || done===todo.length) this.render();
+    }
+    UI.toast('Done — located '+done+' office(s)');
+    this.render();
+  },
   /* Entry point used by every integration point (My Day, Field Map, Start
      Visit, Customer drawer, Quick Actions) - opts can pre-set a district
      (e.g. the customer's own district) so the list opens already scoped
@@ -8454,7 +8556,7 @@ Field.OfficeFinder = {
     if(this.type) list = list.filter(o=>o.type===this.type);
     if(q) list = list.filter(o=>o.name.toLowerCase().includes(q));
     const withPos = this.myPos;
-    list = list.map(o=>({ o, km: (withPos && o.lat!=null && o.lng!=null) ? Field.haversineKm(withPos.lat, withPos.lng, o.lat, o.lng) : null }));
+    list = list.map(o=>this.withGeo(o)).map(o=>({ o, km: (withPos && o.lat!=null && o.lng!=null) ? Field.haversineKm(withPos.lat, withPos.lng, o.lat, o.lng) : null }));
     const anyDistance = list.some(x=>x.km!==null);
     if(anyDistance) list.sort((a,b)=>{ if(a.km===null) return 1; if(b.km===null) return -1; return a.km-b.km; });
     else list.sort((a,b)=>a.o.name.localeCompare(b.o.name));
@@ -8485,13 +8587,14 @@ Field.OfficeFinder = {
           <option value="">All Districts</option>
           ${this.districts().map(d=>`<option value="${Util.escapeHtml(d)}" ${this.district===d?'selected':''}>${Util.escapeHtml(d)}</option>`).join('')}
         </select>
+        <button class="btn btn-outline btn-sm" onclick="Field.OfficeFinder.geocodeVisible()">&#128269; Locate offices in view</button>
         <div class="toolbar-spacer"></div>
         <button class="btn btn-outline btn-sm" onclick="Field.OfficeFinder.setMode('${this.mode==='list'?'map':'list'}')">${this.mode==='list' ? '&#128506; Map' : '&#128203; List'}</button>
       </div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">
         ${this.types().map(t=>`<button class="tab-btn ${this.type===t?'active':''}" onclick="Field.OfficeFinder.setType('${Util.escapeHtml(t)}')">${Util.escapeHtml(t)}</button>`).join('')}
       </div>
-      ${!this.myPos ? `<div class="hint" style="margin-bottom:10px;">Tap "Near Me" to sort offices by distance. Until then (or for any office this dataset has no GPS coordinates for yet), results are shown alphabetically.</div>` : ''}
+      ${!this.myPos ? `<div class="hint" style="margin-bottom:10px;">Tap "Near Me" to sort offices by distance. Offices without GPS data yet are shown alphabetically — tap "Locate offices in view" to look them up live from OpenStreetMap.</div>` : ''}
       <div id="of_body"></div>
     `;
     if(this.mode==='map') this.renderMapView(); else this.renderList();
@@ -8528,29 +8631,31 @@ Field.OfficeFinder = {
     return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(o.name+', '+o.district+' district, Kerala')}`;
   },
   navigateTo(id){
-    const o = this.ensureData().find(x=>x.id===id);
+    const o = this.getOffice(id);
     if(!o) return;
     window.open(this.navUrl(o), '_blank');
   },
   async copyLocation(id){
-    const o = this.ensureData().find(x=>x.id===id);
+    const o = this.getOffice(id);
     if(!o) return;
-    const text = o.name+', '+o.district+' district, Kerala'+(o.lat!=null?' ('+o.lat+', '+o.lng+')':'');
+    const text = (o.address || (o.name+', '+o.district+' district, Kerala'))+(o.lat!=null?' ('+o.lat+', '+o.lng+')':'');
     try{ await navigator.clipboard.writeText(text); UI.toast('Copied'); }
     catch(e){ UI.toast('Could not copy — try selecting the text manually'); }
   },
   async shareLocation(id){
-    const o = this.ensureData().find(x=>x.id===id);
+    const o = this.getOffice(id);
     if(!o) return;
-    const text = o.name+', '+o.district+' district, Kerala';
+    const text = o.address || (o.name+', '+o.district+' district, Kerala');
     const url = this.navUrl(o);
     if(navigator.share){ try{ await navigator.share({title:o.name, text, url}); }catch(e){} }
     else { this.copyLocation(id); }
   },
   openDetails(id){
-    const o = this.ensureData().find(x=>x.id===id);
+    const o = this.getOffice(id);
     if(!o) return;
+    this._openDetailId = id;
     const km = this.myPos && o.lat!=null && o.lng!=null ? Field.haversineKm(this.myPos.lat, this.myPos.lng, o.lat, o.lng) : null;
+    const isGeocoding = !!this.geocoding[id];
     UI.openModal(o.name, `
       <div class="field"><label>Local Body Type</label><div>${Util.escapeHtml(o.type)}</div></div>
       <div class="form-row">
@@ -8558,12 +8663,13 @@ Field.OfficeFinder = {
         <div class="field"><label>Wards</label><div>${o.wards||'Not available'}</div></div>
       </div>
       <div class="field"><label>LGD Code</label><div class="mono">${Util.escapeHtml(o.lgd||'Not available')}</div></div>
-      <div class="field"><label>Address / Location</label><div>Not available</div></div>
+      <div class="field"><label>Address / Location</label><div>${o.address? Util.escapeHtml(o.address) : (isGeocoding? 'Locating…' : 'Not available yet')}</div></div>
       <div class="form-row">
         <div class="field"><label>Latitude</label><div>${o.lat!=null?o.lat:'Not available'}</div></div>
         <div class="field"><label>Longitude</label><div>${o.lng!=null?o.lng:'Not available'}</div></div>
       </div>
       <div class="field"><label>Distance from you</label><div>${km!==null?km.toFixed(km<1?2:1)+' km':(this.myPos?'Not available (no GPS data for this office yet)':'Tap "Near Me" on the list to see distance')}</div></div>
+      ${o.lat!=null? `<div class="hint">Location via OpenStreetMap, looked up ${o.geocodedAt?Util.fmtDate(o.geocodedAt.slice(0,10)):'earlier'} — approximate, not an official address.</div>` : (isGeocoding? `<div class="hint">Looking this office up on OpenStreetMap…</div>` : `<div class="hint">No GPS data yet for this office. <a href="#" onclick="Field.OfficeFinder.lookUpNow('${o.id}');return false;">Look it up now</a></div>`)}
     `, `
       <button class="btn btn-outline" onclick="UI.closeModal()">Close</button>
       <button class="btn btn-outline" onclick="Field.OfficeFinder.copyLocation('${o.id}')">&#128203; Copy</button>
@@ -8600,7 +8706,7 @@ Field.OfficeFinder = {
         .bindPopup(`<b>${Util.escapeHtml(o.name)}</b><br>${Util.escapeHtml(o.type)}<br><a href="#" onclick="UI.closeModal&&UI.closeModal();Field.OfficeFinder.openDetails('${o.id}');return false;">Details</a>`);
     });
     const note = document.getElementById('of_mapNote');
-    if(note) note.textContent = withCoords.length ? '' : 'Office pins aren\'t shown yet — this dataset has no GPS coordinates for offices. Showing your own location only (if captured).';
+    if(note) note.textContent = withCoords.length ? '' : 'No office pins yet for the current filters — tap "Locate offices in view" above to look them up live from OpenStreetMap.';
   }
 };
 Views.officefinder = ()=>Field.OfficeFinder.render();
@@ -9880,7 +9986,8 @@ const Backup = {
       oppKeywordGroups: Store.data.oppKeywordGroups,
       attendance: Store.data.attendance, leaveRequests: Store.data.leaveRequests,
       bidDocs: Store.data.bidDocs,
-      visits: Store.data.visits, requirements: Store.data.requirements, travelLogs: Store.data.travelLogs
+      visits: Store.data.visits, requirements: Store.data.requirements, travelLogs: Store.data.travelLogs,
+      lsgOfficeGeo: Store.data.lsgOfficeGeo
     };
   },
   downloadJSON(){
@@ -9907,7 +10014,7 @@ const Backup = {
     try{
       const text = await file.text();
       const data = JSON.parse(text);
-      ['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs'].forEach(k=>{
+      ['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo'].forEach(k=>{
         if(data[k]!==undefined) Store.data[k] = data[k];
       });
       // oppProjects lives in its own indexed table now, not the
@@ -9915,7 +10022,7 @@ const Backup = {
       // the dedicated full-replace path so opp_projects_rows (what
       // imports actually merge against) gets restored too, not just
       // the legacy blob.
-      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs'].map(k=>Store.save(k)));
+      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo'].map(k=>Store.save(k)));
       if(data['oppProjects']!==undefined) await Store.replaceAllOppProjects(Store.data.oppProjects);
       await Activity.log('Data restored', 'Restored from backup file '+file.name);
       UI.toast('Data restored successfully');
