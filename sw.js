@@ -1,46 +1,47 @@
-/* JAYS CRM PRO — service worker
-   Scope is intentionally narrow: this app's whole value is LIVE Supabase
-   data, so nothing here ever caches API calls or CDN scripts. It only
-   caches the app shell (this HTML file + icons) so:
-     1) Chrome/Android's install-prompt criteria are met (a fetch handler
-        is required), and
-     2) if someone opens the app with genuinely no network, they see the
-        last-loaded shell instead of a browser error page.
-   Every navigation still tries the network FIRST and only falls back to
-   the cached shell on failure - so anyone online always gets the live,
-   current file, never a stale cached one. */
-const CACHE = 'jays-crm-shell-v1';
-const SHELL = ['./index.html', './manifest.json', './icon-192.png', './icon-512.png'];
+/* JAYS CRM PRO - app-shell service worker.
+   Job: let the installed app OPEN with no signal (field staff in areas with
+   patchy connectivity). It does NOT cache live CRM data - customers,
+   visits, quotations etc. all still come straight from Supabase when
+   online; that's handled separately by the app's own localStorage offline
+   cache/queue (Store.cacheOfflineSnapshot / FieldSync), not this file.
 
-self.addEventListener('install', e=>{
-  e.waitUntil(caches.open(CACHE).then(c=>c.addAll(SHELL)));
+   Strategy: network-first for same-origin shell files, falling back to
+   whatever was last cached when the network is unavailable, and always
+   refreshing the cache on a successful fetch so staff get the latest
+   version as soon as they're back online (never stuck on a stale cached
+   copy of the CRM). Cross-origin requests (Supabase, CDN libraries, fonts)
+   are left completely alone - untouched pass-through to the network. */
+const CACHE_NAME = 'jays-crm-shell-v1';
+const SHELL_FILES = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png', './icon-maskable-512.png'];
+
+self.addEventListener('install', (event) => {
   self.skipWaiting();
-});
-
-self.addEventListener('activate', e=>{
-  e.waitUntil(
-    caches.keys().then(keys=>Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k))))
+  event.waitUntil(
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL_FILES).catch(() => {}))
   );
-  self.clients.claim();
 });
 
-self.addEventListener('fetch', e=>{
-  const req = e.request;
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches.keys()
+      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k))))
+      .then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener('fetch', (event) => {
+  const req = event.request;
+  if (req.method !== 'GET') return; // never intercept writes - those always go straight to Supabase
   const url = new URL(req.url);
+  if (url.origin !== self.location.origin) return; // Supabase/CDN/fonts - pass through untouched
 
-  // Only ever touch same-origin GET requests for the shell files above.
-  // Everything else (Supabase API/auth, jsPDF/XLSX CDN scripts, any POST)
-  // passes straight through to the network, untouched.
-  if(req.method !== 'GET' || url.origin !== self.location.origin){
-    return; // no e.respondWith() => default network behavior
-  }
-
-  e.respondWith(
-    fetch(req).then(res=>{
-      // Keep the cached shell fresh whenever we're online.
-      const copy = res.clone();
-      caches.open(CACHE).then(c=>c.put(req, copy));
-      return res;
-    }).catch(()=>caches.match(req).then(cached=>cached || caches.match('./index.html')))
+  event.respondWith(
+    fetch(req)
+      .then((res) => {
+        const copy = res.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
+        return res;
+      })
+      .catch(() => caches.match(req).then((cached) => cached || caches.match('./index.html')))
   );
 });
