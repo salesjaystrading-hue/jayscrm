@@ -9357,6 +9357,71 @@ Field.OfficeFinder = {
     if(this._openDetailId===id) this.openDetails(id);
     this.render();
   },
+  /* Manual fallback for offices OpenStreetMap can't find (common for
+     smaller Grama Panchayats) and a free alternative to the paid Google
+     Maps API key bulk option: staff open the office in Google Maps
+     (same navUrl search used by the Navigate button, which — per field
+     reports — resolves correctly even when OSM has nothing), then copy
+     either the page's URL or a plain "lat, lng" pair back here. No key,
+     no billing, no automated calls to Google at all — this only parses
+     coordinates the staff member already has in front of them and saves
+     them into the exact same Store.data.lsgOfficeGeo cache as every
+     other geocoding path, so distance/map/navigate all pick it up
+     immediately with zero special-casing. Never invents a result: if the
+     pasted text doesn't contain a recognisable coordinate pair, nothing
+     is saved and the staff member is told why. */
+  parseLatLngFromText(text){
+    text = String(text||'').trim();
+    if(!text) return null;
+    const patterns = [
+      /@(-?\d{1,3}\.\d+),\s*(-?\d{1,3}\.\d+)/,              // .../@11.1234,76.1234,17z
+      /!3d(-?\d{1,3}\.\d+)!4d(-?\d{1,3}\.\d+)/,              // Google's embedded pin marker
+      /[?&](?:q|query|ll)=(-?\d{1,3}\.\d+),\s*(-?\d{1,3}\.\d+)/, // ?q=11.1234,76.1234
+      /^(-?\d{1,3}(?:\.\d+)?)[,\s]+(-?\d{1,3}(?:\.\d+)?)$/,  // plain "11.1234, 76.1234"
+    ];
+    for(const re of patterns){
+      const m = text.match(re);
+      if(m){
+        const lat = parseFloat(m[1]), lng = parseFloat(m[2]);
+        if(Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat)<=90 && Math.abs(lng)<=180) return {lat, lng};
+      }
+    }
+    return null;
+  },
+  saveFromGoogleMaps(id){
+    const base = this.ensureData().find(x=>x.id===id);
+    if(!base) return;
+    const o = this.getOffice(id);
+    UI.openModal('Set Location from Google Maps', `
+      <div class="hint" style="margin-bottom:10px;">1. Open <b>${Util.escapeHtml(base.name)}</b> in Google Maps and find the correct pin.<br>2. Copy the page's URL (or long-press/right-click the pin and copy its coordinates).<br>3. Paste it below.</div>
+      <a class="btn btn-outline btn-sm" style="text-decoration:none;display:inline-block;margin-bottom:12px;" target="_blank" href="${this.navUrl(base)}">&#128663; Open in Google Maps</a>
+      <div class="field"><label>Paste Google Maps link or "latitude, longitude"</label><textarea id="of_gmapsPaste" rows="2" placeholder="e.g. https://www.google.com/maps/place/.../@11.12345,76.12345,17z  or  11.12345, 76.12345"></textarea></div>
+      <div id="of_gmapsPreview" class="hint"></div>
+    `, `
+      <button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="Field.OfficeFinder.submitGoogleMapsCoords('${id}')">Save Location</button>
+    `);
+    setTimeout(()=>{
+      const ta = document.getElementById('of_gmapsPaste');
+      if(ta) ta.addEventListener('input', ()=>{
+        const hit = this.parseLatLngFromText(ta.value);
+        const prev = document.getElementById('of_gmapsPreview');
+        if(prev) prev.textContent = hit ? ('Will save: '+hit.lat.toFixed(5)+', '+hit.lng.toFixed(5)) : (ta.value.trim()? 'Could not find coordinates in that text yet…' : '');
+      });
+    }, 0);
+  },
+  async submitGoogleMapsCoords(id){
+    const ta = document.getElementById('of_gmapsPaste');
+    const hit = this.parseLatLngFromText(ta ? ta.value : '');
+    if(!hit){ UI.toast('Could not find coordinates in that text — paste the Maps link or a "lat, lng" pair'); return; }
+    Store.data.lsgOfficeGeo[id] = { lat:hit.lat, lng:hit.lng, address:null, geocodedAt:new Date().toISOString(), source:'Google Maps (manual)' };
+    const ok = await Store.save('lsgOfficeGeo');
+    if(!ok){ UI.toast('Could not save — check your connection and try again'); return; }
+    UI.toast('Location saved');
+    UI.closeModal();
+    if(this._openDetailId===id) this.openDetails(id);
+    this.render();
+  },
   async geocodeVisible(){
     const todo = this.filtered().map(x=>x.o).filter(o=>!Store.data.lsgOfficeGeo[o.id]);
     if(!todo.length){ UI.toast('Everything in view is already located'); return; }
@@ -9708,7 +9773,7 @@ Field.OfficeFinder = {
         <div class="field"><label>Longitude</label><div>${o.lng!=null?o.lng:'Not available'}</div></div>
       </div>
       ${!isAnchorItself ? `<div class="field"><label>Distance from ${Util.escapeHtml(this.refLabel())}</label><div>${km!==null?km.toFixed(km<1?2:1)+' km':(refPos?'Not available (no GPS data for this office yet)':'Tap "Near Me" on the list, or "Nearest Offices to This" on another office, to see distance')}</div></div>` : ''}
-      ${o.lat!=null? `<div class="hint">Location via ${Util.escapeHtml(o.source||'OpenStreetMap')}, looked up ${o.geocodedAt?Util.fmtDate(o.geocodedAt.slice(0,10)):'earlier'} — approximate, not an official address.</div>` : (isGeocoding? `<div class="hint">Looking this office up on OpenStreetMap…</div>` : `<div class="hint">No GPS data yet for this office. <a href="#" onclick="Field.OfficeFinder.lookUpNow('${o.id}');return false;">Look it up now</a></div>`)}
+      ${o.lat!=null? `<div class="hint">Location via ${Util.escapeHtml(o.source||'OpenStreetMap')}, looked up ${o.geocodedAt?Util.fmtDate(o.geocodedAt.slice(0,10)):'earlier'} — approximate, not an official address. <a href="#" onclick="Field.OfficeFinder.saveFromGoogleMaps('${o.id}');return false;">Fix with Google Maps</a></div>` : (isGeocoding? `<div class="hint">Looking this office up on OpenStreetMap…</div>` : `<div class="hint">No GPS data yet for this office. <a href="#" onclick="Field.OfficeFinder.lookUpNow('${o.id}');return false;">Look it up now</a> &middot; <a href="#" onclick="Field.OfficeFinder.saveFromGoogleMaps('${o.id}');return false;">Set from Google Maps</a></div>`)}
     `, `
       <button class="btn btn-outline" onclick="UI.closeModal()">Close</button>
       <button class="btn btn-outline" onclick="Field.OfficeFinder.copyLocation('${o.id}')">&#128203; Copy</button>
@@ -12598,7 +12663,7 @@ Views.settings = function(){
     </div>
     <div class="card card-pad" style="max-width:520px;margin-top:16px;">
       <h3 style="margin:0 0 4px;font-size:14px;">Office Location Data</h3>
-      <div class="hint" style="margin-bottom:12px;">${Object.keys(Store.data.lsgOfficeGeo||{}).length} of ${LSG_OFFICES_RAW.length} Kerala LSG office locations are located so far, for the "Nearby Offices" field feature. Two ways to fill in the rest — use whichever suits you, or both.</div>
+      <div class="hint" style="margin-bottom:12px;">${Object.keys(Store.data.lsgOfficeGeo||{}).length} of ${LSG_OFFICES_RAW.length} Kerala LSG office locations are located so far, for the "Nearby Offices" field feature. A few ways to fill in the rest — use whichever suits you, or combine them. For the odd office the free OpenStreetMap lookup can't find (but Google Maps shows correctly), open that office's details in Find Location and use "Set from Google Maps" to paste its coordinates in directly — no key or bulk run needed.</div>
 
       <div style="padding:12px;border:1px solid var(--border,#1d2b40);border-radius:8px;margin-bottom:14px;">
         <div style="font-weight:600;font-size:13px;margin-bottom:4px;">&#127758; Free — OpenStreetMap (no account, no card, no cost)</div>
