@@ -4,8 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>JAYS CRM PRO | Jays Trading and Business Solution</title>
-<!-- PWA: installable "mobile app" shell. See /pwa-notes in this repo for
-     what this does and does not do (no offline data - Supabase stays live). -->
+<!-- PWA: installable "mobile app" shell for field staff (manifest.json,
+     icon-192.png, icon-512.png, icon-maskable-512.png and sw.js must be
+     uploaded alongside this file, in the same folder, for installability
+     and offline app-shell loading to work). The app shell (this file) and
+     an offline read/write cache for field data (customers, visits,
+     requirements, travel, quotations - see Store.cacheOfflineSnapshot and
+     FieldSync) both work with no signal; everything else still needs a
+     live connection to Supabase. -->
 <link rel="manifest" href="./manifest.json">
 <meta name="theme-color" content="#EB5A28">
 <meta name="mobile-web-app-capable" content="yes">
@@ -13,6 +19,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="JAYS CRM">
 <link rel="icon" href="./icon-192.png">
+<link rel="icon" sizes="512x512" href="./icon-512.png">
 <link rel="apple-touch-icon" href="./icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -901,7 +908,7 @@ const DROPDOWNS = {
   leadSource: ['Referral','Walk-in','Website','WhatsApp','Existing Customer','Field Visit','Government Project','Other'],
   customerType: ['Individual','Government / Panchayat','Institution','Dealer / Reseller','Contractor','Other'],
   visitType: ['New Lead','Customer Visit','Follow-up','Demo','Site Survey','Payment Collection','Complaint','Other'],
-  visitOutcome: ['Interested','Not Interested','Requirement Collected','Quotation Needed','Follow-up','Closed'],
+  visitOutcome: ['Interested','Not Interested','Requirement Collected','Quotation Needed','Follow-up','Order Confirmed','Closed'],
   visitStatus: ['Planned','Started','Completed','Cancelled'],
   requirementStatus: ['New','Quotation Required','Quotation Sent','Negotiation','Won','Lost'],
   requirementPriority: ['Low','Medium','High','Urgent'],
@@ -1009,6 +1016,17 @@ const Store = {
        so the existing Store.save('visits')/loadKey() machinery just
        works for them with zero new persistence code. */
     visits: [], requirements: [], travelLogs: [],
+    /* Day-level wrapper (Start Day/End Day) - one record per staff member
+       per date, same plain blob-backed pattern as the rest of this block.
+       Visit/travel/requirement counts for the day are derived from those
+       existing collections rather than duplicated here; this record only
+       holds the day's own start/end timestamps+GPS. */
+    dayPlans: [],
+    /* Manager-set daily targets, one row per staff member (visits/follow-ups/
+       requirements/pipeline-value) - so "My Day" can show actual-vs-target
+       instead of just actual counts. Same plain blob pattern as the rest of
+       this block; set from the Field Reports screen (admin-only). */
+    staffTargets: [],
     /* Document-numbering counters (quoNext, payNext, etc.) - split out of
        settings into their own jays_crm_store key so that everyday actions
        (creating a quotation, payment, order...) never need write access to
@@ -1254,6 +1272,17 @@ const Store = {
       return data || [];
     }catch(e){ console.error('opp load failed', e); this.loadFailed['jays_oppprojects'] = true; return []; }
   },
+  /* Loads the (potentially huge) Project Opportunities list after boot,
+     without the rest of sign-in waiting on it - see the comment above
+     loadAll(). Only the Dashboard's "needs action" stat and the Project
+     Opportunity Finder screen itself read Store.data.oppProjects, so only
+     those two re-render once it's actually in; every other screen is
+     already fully interactive long before this resolves. */
+  async loadOppProjectsBackground(){
+    const rows = await this.loadOppProjects();
+    this.data.oppProjects = rows;
+    if(UI.currentView==='dashboard' || UI.currentView==='oppfinder') Router.render(UI.currentView);
+  },
   /* Full replace - only for the rare occasions the ENTIRE collection
      needs rewriting at once (Recalculate All Scores, Delete All Project
      Records, restoring oppProjects from a Backup file). Unlike
@@ -1272,25 +1301,32 @@ const Store = {
      those round-trip latencies stack up and login can take many seconds.
      None of these keys depend on each other for the READ itself (they're
      independent rows in jays_crm_store, plus the independent profiles-table
-     query and the independent opp_get_all RPC), so they're all fired at
-     once with Promise.all and awaited together - one round-trip's worth of
-     wall-clock time instead of thirty. The only real sequencing rule is
-     migrateWaTemplates(), which reads this.data.waTemplates/rateTemplates
-     and this.loadFailed['jays_watemplates']/['jays_ratetemplates'], so it
-     still runs strictly after the parallel batch (and therefore after
-     those two keys) resolves. Seed-fallback logic for customers/products/
-     settings is unchanged - each still checks its own loadFailed flag
-     before deciding to seed, just after its loadKey has resolved rather
-     than one-by-one in series. */
+     query), so they're all fired at once with Promise.all and awaited
+     together - one round-trip's worth of wall-clock time instead of thirty.
+     The only real sequencing rule is migrateWaTemplates(), which reads
+     this.data.waTemplates/rateTemplates and this.loadFailed['jays_watemplates']
+     /['jays_ratetemplates'], so it still runs strictly after the parallel
+     batch (and therefore after those two keys) resolves. Seed-fallback
+     logic for customers/products/settings is unchanged - each still checks
+     its own loadFailed flag before deciding to seed, just after its
+     loadKey has resolved rather than one-by-one in series.
+       oppProjects is deliberately NOT in this batch - LSG open-data imports
+     can run into the tens of thousands of rows, and being the one huge
+     fetch in an otherwise-fast Promise.all, it was the single thing
+     dictating how long sign-in took, even though most logins land on My
+     Day or the Dashboard, neither of which needs the full list right away.
+     It's kicked off in the background after boot instead (see
+     loadOppProjectsBackground()), so login finishes as soon as the data it
+     actually needs is in. */
   async loadAll(){
     this.loadFailed = {};
     const [
       customers, products, quotations, payments, followups, tasks, notes,
       activityLog, gemcrac, orders, complaints, bids, waTemplates, waHistory,
-      rateTemplates, rateDocs, rateTerms, rateDocTemplates, oppProjects,
+      rateTemplates, rateDocs, rateTerms, rateDocTemplates,
       oppTracking, oppProducts, oppImportHistory, oppKeywordGroups,
       attendance, leaveRequests, bidDocs, visits, requirements, travelLogs,
-      lsgOfficeGeo, settings, counters
+      lsgOfficeGeo, settings, counters, dayPlans, staffTargets
     ] = await Promise.all([
       this.loadCustomersDb(),
       this.loadKey('jays_products', null),
@@ -1310,7 +1346,6 @@ const Store = {
       this.loadKey('jays_ratedocs', []),
       this.loadKey('jays_rateterms', []),
       this.loadKey('jays_ratedoctemplates', []),
-      this.loadOppProjects(),
       this.loadKey('jays_opptracking', {}),
       this.loadKey('jays_oppproducts', []),
       this.loadKey('jays_oppimporthistory', []),
@@ -1325,6 +1360,8 @@ const Store = {
       this.loadKey('jays_settings', null),
       this.loadKey('jays_counters', null),
       this.loadUsers(),
+      this.loadKey('jays_dayplans', []),
+      this.loadKey('jays_stafftargets', []),
     ]);
 
     /* customers now reads from public.customers (Phase 6 cutover), with
@@ -1359,7 +1396,11 @@ const Store = {
     this.data.rateDocs = rateDocs;
     this.data.rateTerms = rateTerms;
     this.data.rateDocTemplates = rateDocTemplates;
-    this.data.oppProjects = oppProjects;
+    /* Not set from the Promise.all batch - see the comment above loadAll().
+       Left as whatever it already was (so a background refresh - e.g. a
+       re-login without a full page reload - doesn't flash back to empty)
+       and only defaulted to [] the first time. */
+    if(!Array.isArray(this.data.oppProjects)) this.data.oppProjects = [];
     this.data.oppTracking = oppTracking;
     this.data.oppProducts = oppProducts;
     this.data.oppImportHistory = oppImportHistory;
@@ -1371,6 +1412,8 @@ const Store = {
     this.data.requirements = requirements;
     this.data.travelLogs = travelLogs;
     this.data.lsgOfficeGeo = lsgOfficeGeo;
+    this.data.dayPlans = dayPlans;
+    this.data.staffTargets = staffTargets;
 
     await this.migrateWaTemplates();
 
@@ -1392,12 +1435,60 @@ const Store = {
       bidDocNext: this.data.settings.bidDocNext||1,
     };
 
+    /* Offline-first for field staff: when the DEVICE has no network at all
+       (checked via navigator.onLine, not a one-off server error while
+       actually connected), swap in the last successfully cached snapshot
+       for the collections field staff need to browse/work from with no
+       signal, and clear those keys' failed flags so the rest of the app
+       treats them as a normal (if possibly stale) read rather than a
+       blocked-editing error state. Edits to these already queue safely via
+       FieldSync regardless of this flag. When online, refresh the snapshot
+       instead so it's ready for the next time connectivity drops. */
+    if(!navigator.onLine) this.restoreOfflineCache();
+    else this.cacheOfflineSnapshot();
+
+    /* Fire-and-forget: login/boot does not wait on this (see the comment
+       above loadAll() for why). */
+    if(navigator.onLine) this.loadOppProjectsBackground();
+
     const anyFailed = Object.values(this.loadFailed).some(Boolean);
-    if(anyFailed){
+    if(anyFailed && navigator.onLine){
       UI.toast('⚠ Some data failed to load from the server — editing is paused until it reconnects. Refresh the page.');
       console.warn('Store.loadAll: some keys failed to load, saves for those keys are blocked:', Object.keys(this.loadFailed).filter(k=>this.loadFailed[k]));
+    } else if(anyFailed && !navigator.onLine){
+      console.warn('Store.loadAll: offline at boot, some keys could not be restored from an offline cache:', Object.keys(this.loadFailed).filter(k=>this.loadFailed[k]));
     }
     return !anyFailed;
+  },
+  /* Collections field staff need to browse/work from with no signal -
+     customers/leads, today's visits, requirements, travel log, quotations,
+     follow-ups, plus products/settings since both are needed to build a
+     quotation in the field. Kept in their own localStorage namespace
+     (jays_offlinecache_*) separate from the real jays_crm_store blobs, so
+     a stale offline snapshot can never be mistaken for (or accidentally
+     overwrite) live cloud data. */
+  OFFLINE_CACHE_KEYS: ['customers','visits','requirements','travelLogs','quotations','followups','products','settings'],
+  cacheOfflineSnapshot(){
+    this.OFFLINE_CACHE_KEYS.forEach(k=>{
+      if(this.loadFailed['jays_'+k.toLowerCase()]) return; // don't cache a failed/partial read over a good one
+      try{ localStorage.setItem('jays_offlinecache_'+k, JSON.stringify(this.data[k])); }catch(e){}
+    });
+  },
+  restoreOfflineCache(){
+    let restoredAny = false;
+    this.OFFLINE_CACHE_KEYS.forEach(k=>{
+      const lsKey = 'jays_'+k.toLowerCase();
+      if(!this.loadFailed[lsKey]) return; // this key actually loaded fine - keep the live read
+      try{
+        const raw = localStorage.getItem('jays_offlinecache_'+k);
+        if(raw!=null){
+          this.data[k] = JSON.parse(raw);
+          this.loadFailed[lsKey] = false;
+          restoredAny = true;
+        }
+      }catch(e){}
+    });
+    if(restoredAny) UI.toast("📴 Offline — showing your last saved data. Changes will sync when you're back online.");
   },
   /* Team accounts now live in Supabase Auth (auth.users) + a linked
      public.profiles row (username / name / role / permissions) —
@@ -1850,7 +1941,11 @@ const Auth = {
       err.style.display='block';
       return;
     }
-    const ok = await this.loadProfile(data.session.user.id);
+    /* Profile lookup and the full data load are independent reads once
+       authenticated - loadAll() doesn't need the profile, RLS is already
+       enforced by the session's own JWT - so run them together instead of
+       back-to-back. Saves one full network round-trip off sign-in time. */
+    const [ok] = await Promise.all([ this.loadProfile(data.session.user.id), Store.loadAll() ]);
     if(!ok){
       err.textContent = 'Your account has no CRM profile yet. Contact an admin.';
       err.style.display='block';
@@ -1858,7 +1953,6 @@ const Auth = {
       return;
     }
     err.style.display='none';
-    await Store.loadAll();
     App.boot();
     Activity.log('Login', this.session.username+' signed in'); // fire-and-forget: boot shouldn't wait on an audit-log write
   },
@@ -1875,9 +1969,9 @@ const Auth = {
       const { data } = await sb.auth.getSession();
       const session = data && data.session;
       if(!session) return false;
-      const ok = await this.loadProfile(session.user.id);
+      // Same parallelization as login() - see the comment there.
+      const [ok] = await Promise.all([ this.loadProfile(session.user.id), Store.loadAll() ]);
       if(!ok){ await sb.auth.signOut(); return false; }
-      await Store.loadAll();
       return true;
     }catch(e){ console.error('tryRestore failed', e); return false; }
   },
@@ -3619,8 +3713,11 @@ const Quotations = {
     };
     if(id){ const i=Store.data.quotations.findIndex(x=>x.id===id); Store.data.quotations[i]=rec; }
     else { Store.data.quotations.unshift(rec); Store.data.counters.quoNext = (Store.data.counters.quoNext||1)+1; await Store.save('counters'); }
-    await Store.save('quotations');
-    await DbSync.upsertQuotation(rec);
+    /* Routed through FieldSync (not a bare Store.save) so a quotation
+       created/edited with no signal queues locally and syncs automatically
+       once back online, same as visits/requirements/travel/day-plans. */
+    await FieldSync.createAndSave('quotations', rec);
+    if(navigator.onLine) await DbSync.upsertQuotation(rec);
     /* Log the real status in the customer timeline, and only when the
        status actually changed (or it's a brand-new quotation) - editing
        line items on an unchanged Draft shouldn't spam the timeline with
@@ -3635,8 +3732,8 @@ const Quotations = {
   async remove(id){
     if(!confirm('Delete this quotation?')) return;
     Store.data.quotations = Store.data.quotations.filter(x=>x.id!==id);
-    await Store.save('quotations');
-    await DbSync.deleteQuotation(id);
+    await FieldSync.createAndSave('quotations', {id});
+    if(navigator.onLine) await DbSync.deleteQuotation(id);
     UI.toast('Deleted'); Router.render('quotations');
   },
   async duplicate(id){
@@ -3648,10 +3745,10 @@ const Quotations = {
     copy.status = 'Draft';
     Store.data.quotations.unshift(copy);
     Store.data.counters.quoNext = (Store.data.counters.quoNext||1) + 1;
-    const ok1 = await Store.save('quotations');
+    const ok1 = await FieldSync.createAndSave('quotations', copy);
     const ok2 = await Store.save('counters');
     if(ok1 && ok2){
-      await DbSync.upsertQuotation(copy);
+      if(navigator.onLine) await DbSync.upsertQuotation(copy);
       await Activity.log('Quotation duplicated', src.id+' \u2192 '+copy.id);
     }
     UI.toast('Duplicated as '+copy.id);
@@ -7740,7 +7837,7 @@ Views.attendance = ()=>Attendance.render();
    re-uploads everything once - nothing is ever created twice.
 =========================================================================== */
 const FieldSync = {
-  COLLECTIONS: ['visits','requirements','travelLogs'],
+  COLLECTIONS: ['visits','requirements','travelLogs','dayPlans','quotations'],
   lsKey(c){ return 'jays_offline_'+c; },
   getPending(c){ try{ return JSON.parse(localStorage.getItem(this.lsKey(c))||'[]'); }catch(e){ return []; } },
   setPending(c, arr){ try{ localStorage.setItem(this.lsKey(c), JSON.stringify(arr)); }catch(e){} },
@@ -7766,17 +7863,23 @@ const FieldSync = {
       if(ok){ this.setPending(c, []); syncedAny = true; }
     }
     this.refreshBadges();
-    if(syncedAny && !silent) UI.toast('🟢 Offline field data synced');
+    if(syncedAny){ Store.cacheOfflineSnapshot(); if(!silent) UI.toast('🟢 Offline field data synced'); }
   },
   refreshBadges(){
     document.querySelectorAll('.field-sync-badge').forEach(el=>{
       const n = this.pendingCount();
+      if(!navigator.onLine){
+        el.textContent = '📴 Offline'+(n?' — '+n+' queued':'');
+        el.className = 'field-sync-badge badge badge-red';
+        return;
+      }
       el.textContent = n ? ('🟡 '+n+' pending sync') : '🟢 All synced';
       el.className = 'field-sync-badge badge ' + (n? 'badge-amber':'badge-green');
     });
   }
 };
 window.addEventListener('online', ()=>FieldSync.syncAll());
+window.addEventListener('offline', ()=>FieldSync.refreshBadges());
 setInterval(()=>{ if(navigator.onLine) FieldSync.syncAll(true); }, 60000);
 
 /* =========================================================================
@@ -7809,7 +7912,10 @@ const Field = {
     const cls = (colorMap && colorMap[status]) || 'gray';
     return `<span class="badge badge-${cls}">${Util.escapeHtml(status||'—')}</span>`;
   },
-  syncBadgeHTML(){ return `<span class="field-sync-badge badge ${FieldSync.pendingCount()?'badge-amber':'badge-green'}" style="margin-left:8px;">${FieldSync.pendingCount()?('🟡 '+FieldSync.pendingCount()+' pending sync'):'🟢 All synced'}</span>`; },
+  syncBadgeHTML(){
+    if(!navigator.onLine) return `<span class="field-sync-badge badge badge-red" style="margin-left:8px;">📴 Offline${FieldSync.pendingCount()?' — '+FieldSync.pendingCount()+' queued':''}</span>`;
+    return `<span class="field-sync-badge badge ${FieldSync.pendingCount()?'badge-amber':'badge-green'}" style="margin-left:8px;">${FieldSync.pendingCount()?('🟡 '+FieldSync.pendingCount()+' pending sync'):'🟢 All synced'}</span>`;
+  },
   me(){ return (Auth.session && (Auth.session.name||Auth.session.username)) || ''; },
   haversineKm(lat1,lng1,lat2,lng2){
     if([lat1,lng1,lat2,lng2].some(v=>v===undefined||v===null||v===''||isNaN(Number(v)))) return null;
@@ -8082,7 +8188,7 @@ Field.Visits = {
       </div>
       <div class="card">
         <div class="table-wrap">
-        ${list.length ? `<table><thead><tr><th class="col-actions">Actions</th><th>Customer / Lead</th><th>Type</th><th>Status</th><th>Start</th><th>Duration</th><th>Outcome</th></tr></thead><tbody>
+        ${list.length ? `<table><thead><tr><th class="col-actions">Actions</th><th>Customer / Lead</th><th>Type</th><th>Status</th><th>Start</th><th>Duration</th><th>Distance</th><th>Outcome</th></tr></thead><tbody>
           ${pg.pageItems.map(v=>{
             const cust = v.customerId ? Store.data.customers.find(c=>c.id===v.customerId) : null;
             const name = cust ? cust.name : (v.leadName || 'Unnamed lead');
@@ -8098,6 +8204,7 @@ Field.Visits = {
             <td>${Field.badge(v.status, Field.VISIT_COLOR)}${v.status==='Started'? `<span title="${v.startLat?'GPS location captured at start':'No GPS captured'}" style="display:inline-block;width:7px;height:7px;border-radius:50%;margin-left:6px;background:${v.startLat?'#16a34a':'#9CA3AF'};${v.startLat?'animation:pulse 1.5s infinite;':''}"></span>` : ''}</td>
             <td class="cell-mute">${v.startAt?Util.fmtDateTime(v.startAt):(v.plannedDate?Util.fmtDate(v.plannedDate):'—')}</td>
             <td class="cell-mute">${v.status==='Started' ? `<span data-live-timer data-start="${v.startAt}" style="color:#16a34a;font-weight:600;">${this.elapsedLabel(v.startAt)}</span>` : (v.durationMin?v.durationMin+' min':'—')}</td>
+            <td class="cell-mute">${typeof v.distanceFromPrevKm==='number' ? v.distanceFromPrevKm.toFixed(1)+' km' : '—'}</td>
             <td class="cell-mute">${Util.escapeHtml(v.outcome||'—')}</td>
           </tr>`;}).join('')}
           </tbody></table>
@@ -8291,13 +8398,19 @@ Field.Visits = {
     const v = Store.data.visits.find(x=>x.id===id);
     if(!v) return;
     this.draftPhotos = v.photos ? v.photos.slice() : [];
+    this.draftOutcome = v.outcome || '';
     const cust = v.customerId ? Store.data.customers.find(c=>c.id===v.customerId) : null;
     UI.openModal('Complete Visit', `
       ${Field.quickActionsHTML(cust)}
       <div class="field"><label>Products Discussed</label><input id="fv_products" placeholder="e.g. Twin Bin, Outdoor Gym Set" value="${Util.escapeHtml(v.productsDiscussed||'')}"></div>
       <div class="field"><label>Visit Notes</label><textarea id="fv_notes" placeholder="What happened during the visit?">${Util.escapeHtml(v.notes||'')}</textarea>${Field.voiceBtnHTML('fv_notes')}</div>
       <div class="form-row">
-        <div class="field"><label>Visit Outcome</label><select id="fv_outcome" onchange="Field.Visits.updateOutcomeHint()">${selectOptions(DROPDOWNS.visitOutcome, v.outcome||'')}</select></div>
+        <div class="field">
+          <label>Visit Outcome</label>
+          <div id="fv_outcomeButtons" style="display:flex;flex-wrap:wrap;gap:6px;">
+            ${DROPDOWNS.visitOutcome.map(o=>`<button type="button" class="btn ${this.draftOutcome===o?'btn-primary':'btn-outline'} btn-sm" data-outcome="${Util.escapeHtml(o)}" onclick="Field.Visits.selectOutcome('${Util.escapeHtml(o).replace(/'/g,"\\'")}')">${Util.escapeHtml(o)}</button>`).join('')}
+          </div>
+        </div>
         <div class="field"><label>Next Follow-up Date</label><input type="date" id="fv_nextDate" value="${v.nextFollowupDate||''}"></div>
       </div>
       <div class="field"><label>Next Action</label><input id="fv_nextAction" placeholder="e.g. Send quotation, call back next week" value="${Util.escapeHtml(v.nextAction||'')}"></div>
@@ -8323,13 +8436,26 @@ Field.Visits = {
     'Quotation Needed': 'A Requirement (marked Quotation Required) will be opened for you to fill in after you save — office staff will review it and create the quotation.',
     'Follow-up': 'Set a Next Follow-up Date below so it lands in the Follow-up Centre.',
     'Not Interested': 'The customer will be timestamped as contacted; no further action is created.',
+    'Order Confirmed': 'This visit will be marked as a confirmed order — no further action is created automatically.',
     'Closed': 'No further action will be created.'
   },
+  /* Tap-button outcome picker (replaces the old <select>) - draftOutcome
+     holds the chosen value since buttons don't carry form state the way a
+     native <select> does. */
+  selectOutcome(o){
+    this.draftOutcome = o;
+    const box = document.getElementById('fv_outcomeButtons');
+    if(box) box.querySelectorAll('button[data-outcome]').forEach(b=>{
+      const sel = b.getAttribute('data-outcome')===o;
+      b.classList.toggle('btn-primary', sel);
+      b.classList.toggle('btn-outline', !sel);
+    });
+    this.updateOutcomeHint();
+  },
   updateOutcomeHint(){
-    const sel = document.getElementById('fv_outcome');
     const hint = document.getElementById('fv_outcomeHint');
-    if(!sel || !hint) return;
-    hint.textContent = this.OUTCOME_NEXT[sel.value] || '';
+    if(!hint) return;
+    hint.textContent = this.OUTCOME_NEXT[this.draftOutcome] || '';
   },
   async addPhoto(file){
     if(!file) return;
@@ -8354,9 +8480,24 @@ Field.Visits = {
     v.endAt = new Date().toISOString();
     v.endLat = pos?pos.lat:''; v.endLng = pos?pos.lng:'';
     v.durationMin = v.startAt ? Math.max(1, Math.round((new Date(v.endAt)-new Date(v.startAt))/60000)) : '';
+    /* Distance from previous visit: the last OTHER completed visit by this
+       same staff member (by end time) with a saved GPS fix, compared to
+       this visit's end point. Straight-line (Haversine), same as the rest
+       of the app's distance figures - gives staff a quick "how far did I
+       just travel" number without needing a travel-log trip to be open. */
+    v.distanceFromPrevKm = null;
+    if(pos){
+      const prevVisit = Store.data.visits
+        .filter(ov=>ov.id!==v.id && ov.status==='Completed' && ov.staff===v.staff && ov.endLat && ov.endLng && ov.endAt && ov.endAt<v.endAt)
+        .sort((a,b)=>b.endAt.localeCompare(a.endAt))[0];
+      if(prevVisit){
+        const km = Field.haversineKm(prevVisit.endLat, prevVisit.endLng, pos.lat, pos.lng);
+        if(km!==null) v.distanceFromPrevKm = km;
+      }
+    }
     v.productsDiscussed = document.getElementById('fv_products').value.trim();
     v.notes = document.getElementById('fv_notes').value.trim();
-    v.outcome = document.getElementById('fv_outcome').value;
+    v.outcome = this.draftOutcome || '';
     v.nextFollowupDate = document.getElementById('fv_nextDate').value;
     v.nextAction = document.getElementById('fv_nextAction').value.trim();
     v.photos = this.draftPhotos.slice();
@@ -8376,7 +8517,8 @@ Field.Visits = {
       }
     }
     await Activity.log('Visit completed', (cust?cust.name:v.leadName)+' — '+(v.outcome||''));
-    UI.closeModal(); UI.toast('Visit completed');
+    UI.closeModal();
+    UI.toast('Visit completed'+(typeof v.distanceFromPrevKm==='number' ? ' — '+v.distanceFromPrevKm.toFixed(1)+' km from previous visit' : ''));
     /* Outcome -> automatic next step (see OUTCOME_NEXT above for what's
        shown to staff beforehand). Only fires when there's a real
        customer record to attach the follow-on to. */
@@ -8914,6 +9056,74 @@ Field.Travel = {
   }
 };
 Views.travel = ()=>Field.Travel.render();
+
+/* ---------------------------------------------------------------------
+   DAY PLAN (Start Day / End Day wrapper)
+   One record per staff member per date. Visit/travel/requirement activity
+   itself is never duplicated here - it's derived from Store.data.visits/
+   travelLogs/requirements the same way Field.Plan's dashboard already does;
+   this just gives the day itself a start/end timestamp+GPS and a single
+   place to show an end-of-day summary.
+=========================================================================== */
+Field.Day = {
+  active(){
+    const me = Field.me(); const today = Util.todayISO();
+    return Store.data.dayPlans.find(d=>d.staff===me && d.date===today && !d.endAt) || null;
+  },
+  async start(){
+    if(this.active()){ UI.toast('Your day is already started.'); return; }
+    UI.toast('Getting your location…');
+    const pos = await Field.getPosition();
+    const rec = {
+      id: Util.uid('DP', Store.data.dayPlans),
+      staff: Field.me(), date: Util.todayISO(),
+      startAt: new Date().toISOString(), startLat: pos?pos.lat:'', startLng: pos?pos.lng:'',
+      endAt: '', endLat: '', endLng: ''
+    };
+    Store.data.dayPlans.unshift(rec);
+    await FieldSync.createAndSave('dayPlans', rec);
+    await Activity.log('Day started', rec.staff+' — '+new Date(rec.startAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}));
+    UI.toast('Day started — have a good one!');
+    Router.render(UI.currentView);
+  },
+  /* Builds the same stats End Day shows - also reused by the summary modal
+     and could be reused later by a manager-facing day-review screen. */
+  summaryFor(day){
+    const myVisits = Store.data.visits.filter(v=>v.staff===day.staff && (v.startAt||'').slice(0,10)===day.date);
+    const completed = myVisits.filter(v=>v.status==='Completed');
+    const myTravel = Store.data.travelLogs.filter(t=>t.staff===day.staff && (t.startAt||'').slice(0,10)===day.date);
+    const distanceKm = myTravel.reduce((s,t)=>s+(Number(t.distanceKm)||0), 0);
+    const myReqs = Store.data.requirements.filter(r=>{
+      const cust = Store.data.customers.find(c=>c.id===r.customerId);
+      return (r.createdAt||'').slice(0,10)===day.date && (r.createdBy===day.staff || (cust && cust.assignedTo===day.staff));
+    });
+    const durationMin = day.endAt && day.startAt ? Math.max(1, Math.round((new Date(day.endAt)-new Date(day.startAt))/60000)) : null;
+    return { visitsStarted: myVisits.length, visitsCompleted: completed.length, distanceKm, requirements: myReqs.length, durationMin };
+  },
+  async end(){
+    const day = this.active();
+    if(!day){ UI.toast('No active day to end.'); return; }
+    UI.toast('Getting your location…');
+    const pos = await Field.getPosition();
+    day.endAt = new Date().toISOString();
+    day.endLat = pos?pos.lat:''; day.endLng = pos?pos.lng:'';
+    await FieldSync.createAndSave('dayPlans', day);
+    const s = this.summaryFor(day);
+    await Activity.log('Day ended', day.staff+' — '+s.visitsCompleted+' visit(s), '+s.distanceKm.toFixed(1)+' km');
+    UI.openModal('Day Summary', `
+      <div style="text-align:center;margin-bottom:12px;">
+        <div style="font-size:28px;">&#127881;</div>
+        <div style="font-size:14px;color:var(--muted,#6b7280);">Here's how today went, ${Util.escapeHtml(day.staff)}.</div>
+      </div>
+      <div class="grid grid-2" style="gap:10px;">
+        <div class="card card-pad" style="text-align:center;"><div style="font-size:20px;font-weight:800;">${s.visitsCompleted}</div><div class="cell-mute" style="font-size:11.5px;">Visits Completed</div></div>
+        <div class="card card-pad" style="text-align:center;"><div style="font-size:20px;font-weight:800;">${s.distanceKm.toFixed(1)} km</div><div class="cell-mute" style="font-size:11.5px;">Distance Travelled</div></div>
+        <div class="card card-pad" style="text-align:center;"><div style="font-size:20px;font-weight:800;">${s.requirements}</div><div class="cell-mute" style="font-size:11.5px;">Requirements Collected</div></div>
+        <div class="card card-pad" style="text-align:center;"><div style="font-size:20px;font-weight:800;">${s.durationMin!=null?Math.floor(s.durationMin/60)+'h '+(s.durationMin%60)+'m':'—'}</div><div class="cell-mute" style="font-size:11.5px;">Day Duration</div></div>
+      </div>
+    `, `<button class="btn btn-primary" onclick="UI.closeModal();Router.render(UI.currentView);">Done</button>`);
+  }
+};
 
 /* ---------------------------------------------------------------------
    LOCATION FINDER
@@ -9546,6 +9756,74 @@ Views.officefinder = ()=>Field.OfficeFinder.render();
    TODAY'S FIELD PLAN / "MY DAY" — doubles as the Field Staff dashboard
 =========================================================================== */
 Field.Plan = {
+  routeOrder: null,    // array of visit ids in the planned sequence, or null if not yet computed
+  routeSummary: null,  // {distanceKm, etaMin, hasPosition}
+  /* Nearest-neighbor sequencing of today's planned visits that have a saved
+     customer location. This is a straight-line (Haversine) heuristic, not a
+     real routing-engine optimum - good enough to turn an unordered list of
+     stops into a sensible visiting order and a rough distance/time estimate
+     without needing a paid directions API. The actual road route/ETA comes
+     from Google Maps once "Open Full Route" is used. */
+  async planRoute(){
+    const btn = document.getElementById('planRouteBtn');
+    if(btn){ btn.disabled = true; btn.textContent = 'Calculating…'; }
+    const pos = await Field.getPosition();
+    const me = Field.me(); const isAdmin = Auth.isAdmin();
+    const today = Util.todayISO();
+    const myVisits = isAdmin ? Store.data.visits : Store.data.visits.filter(v=>v.staff===me);
+    const stops = myVisits.filter(v=>v.status==='Planned' && v.plannedDate===today).map(v=>{
+      const cust = v.customerId ? Store.data.customers.find(c=>c.id===v.customerId) : null;
+      const lat = cust && cust.lat!=null && cust.lat!=='' ? Number(cust.lat) : null;
+      const lng = cust && cust.lng!=null && cust.lng!=='' ? Number(cust.lng) : null;
+      return { id:v.id, lat, lng };
+    }).filter(s=>s.lat!=null && s.lng!=null && !isNaN(s.lat) && !isNaN(s.lng));
+
+    if(!stops.length){
+      UI.toast("No planned visits with a saved location to route yet.");
+      if(btn){ btn.disabled = false; btn.textContent = '\u{1F698} Plan My Route'; }
+      return;
+    }
+
+    let cur = pos ? {lat:pos.lat, lng:pos.lng} : {lat:stops[0].lat, lng:stops[0].lng};
+    const remaining = stops.slice();
+    const ordered = [];
+    let totalKm = 0;
+    while(remaining.length){
+      let bestIdx = 0, bestKm = Infinity;
+      remaining.forEach((s,i)=>{ const km = Field.haversineKm(cur.lat,cur.lng,s.lat,s.lng); if(km!==null && km<bestKm){ bestKm=km; bestIdx=i; } });
+      const next = remaining.splice(bestIdx,1)[0];
+      totalKm += (bestKm===Infinity ? 0 : bestKm);
+      ordered.push(next);
+      cur = {lat:next.lat, lng:next.lng};
+    }
+
+    // ~28 km/h average accounts for local roads/stops being slower than a
+    // straight line - purely an estimate, shown alongside a caveat in the UI.
+    const etaMin = Math.round((totalKm/28)*60);
+    this.routeOrder = ordered.map(s=>s.id);
+    this.routeSummary = { distanceKm: totalKm, etaMin, hasPosition: !!pos };
+    this.render();
+  },
+  /* Opens the planned sequence as one multi-stop Google Maps trip (origin
+     left to Maps' own "current location" default) so staff get real
+     road-based turn-by-turn directions and ETA for the whole day, not just
+     one stop at a time. */
+  openFullRoute(){
+    if(!this.routeOrder || !this.routeOrder.length) return;
+    const me = Field.me(); const isAdmin = Auth.isAdmin();
+    const myVisits = isAdmin ? Store.data.visits : Store.data.visits.filter(v=>v.staff===me);
+    const coords = this.routeOrder.map(id=>{
+      const v = myVisits.find(x=>x.id===id);
+      const cust = v && v.customerId ? Store.data.customers.find(c=>c.id===v.customerId) : null;
+      return (cust && cust.lat && cust.lng) ? `${cust.lat},${cust.lng}` : null;
+    }).filter(Boolean);
+    if(!coords.length) return;
+    const destination = coords[coords.length-1];
+    const waypoints = coords.slice(0,-1);
+    let url = `https://www.google.com/maps/dir/?api=1&destination=${destination}&travelmode=driving`;
+    if(waypoints.length) url += `&waypoints=${waypoints.join('|')}`;
+    window.open(url, '_blank');
+  },
   async render(){
     const me = Field.me();
     const today = Util.todayISO();
@@ -9556,7 +9834,15 @@ Field.Plan = {
     const myTravel = isAdmin ? Store.data.travelLogs : Store.data.travelLogs.filter(t=>t.staff===me);
     const myReqs = isAdmin ? Store.data.requirements : Store.data.requirements.filter(r=>{ const c=Store.data.customers.find(x=>x.id===r.customerId); return !c || !c.assignedTo || c.assignedTo===me; });
 
-    const plannedToday = myVisits.filter(v=>v.status==='Planned' && v.plannedDate===today);
+    let plannedToday = myVisits.filter(v=>v.status==='Planned' && v.plannedDate===today);
+    if(this.routeOrder && this.routeOrder.length){
+      const orderMap = new Map(this.routeOrder.map((id,i)=>[id,i]));
+      plannedToday = plannedToday.slice().sort((a,b)=>{
+        const ai = orderMap.has(a.id) ? orderMap.get(a.id) : Infinity;
+        const bi = orderMap.has(b.id) ? orderMap.get(b.id) : Infinity;
+        return ai - bi;
+      });
+    }
     const startedToday = myVisits.filter(v=>(v.startAt||'').slice(0,10)===today);
     const completedToday = startedToday.filter(v=>v.status==='Completed');
     const overdueFU = myFollowups.filter(f=>f.status!=='Done' && f.date && f.date<today);
@@ -9568,6 +9854,26 @@ Field.Plan = {
     myVisits.forEach(v=>{ if(v.customerId && (v.startAt||'').slice(0,10)>=weekAgo) visitedCustIdsWeek.add(v.customerId); });
     const distanceToday = myTravel.filter(t=>(t.startAt||'').slice(0,10)===today).reduce((s,t)=>s+(Number(t.distanceKm)||0),0);
     const reqToday = myReqs.filter(r=>(r.createdAt||'').slice(0,10)===today);
+
+    /* Actual-vs-target: manager-set daily quotas (Field.Targets, admin-only
+       to set, from the Field Reports screen) compared against today's real
+       counts above. Pipeline = value of this staff's customers' still-open
+       quotations - an existing, well-defined "value in progress" number
+       rather than a new concept. Everything degrades to a plain count when
+       no target has been set for this staff member. */
+    const myTarget = isAdmin ? null : Field.Targets.get(me);
+    const myOpenQuotations = Store.data.quotations.filter(q=>{
+      if(!QUOTATION_OPEN_STATUSES.includes(q.status)) return false;
+      if(isAdmin) return true;
+      const c = Store.data.customers.find(x=>x.id===q.customerId);
+      return c && c.assignedTo===me;
+    });
+    const pipelineActual = myOpenQuotations.reduce((s,q)=>s+(Number(q.total)||0), 0);
+    const withTarget = (actual, key, formatter)=>{
+      const fmt = formatter || (n=>n);
+      if(!myTarget || !myTarget[key]) return fmt(actual);
+      return fmt(actual)+' / '+fmt(Number(myTarget[key]));
+    };
 
     /* Customers needing attention - assigned/active customers with no
        visit in 30+ days (or never visited at all). More useful to a
@@ -9612,12 +9918,18 @@ Field.Plan = {
 
     const hour = new Date().getHours();
     const greeting = hour<12?'Good Morning':hour<17?'Good Afternoon':'Good Evening';
+    const activeDay = Field.Day.active();
 
     document.getElementById('content').innerHTML = `
       <div class="dash-head">
         <div class="dash-greet">
           <div class="wave">&#128075;</div>
-          <div><h2>${greeting}, ${Util.escapeHtml(me||'there')}</h2><div class="sub">Here's your field plan for today.</div></div>
+          <div><h2>${greeting}, ${Util.escapeHtml(me||'there')} ${Field.syncBadgeHTML()}</h2><div class="sub">${activeDay?'Day started at '+new Date(activeDay.startAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})+'.':"Here's your field plan for today."}</div></div>
+          <div style="margin-left:auto;">
+            ${activeDay
+              ? `<button class="btn btn-outline" onclick="Field.Day.end()">&#127860; End Day</button>`
+              : `<button class="btn btn-primary" onclick="Field.Day.start()">&#9654; Start Day</button>`}
+          </div>
         </div>
       </div>
 
@@ -9628,26 +9940,50 @@ Field.Plan = {
         <button class="btn btn-outline btn-sm" onclick="Field.Travel.openStartForm()">&#65291; Start Travel</button>
         <button class="btn btn-outline btn-sm" onclick="go('findlocation')">&#128205; Find Location</button>
         <button class="btn btn-outline btn-sm" onclick="Field.OfficeFinder.open()">&#127970; Nearby Offices</button>
+        ${(typeof PWA!=='undefined' && PWA.canInstall()) ? `<button class="btn btn-outline btn-sm" onclick="PWA.promptInstall()">&#128241; Install App</button>` : ''}
       </div>
 
       ${dashboardCardsHTML('Today', [
-        {label:'Planned Visits', value: plannedToday.length, color:'#3B82C4'},
+        {label:'Planned Visits', value: withTarget(plannedToday.length, 'visits'), color:'#3B82C4'},
         {label:'Visits Completed', value: completedToday.length, color:'#0E9F76'},
-        {label:'Pending Follow-ups', value: todayFU.length, color:'#E8A33D'},
+        {label:'Pending Follow-ups', value: withTarget(todayFU.length, 'followups'), color:'#E8A33D'},
         {label:'Overdue Follow-ups', value: overdueFU.length, color:'#DC2626'},
         {label:'New Leads Today', value: newLeadsToday.length, color:'#8B5CF6'},
-        {label:'Requirements Today', value: reqToday.length, color:'#8B5CF6'},
+        {label:'Requirements Today', value: withTarget(reqToday.length, 'requirements'), color:'#8B5CF6'},
+        {label:'Pipeline (open quotations)', value: withTarget(pipelineActual, 'pipeline', n=>'&#8377;'+n.toLocaleString('en-IN')), color:'#8B5CF6'},
         {label:'Distance Travelled (km)', value: distanceToday.toFixed(1), color:'#3B82C4'},
         {label:'Customers Visited (7d)', value: visitedCustIdsWeek.size, color:'#0E9F76'},
         {label:'Active Leads', value: activeLeads.length, color:'#EB5A28'}
       ])}
 
       <div class="card card-pad" style="margin-bottom:16px;">
+        <div class="card-head" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
+          <h3 style="margin:0;font-size:14px;">&#128663; Today's Route</h3>
+          <div style="display:flex;gap:6px;">
+            <button id="planRouteBtn" class="btn btn-outline btn-sm" onclick="Field.Plan.planRoute()">&#128664; Plan My Route</button>
+            ${this.routeOrder && this.routeOrder.length>1 ? `<button class="btn btn-primary btn-sm" onclick="Field.Plan.openFullRoute()">Open Full Route</button>` : ''}
+          </div>
+        </div>
+        ${this.routeSummary ? `
+          <div style="display:flex;gap:28px;flex-wrap:wrap;">
+            <div><b style="font-size:15px;">${this.routeSummary.distanceKm.toFixed(1)} km</b><div class="cell-mute" style="font-size:11.5px;">Total distance</div></div>
+            <div><b style="font-size:15px;">${Math.floor(this.routeSummary.etaMin/60)}h ${this.routeSummary.etaMin%60}m</b><div class="cell-mute" style="font-size:11.5px;">Estimated travel</div></div>
+          </div>
+          <div class="cell-mute" style="font-size:11px;margin-top:8px;">Straight-line estimate ordered for the shortest overall trip${this.routeSummary.hasPosition?' from your current location':''}. Open the full route for live road directions and ETA.</div>
+        ` : `<div class="cell-mute" style="font-size:12.5px;">Plan an efficient visit order across today's planned visits that have a saved location.</div>`}
+      </div>
+
+      <div class="card card-pad" style="margin-bottom:16px;">
         <div class="card-head" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;"><h3 style="margin:0;font-size:14px;">&#128197; Today's Planned Visits</h3><button class="btn btn-outline btn-sm" onclick="Field.Visits.openPlanForm(null)">&#65291; Plan Visit</button></div>
         ${plannedToday.length ? plannedToday.map(v=>{
           const cust = v.customerId ? Store.data.customers.find(c=>c.id===v.customerId) : null;
+          const seqIdx = this.routeOrder ? this.routeOrder.indexOf(v.id) : -1;
+          const seq = seqIdx>=0 ? seqIdx+1 : null;
           return `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 4px;border-bottom:1px solid #F3F5F8;">
-            <div><b style="font-size:13px;">${Util.escapeHtml(cust?cust.name:v.leadName)}</b><div class="cell-mute" style="font-size:12px;">${Util.escapeHtml(v.visitType||'')} ${v.purpose?'— '+Util.escapeHtml(v.purpose):''}</div></div>
+            <div style="display:flex;align-items:center;gap:8px;">
+              ${seq?`<span class="badge badge-blue" style="min-width:20px;text-align:center;">${seq}</span>`:''}
+              <div><b style="font-size:13px;">${Util.escapeHtml(cust?cust.name:v.leadName)}</b><div class="cell-mute" style="font-size:12px;">${Util.escapeHtml(v.visitType||'')} ${v.purpose?'— '+Util.escapeHtml(v.purpose):''}</div></div>
+            </div>
             <div style="display:flex;gap:6px;">
               ${cust&&cust.lat&&cust.lng?`<a class="btn btn-outline btn-sm" style="text-decoration:none;" target="_blank" href="https://www.google.com/maps/dir/?api=1&destination=${cust.lat},${cust.lng}">Navigate</a>`:''}
               <button class="btn btn-primary btn-sm" onclick="Field.Visits.startPlanned('${v.id}')">Start</button>
@@ -9699,8 +10035,55 @@ Views.fieldhome = ()=>Field.Plan.render();
 /* ---------------------------------------------------------------------
    FIELD REPORTS
 =========================================================================== */
+/* ---------------------------------------------------------------------
+   STAFF TARGETS (manager-set daily quotas)
+   One row per staff member: visits/follow-ups/requirements/pipeline-value
+   targets for a normal working day. Admin-only to set; read by Field.Plan
+   to show actual-vs-target on "My Day" and by Field.Reports for the team
+   view. Plain blob-backed (Store.data.staffTargets), same pattern as the
+   rest of the Field module.
+=========================================================================== */
+Field.Targets = {
+  get(staff){ return Store.data.staffTargets.find(t=>t.staff===staff) || null; },
+  openForm(staff){
+    if(!Auth.isAdmin()){ UI.toast("You don't have permission to set targets"); return; }
+    const t = this.get(staff) || {staff, visits:'', followups:'', requirements:'', pipeline:''};
+    UI.openModal('Set Daily Target — '+staff, `
+      <div class="form-row">
+        <div class="field"><label>Visits / day</label><input type="number" id="tg_visits" value="${t.visits}"></div>
+        <div class="field"><label>Follow-ups / day</label><input type="number" id="tg_followups" value="${t.followups}"></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>Requirements / day</label><input type="number" id="tg_requirements" value="${t.requirements}"></div>
+        <div class="field"><label>Pipeline value (&#8377;) / day</label><input type="number" id="tg_pipeline" value="${t.pipeline}"></div>
+      </div>
+      <div class="hint">Leave a field blank to not show a target for that metric. These are daily targets shown on the staff member's My Day screen.</div>
+    `, `
+      <button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="Field.Targets.save('${staff}')">Save Target</button>
+    `);
+  },
+  async save(staff){
+    const rec = {
+      staff,
+      visits: document.getElementById('tg_visits').value,
+      followups: document.getElementById('tg_followups').value,
+      requirements: document.getElementById('tg_requirements').value,
+      pipeline: document.getElementById('tg_pipeline').value,
+    };
+    const i = Store.data.staffTargets.findIndex(t=>t.staff===staff);
+    if(i>=0) Store.data.staffTargets[i] = rec; else Store.data.staffTargets.push(rec);
+    await Store.save('staffTargets');
+    UI.closeModal(); UI.toast('Target saved');
+    Router.render(UI.currentView);
+  }
+};
+
 Field.Reports = {
+  reviewStaff: '',
+  reviewDate: null,
   render(){
+    const today = Util.todayISO();
     const visits = Store.data.visits, reqs = Store.data.requirements, travel = Store.data.travelLogs, followups = Store.data.followups, customers = Store.data.customers;
     const byReqStatus = {}; reqs.forEach(r=>{ const k=r.status||'New'; byReqStatus[k]=(byReqStatus[k]||0)+1; });
     const completed = visits.filter(v=>v.status==='Completed').length;
@@ -9737,15 +10120,81 @@ Field.Reports = {
       </div>
       <div class="card" style="margin-bottom:16px;">
         <div class="card-head"><h3>Staff Field Performance</h3></div>
-        <div class="table-wrap"><table><thead><tr><th>Staff</th><th>Visits</th><th>Completed</th><th>Leads (Field)</th><th>Requirements</th><th>Follow-ups</th><th>Distance (km)</th></tr></thead><tbody>
-          ${staffRows.length ? staffRows.map(s=>`<tr><td class="cell-main">${Util.escapeHtml(s.name)}</td><td>${s.visits}</td><td>${s.completed}</td><td>${s.leads}</td><td>${s.reqs}</td><td>${s.followups}</td><td class="mono">${s.distance.toFixed(1)}</td></tr>`).join('') : '<tr><td colspan="7" class="cell-mute">No field activity recorded yet</td></tr>'}
+        <div class="table-wrap"><table><thead><tr><th>Staff</th><th>Visits</th><th>Completed</th><th>Leads (Field)</th><th>Requirements</th><th>Follow-ups</th><th>Distance (km)</th><th>Daily Target</th>${Auth.isAdmin()?'<th></th>':''}</tr></thead><tbody>
+          ${staffRows.length ? staffRows.map(s=>{
+            const tgt = Field.Targets.get(s.name);
+            return `<tr><td class="cell-main">${Util.escapeHtml(s.name)}</td><td>${s.visits}</td><td>${s.completed}</td><td>${s.leads}</td><td>${s.reqs}</td><td>${s.followups}</td><td class="mono">${s.distance.toFixed(1)}</td>
+            <td class="cell-mute" style="font-size:11.5px;">${tgt ? [tgt.visits&&tgt.visits+' visits', tgt.followups&&tgt.followups+' follow-ups', tgt.requirements&&tgt.requirements+' reqs', tgt.pipeline&&'&#8377;'+Number(tgt.pipeline).toLocaleString('en-IN')+' pipeline'].filter(Boolean).join(', ')||'—' : 'Not set'}</td>
+            ${Auth.isAdmin()?`<td><button class="icon-btn" title="Set Target" onclick="Field.Targets.openForm('${Util.escapeHtml(s.name)}')">&#127919;</button></td>`:''}
+            </tr>`;
+          }).join('') : '<tr><td colspan="9" class="cell-mute">No field activity recorded yet</td></tr>'}
         </tbody></table></div>
       </div>
-      <div class="card">
+      <div class="card" style="margin-bottom:16px;">
         <div class="card-head"><h3>Requirements by Status</h3></div><div class="table-wrap"><table><thead><tr><th>Status</th><th>Count</th></tr></thead><tbody>
           ${Object.keys(byReqStatus).length ? Object.keys(byReqStatus).sort((a,b)=>byReqStatus[b]-byReqStatus[a]).map(k=>`<tr><td class="cell-main">${Util.escapeHtml(k)}</td><td>${byReqStatus[k]}</td></tr>`).join('') : '<tr><td colspan="2" class="cell-mute">No data</td></tr>'}
         </tbody></table></div>
       </div>
+
+      ${Auth.isAdmin() ? `
+      <div class="card card-pad">
+        <div class="card-head" style="margin-bottom:10px;"><h3 style="margin:0;">&#128506; Day Review — Actual Route vs Planned</h3></div>
+        <div class="form-row">
+          <div class="field"><label>Staff</label><select id="dr_staff" onchange="Field.Reports.renderDayReview()">
+            <option value="">Select staff…</option>
+            ${staffRows.map(s=>`<option value="${Util.escapeHtml(s.name)}" ${this.reviewStaff===s.name?'selected':''}>${Util.escapeHtml(s.name)}</option>`).join('')}
+          </select></div>
+          <div class="field"><label>Date</label><input type="date" id="dr_date" value="${this.reviewDate||today}" onchange="Field.Reports.renderDayReview()"></div>
+        </div>
+        <div id="dr_result"></div>
+      </div>` : ''}
+    `;
+    if(Auth.isAdmin()) setTimeout(()=>this.renderDayReview(), 0);
+  },
+  /* Picks apart what was PLANNED for a staff member on a given date versus
+     what actually happened - the day's start/end (Field.Day), each visit in
+     the order it really occurred with its outcome and distance-from-previous,
+     and the day's total distance (Field.Travel) - so a manager can see the
+     real route, not just a count. */
+  renderDayReview(){
+    const box = document.getElementById('dr_result');
+    if(!box) return;
+    const staffSel = document.getElementById('dr_staff');
+    const dateSel = document.getElementById('dr_date');
+    const staff = staffSel ? staffSel.value : this.reviewStaff;
+    const date = dateSel ? dateSel.value : (this.reviewDate || Util.todayISO());
+    this.reviewStaff = staff; this.reviewDate = date;
+    if(!staff){ box.innerHTML = `<div class="cell-mute" style="padding:12px 0;">Pick a staff member to review their day.</div>`; return; }
+
+    const day = Store.data.dayPlans.find(d=>d.staff===staff && d.date===date) || null;
+    const plannedVisits = Store.data.visits.filter(v=>v.staff===staff && v.plannedDate===date);
+    const actualVisits = Store.data.visits.filter(v=>v.staff===staff && (v.startAt||'').slice(0,10)===date)
+      .slice().sort((a,b)=>(a.startAt||'').localeCompare(b.startAt||''));
+    const dayTravel = Store.data.travelLogs.filter(t=>t.staff===staff && (t.startAt||'').slice(0,10)===date);
+    const distanceKm = dayTravel.reduce((s,t)=>s+(Number(t.distanceKm)||0), 0);
+
+    box.innerHTML = `
+      <div style="display:flex;gap:24px;flex-wrap:wrap;margin:10px 0;">
+        <div><b>${day && day.startAt ? Util.fmtDateTime(day.startAt) : '—'}</b><div class="cell-mute" style="font-size:11.5px;">Day Started</div></div>
+        <div><b>${day && day.endAt ? Util.fmtDateTime(day.endAt) : (day?'In progress':'—')}</b><div class="cell-mute" style="font-size:11.5px;">Day Ended</div></div>
+        <div><b>${plannedVisits.length}</b><div class="cell-mute" style="font-size:11.5px;">Planned Visits</div></div>
+        <div><b>${actualVisits.filter(v=>v.status==='Completed').length}</b><div class="cell-mute" style="font-size:11.5px;">Actually Completed</div></div>
+        <div><b>${distanceKm.toFixed(1)} km</b><div class="cell-mute" style="font-size:11.5px;">Distance Travelled</div></div>
+      </div>
+      <div class="table-wrap"><table><thead><tr><th>#</th><th>Time</th><th>Customer / Lead</th><th>Status</th><th>Outcome</th><th>Duration</th><th>Dist. from previous</th></tr></thead><tbody>
+        ${actualVisits.length ? actualVisits.map((v,i)=>{
+          const cust = v.customerId ? Store.data.customers.find(c=>c.id===v.customerId) : null;
+          return `<tr>
+            <td>${i+1}</td>
+            <td class="cell-mute">${v.startAt?Util.fmtDateTime(v.startAt):'—'}</td>
+            <td class="cell-main">${Util.escapeHtml(cust?cust.name:(v.leadName||'Unnamed lead'))}</td>
+            <td>${Field.badge(v.status, Field.VISIT_COLOR)}</td>
+            <td class="cell-mute">${Util.escapeHtml(v.outcome||'—')}</td>
+            <td class="cell-mute">${v.durationMin?v.durationMin+' min':'—'}</td>
+            <td class="cell-mute">${typeof v.distanceFromPrevKm==='number'?v.distanceFromPrevKm.toFixed(1)+' km':'—'}</td>
+          </tr>`;
+        }).join('') : `<tr><td colspan="7" class="cell-mute">No visits recorded for ${Util.escapeHtml(staff)} on ${Util.fmtDate(date)}.</td></tr>`}
+      </tbody></table></div>
     `;
   },
   export(kind){ Reports.exportView(kind==='travel'?'travel':kind); }
@@ -10906,7 +11355,7 @@ const Backup = {
       attendance: Store.data.attendance, leaveRequests: Store.data.leaveRequests,
       bidDocs: Store.data.bidDocs,
       visits: Store.data.visits, requirements: Store.data.requirements, travelLogs: Store.data.travelLogs,
-      lsgOfficeGeo: Store.data.lsgOfficeGeo
+      lsgOfficeGeo: Store.data.lsgOfficeGeo, dayPlans: Store.data.dayPlans, staffTargets: Store.data.staffTargets
     };
   },
   downloadJSON(){
@@ -10938,7 +11387,7 @@ const Backup = {
     try{
       const text = await file.text();
       const data = JSON.parse(text);
-      ['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo'].forEach(k=>{
+      ['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo','dayPlans','staffTargets'].forEach(k=>{
         if(data[k]!==undefined) Store.data[k] = data[k];
       });
       // oppProjects lives in its own indexed table now, not the
@@ -10946,7 +11395,7 @@ const Backup = {
       // the dedicated full-replace path so opp_projects_rows (what
       // imports actually merge against) gets restored too, not just
       // the legacy blob.
-      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo'].map(k=>Store.save(k)));
+      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo','dayPlans','staffTargets'].map(k=>Store.save(k)));
       if(data['oppProjects']!==undefined) await Store.replaceAllOppProjects(Store.data.oppProjects);
       await Activity.log('Data restored', 'Restored from backup file '+file.name);
       UI.toast('Data restored successfully');
@@ -12323,6 +12772,43 @@ if('serviceWorker' in navigator){
     navigator.serviceWorker.register('./sw.js').catch(err=>console.warn('Service worker not registered:', err));
   });
 }
+/* "Install App" button support (used on My Day - see Field.Plan.render).
+   Chrome/Edge/Android fire beforeinstallprompt, which we capture and
+   replay on tap; iOS Safari never fires it (no native prompt API there),
+   so canInstall() still reports true on iOS and promptInstall() shows the
+   manual "Add to Home Screen" steps instead. */
+const PWA = {
+  deferredPrompt: null,
+  installed: false,
+  init(){
+    if(window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone) this.installed = true;
+    window.addEventListener('beforeinstallprompt', e=>{
+      e.preventDefault();
+      this.deferredPrompt = e;
+      if(UI.currentView==='fieldhome') Field.Plan.render();
+    });
+    window.addEventListener('appinstalled', ()=>{
+      this.installed = true; this.deferredPrompt = null;
+      UI.toast('App installed — find it on your home screen');
+      if(UI.currentView==='fieldhome') Field.Plan.render();
+    });
+  },
+  isIOS(){ return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream; },
+  canInstall(){ return !this.installed && (!!this.deferredPrompt || this.isIOS()); },
+  async promptInstall(){
+    if(this.deferredPrompt){
+      this.deferredPrompt.prompt();
+      await this.deferredPrompt.userChoice;
+      this.deferredPrompt = null;
+      if(UI.currentView==='fieldhome') Field.Plan.render();
+    } else if(this.isIOS()){
+      UI.toast('On iPhone/iPad: tap the Share icon in Safari, then "Add to Home Screen".');
+    } else {
+      UI.toast("Your browser doesn't support one-tap install — use the browser menu to Add to Home Screen.");
+    }
+  }
+};
+PWA.init();
 </script>
 </body>
 </html>
