@@ -1264,22 +1264,75 @@ const Store = {
     }catch(e){ console.error('reloadOneCustomer failed', e); return null; }
   },
 
-  async loadOppProjects(){
+  /* Project Opportunity data regularly reaches ~38k rows (~44MB of JSON
+     once aggregated). The old single-shot opp_get_all() RPC made Postgres
+     build that whole blob (several seconds) and shipped it as ONE
+     response — on a field staff member's mobile connection, any blip
+     during that one long response failed the entire load with nothing
+     to show for it, which is exactly the "takes more time and failing"
+     symptom reported against Reload from Database. This fetches in small
+     pages instead (opp_get_page, keyset-paginated off the table's
+     primary key index — see migration opp_get_page_for_chunked_client_fetch),
+     retrying a single flaky page a few times before giving up, so one
+     dropped chunk no longer throws away everything already fetched.
+     onProgress(rowsSoFar, total), if given, is called after every page
+     with the actual accumulated array so far (not just a count) so a
+     caller can assign it straight to Store.data.oppProjects for
+     progressive rendering — total is best-effort (from opp_get_count())
+     and is null if that quick lookup itself fails, which never blocks
+     the real paging. */
+  async loadOppProjects(onProgress){
+    const PAGE_SIZE = 4000;
+    let total = null;
+    try{ const { data } = await sb.rpc('opp_get_count'); if(typeof data === 'number') total = data; }catch(e){ /* best-effort only */ }
+    let afterKey = null;
+    const all = [];
     try{
-      const { data, error } = await sb.rpc('opp_get_all');
-      if(error) throw error;
+      while(true){
+        let page = null, lastErr = null;
+        for(let attempt=0; attempt<3; attempt++){
+          try{
+            const { data, error } = await sb.rpc('opp_get_page', { p_after_key: afterKey, p_limit: PAGE_SIZE });
+            if(error) throw error;
+            page = data || [];
+            lastErr = null;
+            break;
+          }catch(e){ lastErr = e; if(attempt<2) await new Promise(r=>setTimeout(r, 600*(attempt+1))); }
+        }
+        if(lastErr) throw lastErr;
+        if(!page.length) break;
+        for(const row of page) all.push(row.data);
+        afterKey = page[page.length-1].key;
+        if(onProgress) onProgress(all, total);
+        if(page.length < PAGE_SIZE) break;
+      }
       this.loadFailed['jays_oppprojects'] = false;
-      return data || [];
-    }catch(e){ console.error('opp load failed', e); this.loadFailed['jays_oppprojects'] = true; return []; }
+      return all;
+    }catch(e){
+      console.error('opp load failed', e);
+      this.loadFailed['jays_oppprojects'] = true;
+      // Keep whatever pages DID load rather than discarding real data on
+      // a late failure — loadFailed=true still surfaces the warning/retry
+      // UI, this just avoids losing e.g. 30,000 good rows because the
+      // 31st page timed out three times in a row.
+      return all;
+    }
   },
   /* Loads the (potentially huge) Project Opportunities list after boot,
      without the rest of sign-in waiting on it - see the comment above
      loadAll(). Only the Dashboard's "needs action" stat and the Project
      Opportunity Finder screen itself read Store.data.oppProjects, so only
      those two re-render once it's actually in; every other screen is
-     already fully interactive long before this resolves. */
+     already fully interactive long before this resolves. Also re-renders
+     after every page (not just at the end) so a staff member who opens
+     Project Opportunity Finder right after logging in sees records
+     appear progressively instead of staring at an empty list until the
+     entire ~38k-row fetch finishes. */
   async loadOppProjectsBackground(){
-    const rows = await this.loadOppProjects();
+    const rows = await this.loadOppProjects((soFar)=>{
+      this.data.oppProjects = soFar;
+      if(UI.currentView==='dashboard' || UI.currentView==='oppfinder') Router.render(UI.currentView);
+    });
     this.data.oppProjects = rows;
     if(UI.currentView==='dashboard' || UI.currentView==='oppfinder') Router.render(UI.currentView);
   },
@@ -10724,9 +10777,19 @@ const OppFinder = {
      in-memory state. */
   async reloadFromDatabase(){
     UI.toast('Reloading from database\u2026');
-    const fresh = await Store.loadOppProjects();
+    // Fetched in pages now (see Store.loadOppProjects) instead of one
+    // giant ~44MB response, so a flaky mobile connection no longer fails
+    // the whole reload \u2014 each page is retried on its own, and progress
+    // is shown as it comes in rather than one long silent wait.
+    const fresh = await Store.loadOppProjects((soFar, total)=>{
+      UI.toast('Reloading\u2026 '+soFar.length+(total?' / '+total:'')+' record(s)');
+    });
     if(Store.loadFailed['jays_oppprojects']){
-      UI.toast('Could not reach the database \u2014 check your connection and try again.');
+      Store.data.oppProjects = fresh; // keep whatever did load rather than discarding it
+      UI.toast(fresh.length
+        ? 'Connection dropped partway \u2014 showing '+fresh.length+' record(s) loaded so far. Tap Reload to try the full set again.'
+        : 'Could not reach the database \u2014 check your connection and try again.');
+      this.render();
       return;
     }
     Store.data.oppProjects = fresh;
