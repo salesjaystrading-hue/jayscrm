@@ -1074,6 +1074,38 @@ const Store = {
     await this.saveKey('jays_ratetemplates', this.data.rateTemplates);
     console.info('Migrated ' + fresh.length + ' WhatsApp rate template(s) into the Rate Template Library.');
   },
+  /* One-time, idempotent patch of the MACHINE keyword category (and its
+     related WASTE/PURCHASE additions) into an org's already-saved
+     Store.data.oppKeywordGroups - see the comment above
+     OPP_MACHINE_KEYWORD_MIGRATION for why this is needed (the default
+     seed only ever applies to a brand-new, still-empty collection).
+     Safe to run every load: a new group is skipped once it's already
+     present (matched by tier+category), and a word is skipped once it's
+     already in that group's list, so re-running adds nothing a second
+     time even if a staff member has since edited these groups by hand. */
+  async migrateOppMachineKeywords(){
+    if(this.loadFailed['jays_oppkeywordgroups']) return;
+    const groups = this.data.oppKeywordGroups;
+    if(!groups || !groups.length) return; // empty collection - seedKeywordGroups() will seed OPP_DEFAULT_KEYWORD_GROUPS (which already includes MACHINE) instead
+    let changed = false;
+    OPP_MACHINE_KEYWORD_MIGRATION.newGroups.forEach(ng=>{
+      if(!groups.some(g=>g.tier===ng.tier && g.category===ng.category)){
+        groups.push(JSON.parse(JSON.stringify(ng)));
+        changed = true;
+      }
+    });
+    OPP_MACHINE_KEYWORD_MIGRATION.extendGroups.forEach(ext=>{
+      const g = groups.find(x=>x.tier===ext.tier && x.category===ext.category);
+      if(!g) return; // that base group isn't present in this org's data - don't invent one under a guessed weight
+      const existingNorm = new Set((g.words||[]).map(w=>oppNorm(w)));
+      const toAdd = ext.addWords.filter(w=>!existingNorm.has(oppNorm(w)));
+      if(toAdd.length){ g.words = (g.words||[]).concat(toAdd); changed = true; }
+    });
+    if(changed){
+      await this.saveKey('jays_oppkeywordgroups', groups);
+      console.info('Added the Machine/MCF-MRF keyword category to Project Opportunity matching.');
+    }
+  },
   defaults(){
     return {
       companyName: 'Jays Trading and Business Solution',
@@ -1475,6 +1507,7 @@ const Store = {
     this.data.staffTargets = staffTargets;
 
     await this.migrateWaTemplates();
+    await this.migrateOppMachineKeywords();
 
     if(settings === null && !this.loadFailed['jays_settings']){ this.data.settings = this.defaults(); await this.saveKey('jays_settings', this.data.settings); }
     else{ this.data.settings = settings || this.defaults(); }
@@ -10366,24 +10399,70 @@ const OPP_DEFAULT_KEYWORD_GROUPS = [
   {tier:'Product Synonym', weight:18, category:'FURNITURE', words:['office furniture','institutional furniture','office table','office chair','executive chair','conference table','reception desk','display rack','computer table']},
   {tier:'Product Synonym', weight:18, category:'ELECTRICAL', words:['led light','street light','solar light','solar street light','solar panel','high mast light','inverter']},
   {tier:'Product Synonym', weight:18, category:'DISASTER', words:['life jacket','life jackets','rescue equipment','rescue kit','flood rescue','first aid kit','emergency light']},
-  {tier:'Strong Category', weight:15, category:'WASTE', words:['waste management','solid waste management','municipal solid waste','msw','waste disposal','waste collection','waste transportation','waste processing','waste treatment','waste handling','waste segregation','waste separation','waste reduction','waste recycling','recycling','resource recovery','material recovery','mrf','material recovery facility','refuse management']},
+  {tier:'Strong Category', weight:15, category:'WASTE', words:['waste management','solid waste management','municipal solid waste','msw','waste disposal','waste collection','waste transportation','waste processing','waste treatment','waste handling','waste segregation','waste separation','waste reduction','waste recycling','recycling','resource recovery','material recovery','mrf','material recovery facility','refuse management','dry waste','solid waste','plastic waste','paper waste','scrap']},
   {tier:'Strong Category', weight:15, category:'HYGIENE', words:['sanitation','hygiene','public health','sanitation worker','sanitation workers']},
   {tier:'Strong Category', weight:15, category:'DISASTER', words:['disaster management','emergency response','disaster response']},
-  {tier:'Procurement Intent', weight:12, category:'PURCHASE', words:['purchase','purchasing','procurement','procure','procurement of','supply','supplying','supply of','purchase of','purchase and supply','supply and installation','supply and commissioning','supply installation commissioning','sitc','supply and delivery','providing','provision','acquisition','tender','e-tender','tendering','quotation','rate quotation','purchase order','supply order','work order','empanelment','required equipment','required items','equipment required','materials required']},
+  {tier:'Procurement Intent', weight:12, category:'PURCHASE', words:['purchase','purchasing','procurement','procure','procurement of','supply','supplying','supply of','purchase of','purchase and supply','supply and installation','supply and commissioning','supply installation commissioning','sitc','supply and delivery','providing','provision','acquisition','tender','e-tender','tendering','quotation','rate quotation','purchase order','supply order','work order','empanelment','required equipment','required items','equipment required','materials required','manufacturer','supplier','price','specification','specifications','capacity','installation','gem portal','government e marketplace','india gem']},
   {tier:'Sector', weight:10, category:'HYGIENE', words:['social welfare','sanitation']},
   {tier:'Sector', weight:10, category:'WASTE', words:['solid waste management']},
   {tier:'Sub-sector', weight:10, category:'WASTE', words:['collection and transport','processing','disposal','segregation']},
   {tier:'Supporting Word', weight:10, category:'EQUIPMENT', words:['equipment','equipments','machinery','machine','machines','tools','instruments','devices','apparatus','accessories','materials','supplies','infrastructure equipment','technical equipment','electrical equipment','mechanical equipment']},
   {tier:'Supporting Word', weight:10, category:'IT', words:['networking','network equipment','switch','router']},
   {tier:'Supporting Word', weight:10, category:'DISASTER', words:['emergency kit','emergency supplies','emergency equipment','flood equipment','flood protection','relief equipment']},
-  {tier:'Malayalam', weight:15, category:'WASTE', words:['\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d02','\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d19\u0d4d\u0d19\u0d7e','\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d38\u0d02\u0d38\u0d4d\u0d15\u0d30\u0d23\u0d02','\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f \u0d38\u0d02\u0d38\u0d4d\u0d15\u0d30\u0d23\u0d02','\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f \u0d36\u0d47\u0d16\u0d30\u0d23\u0d02','\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f \u0d35\u0d47\u0d7c\u0d24\u0d3f\u0d30\u0d3f\u0d15\u0d4d\u0d15\u0d7d','\u0d2a\u0d41\u0d28\u0d30\u0d41\u0d2a\u0d2f\u0d4b\u0d17\u0d02','\u0d2a\u0d41\u0d28\u0d03\u0d1a\u0d02\u0d15\u0d4d\u0d30\u0d2e\u0d23\u0d02','\u0d16\u0d30\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d02','\u0d1c\u0d48\u0d35\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d02','\u0d05\u0d1c\u0d48\u0d35\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d02']},
+  {tier:'Malayalam', weight:15, category:'WASTE', words:['\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d02','\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d19\u0d4d\u0d19\u0d7e','\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d38\u0d02\u0d38\u0d4d\u0d15\u0d30\u0d23\u0d02','\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f \u0d38\u0d02\u0d38\u0d4d\u0d15\u0d30\u0d23\u0d02','\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f \u0d36\u0d47\u0d16\u0d30\u0d23\u0d02','\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f \u0d35\u0d47\u0d7c\u0d24\u0d3f\u0d30\u0d3f\u0d15\u0d4d\u0d15\u0d7d','\u0d2a\u0d41\u0d28\u0d30\u0d41\u0d2a\u0d2f\u0d4b\u0d17\u0d02','\u0d2a\u0d41\u0d28\u0d03\u0d1a\u0d02\u0d15\u0d4d\u0d30\u0d2e\u0d23\u0d02','\u0d16\u0d30\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d02','\u0d1c\u0d48\u0d35\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d02','\u0d05\u0d1c\u0d48\u0d35\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d02','\u0d05\u0d1c\u0d48\u0d35 \u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d02','\u0d2a\u0d4d\u0d32\u0d3e\u0d38\u0d4d\u0d31\u0d4d\u0d31\u0d3f\u0d15\u0d4d \u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d02','\u0d2a\u0d47\u0d2a\u0d4d\u0d2a\u0d7c \u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d02','\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f\u0d02 \u0d24\u0d30\u0d02\u0d24\u0d3f\u0d30\u0d3f\u0d15\u0d4d\u0d15\u0d7d','\u0d31\u0d40\u0d38\u0d48\u0d15\u0d4d\u0d32\u0d3f\u0d02\u0d17\u0d4d']},
   {tier:'Malayalam', weight:15, category:'HYGIENE', words:['\u0d39\u0d30\u0d3f\u0d24 \u0d15\u0d7c\u0d2e\u0d4d\u0d2e \u0d38\u0d47\u0d28','\u0d39\u0d30\u0d3f\u0d24\u0d15\u0d7c\u0d2e\u0d4d\u0d2e\u0d38\u0d47\u0d28','\u0d36\u0d41\u0d1a\u0d3f\u0d24\u0d4d\u0d35\u0d02','\u0d36\u0d41\u0d1a\u0d40\u0d15\u0d30\u0d23\u0d02','\u0d38\u0d02\u0d30\u0d15\u0d4d\u0d37\u0d23 \u0d09\u0d2a\u0d15\u0d30\u0d23\u0d19\u0d4d\u0d19\u0d7e','\u0d38\u0d41\u0d30\u0d15\u0d4d\u0d37\u0d3e \u0d09\u0d2a\u0d15\u0d30\u0d23\u0d19\u0d4d\u0d19\u0d7e']},
-  {tier:'Malayalam', weight:15, category:'PURCHASE', words:['\u0d35\u0d3e\u0d19\u0d4d\u0d19\u0d7d','\u0d35\u0d3f\u0d24\u0d30\u0d23\u0d02']}
+  {tier:'Malayalam', weight:15, category:'PURCHASE', words:['\u0d35\u0d3e\u0d19\u0d4d\u0d19\u0d7d','\u0d35\u0d3f\u0d24\u0d30\u0d23\u0d02','\u0d28\u0d3f\u0d7c\u0d2e\u0d4d\u0d2e\u0d3e\u0d24\u0d3e\u0d35\u0d4d','\u0d35\u0d3f\u0d24\u0d30\u0d23\u0d15\u0d4d\u0d15\u0d3e\u0d30\u0d7b','\u0d35\u0d3f\u0d32','\u0d1f\u0d46\u0d7b\u0d21\u0d7c','\u0d36\u0d47\u0d37\u0d3f','\u0d38\u0d4d\u0d25\u0d3e\u0d2a\u0d3f\u0d15\u0d4d\u0d15\u0d7d']},
+  /* -------------------------------------------------------------------
+     MACHINE \u2014 waste-processing machinery (balers, shredders, crushers,
+     compactors, MCF/MRF equipment). Added on request, covering JAYS's
+     own machinery supply/manufacturing line as a category distinct from
+     the generic small-item "Equipment / Supplies" (EQUIPMENT) bucket.
+     A bare "GeM" was deliberately NOT added as a keyword even though it
+     was requested \u2014 oppNorm/matching is plain substring search, and
+     "gem" is a substring of "management", which appears in nearly every
+     project row ("Solid Waste Management" etc) - that would have tagged
+     almost every single project as a GeM/machine match. "gem portal",
+     "government e marketplace" and "india gem" cover the same intent
+     (added to the Procurement Intent/PURCHASE group above) without that
+     false-positive flood. See also the dry/solid/plastic/paper waste
+     and manufacturer/supplier/price/capacity/installation additions
+     folded into the existing WASTE and PURCHASE groups above, rather
+     than duplicated here, since they describe the waste or the
+     transaction, not the machine itself. */
+  {tier:'Exact Machine Type', weight:24, category:'MACHINE', words:['baler','balers','baling machine','baling press','bale press','bail press','bailing','hydraulic press','hydraulic baler','shredder','shredding','shred','crusher','crushing','grinder','grinding','granulator','pulverizer','pulveriser','compactor','compacting','compression','trommel','magnetic separator','plastic crusher','bottle crusher','can crusher','glass crusher','paper shredder','plastic shredder','waste shredder','waste compactor','plastic compactor','plastic baler','paper baler','pet bottle','pet baling','mobile crusher','mobile shredder','strapping machine','weighbridge']},
+  {tier:'MCF/MRF Specific', weight:25, category:'MACHINE', words:['mcf machine','mcf machinery','mcf equipment','mcf baling machine','mcf shredder','mcf compactor','mcf conveyor','mcf waste processing','mrf machinery','mrf equipment','material recovery facility equipment','material collection facility','waste baling press','waste baler machine','hydraulic baling press','plastic baling machine','paper baling machine','plastic waste shredder','industrial shredder machine','waste crusher machine','plastic granulator machine','waste compactor machine','waste sorting machine','waste conveyor belt','solid waste management machinery','dry waste processing machine','mcf machinery manufacturer','mcf machinery supplier india','mcf machinery gem','waste processing machine','recycling plant','processing plant','refuse derived fuel','rdf','resource recovery facility','mcf','mrf']},
+  {tier:'Machine Component / Qualifier', weight:12, category:'MACHINE', words:['machine','machinery','industrial','automatic','manual','conveyor','conveyer','belt','belt conveyor','trolley','hopper','feeder','feeding','screen','screening','separator','weighing scale','weight machine','platform scale','sorting table','sorting','segregation','material handling','material recovery','waste handling','waste processing']},
+  {tier:'Malayalam Machine', weight:20, category:'MACHINE', words:['\u0d2e\u0d46\u0d37\u0d40\u0d7b','\u0d2e\u0d46\u0d37\u0d3f\u0d28\u0d31\u0d3f','\u0d2f\u0d28\u0d4d\u0d24\u0d4d\u0d30\u0d02','\u0d09\u0d2a\u0d15\u0d30\u0d23\u0d02','\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f \u0d38\u0d02\u0d38\u0d4d\u0d15\u0d30\u0d23 \u0d2f\u0d28\u0d4d\u0d24\u0d4d\u0d30\u0d02','\u0d0e\u0d02.\u0d38\u0d3f.\u0d0e\u0d2b\u0d4d.','\u0d0e\u0d02.\u0d06\u0d7c.\u0d0e\u0d2b\u0d4d.','\u0d37\u0d4d\u0d30\u0d46\u0d21\u0d7c','\u0d37\u0d4d\u0d30\u0d46\u0d21\u0d3f\u0d02\u0d17\u0d4d','\u0d15\u0d4d\u0d30\u0d37\u0d7c','\u0d15\u0d4d\u0d30\u0d37\u0d3f\u0d02\u0d17\u0d4d','\u0d17\u0d4d\u0d30\u0d48\u0d7b\u0d21\u0d7c','\u0d17\u0d4d\u0d30\u0d3e\u0d28\u0d41\u0d32\u0d47\u0d31\u0d4d\u0d31\u0d7c','\u0d2a\u0d7e\u0d35\u0d31\u0d48\u0d38\u0d7c','\u0d2c\u0d46\u0d2f\u0d4d\u0d32\u0d3f\u0d02\u0d17\u0d4d','\u0d2c\u0d46\u0d2f\u0d4d\u0d32\u0d7c','\u0d2c\u0d46\u0d2f\u0d4d\u0d32\u0d3f\u0d02\u0d17\u0d4d \u0d2a\u0d4d\u0d30\u0d38\u0d4d\u0d38\u0d4d','\u0d39\u0d48\u0d21\u0d4d\u0d30\u0d4b\u0d33\u0d3f\u0d15\u0d4d \u0d2a\u0d4d\u0d30\u0d38\u0d4d\u0d38\u0d4d','\u0d15\u0d02\u0d2a\u0d3e\u0d15\u0d4d\u0d1f\u0d7c','\u0d15\u0d7a\u0d35\u0d46\u0d2f\u0d7c','\u0d15\u0d7a\u0d35\u0d46\u0d2f\u0d7c \u0d2c\u0d46\u0d7d\u0d31\u0d4d\u0d31\u0d4d','\u0d1f\u0d4d\u0d30\u0d4b\u0d33\u0d3f','\u0d2b\u0d40\u0d21\u0d7c','\u0d39\u0d4b\u0d2a\u0d4d\u0d2a\u0d7c','\u0d38\u0d4d\u0d15\u0d4d\u0d30\u0d40\u0d28\u0d3f\u0d02\u0d17\u0d4d','\u0d38\u0d46\u0d2a\u0d4d\u0d2a\u0d31\u0d47\u0d31\u0d4d\u0d31\u0d7c','\u0d2a\u0d4d\u0d32\u0d3e\u0d38\u0d4d\u0d31\u0d4d\u0d31\u0d3f\u0d15\u0d4d \u0d15\u0d4d\u0d30\u0d37\u0d7c','\u0d2a\u0d4d\u0d32\u0d3e\u0d38\u0d4d\u0d31\u0d4d\u0d31\u0d3f\u0d15\u0d4d \u0d37\u0d4d\u0d30\u0d46\u0d21\u0d7c','\u0d2a\u0d47\u0d2a\u0d4d\u0d2a\u0d7c \u0d37\u0d4d\u0d30\u0d46\u0d21\u0d7c','\u0d2c\u0d4b\u0d1f\u0d4d\u0d1f\u0d3f\u0d7d \u0d15\u0d4d\u0d30\u0d37\u0d7c','\u0d24\u0d42\u0d15\u0d4d\u0d15\u0d2f\u0d28\u0d4d\u0d24\u0d4d\u0d30\u0d02','\u0d2a\u0d4d\u0d32\u0d3e\u0d31\u0d4d\u0d31\u0d4d\u0d2b\u0d4b\u0d02 \u0d38\u0d4d\u0d15\u0d46\u0d2f\u0d3f\u0d7d','\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f \u0d38\u0d02\u0d38\u0d4d\u0d15\u0d30\u0d23 \u0d09\u0d2a\u0d15\u0d30\u0d23\u0d19\u0d4d\u0d19\u0d7e','\u0d35\u0d4d\u0d2f\u0d3e\u0d35\u0d38\u0d3e\u0d2f\u0d3f\u0d15 \u0d2f\u0d28\u0d4d\u0d24\u0d4d\u0d30\u0d19\u0d4d\u0d19\u0d7e']}
 ];
+/* One-time, idempotent merge of the MACHINE category + its related
+   additions into an org's ALREADY-SAVED Store.data.oppKeywordGroups.
+   OPP_DEFAULT_KEYWORD_GROUPS above is only a SEED - it's only copied in
+   for a brand-new org whose collection is still empty (seedKeywordGroups),
+   so an org that was already using Project Opportunity before this
+   update needs its live, saved groups patched in place or it would never
+   see the new category at all. Matched by {tier, category} (not by
+   content), so Store.migrateOppMachineKeywords() below can find "the
+   Procurement Intent/PURCHASE group" and "the Malayalam/WASTE group" even
+   if a staff member already added their own extra words to them. */
+const OPP_MACHINE_KEYWORD_MIGRATION = {
+  newGroups: [
+    {tier:'Exact Machine Type', weight:24, category:'MACHINE', words:['baler','balers','baling machine','baling press','bale press','bail press','bailing','hydraulic press','hydraulic baler','shredder','shredding','shred','crusher','crushing','grinder','grinding','granulator','pulverizer','pulveriser','compactor','compacting','compression','trommel','magnetic separator','plastic crusher','bottle crusher','can crusher','glass crusher','paper shredder','plastic shredder','waste shredder','waste compactor','plastic compactor','plastic baler','paper baler','pet bottle','pet baling','mobile crusher','mobile shredder','strapping machine','weighbridge']},
+    {tier:'MCF/MRF Specific', weight:25, category:'MACHINE', words:['mcf machine','mcf machinery','mcf equipment','mcf baling machine','mcf shredder','mcf compactor','mcf conveyor','mcf waste processing','mrf machinery','mrf equipment','material recovery facility equipment','material collection facility','waste baling press','waste baler machine','hydraulic baling press','plastic baling machine','paper baling machine','plastic waste shredder','industrial shredder machine','waste crusher machine','plastic granulator machine','waste compactor machine','waste sorting machine','waste conveyor belt','solid waste management machinery','dry waste processing machine','mcf machinery manufacturer','mcf machinery supplier india','mcf machinery gem','waste processing machine','recycling plant','processing plant','refuse derived fuel','rdf','resource recovery facility','mcf','mrf']},
+    {tier:'Machine Component / Qualifier', weight:12, category:'MACHINE', words:['machine','machinery','industrial','automatic','manual','conveyor','conveyer','belt','belt conveyor','trolley','hopper','feeder','feeding','screen','screening','separator','weighing scale','weight machine','platform scale','sorting table','sorting','segregation','material handling','material recovery','waste handling','waste processing']},
+    {tier:'Malayalam Machine', weight:20, category:'MACHINE', words:['മെഷീൻ','മെഷിനറി','യന്ത്രം','ഉപകരണം','മാലിന്യ സംസ്കരണ യന്ത്രം','എം.സി.എഫ്.','എം.ആർ.എഫ്.','ഷ്രെഡർ','ഷ്രെഡിംഗ്','ക്രഷർ','ക്രഷിംഗ്','ഗ്രൈൻഡർ','ഗ്രാനുലേറ്റർ','പൾവറൈസർ','ബെയ്ലിംഗ്','ബെയ്ലർ','ബെയ്ലിംഗ് പ്രസ്സ്','ഹൈഡ്രോളിക് പ്രസ്സ്','കംപാക്ടർ','കൺവെയർ','കൺവെയർ ബെൽറ്റ്','ട്രോളി','ഫീഡർ','ഹോപ്പർ','സ്ക്രീനിംഗ്','സെപ്പറേറ്റർ','പ്ലാസ്റ്റിക് ക്രഷർ','പ്ലാസ്റ്റിക് ഷ്രെഡർ','പേപ്പർ ഷ്രെഡർ','ബോട്ടിൽ ക്രഷർ','തൂക്കയന്ത്രം','പ്ലാറ്റ്ഫോം സ്കെയിൽ','മാലിന്യ സംസ്കരണ ഉപകരണങ്ങൾ','വ്യാവസായിക യന്ത്രങ്ങൾ']}
+  ],
+  extendGroups: [
+    {tier:'Strong Category', category:'WASTE', addWords:['dry waste','solid waste','plastic waste','paper waste','scrap']},
+    {tier:'Procurement Intent', category:'PURCHASE', addWords:['manufacturer','supplier','price','specification','specifications','capacity','installation','gem portal','government e marketplace','india gem']},
+    {tier:'Malayalam', category:'WASTE', addWords:['അജൈവ മാലിന്യം','പ്ലാസ്റ്റിക് മാലിന്യം','പേപ്പർ മാലിന്യം','മാലിന്യം തരംതിരിക്കൽ','റീസൈക്ലിംഗ്']},
+    {tier:'Malayalam', category:'PURCHASE', addWords:['നിർമ്മാതാവ്','വിതരണക്കാരൻ','വില','ടെൻഡർ','ശേഷി','സ്ഥാപിക്കൽ']}
+  ]
+};
 const OPP_CATEGORY_NAMES = {
   WASTE:'Waste Management', WATER:'Water Systems', FITNESS:'Open Gym / Fitness', ANGANWADI:'Anganwadi / Social Welfare',
   IT:'IT Equipment', FURNITURE:'Furniture', ELECTRICAL:'Electrical / Solar', DISASTER:'Disaster Management',
-  HYGIENE:'Sanitation / Hygiene', EQUIPMENT:'Equipment / Supplies', PURCHASE:'Purchase', OTHER:'Unmatched'
+  HYGIENE:'Sanitation / Hygiene', EQUIPMENT:'Equipment / Supplies', MACHINE:'Machine / MCF-MRF Equipment',
+  PURCHASE:'Purchase', OTHER:'Unmatched'
 };
 const OPP_STATUSES = ['New','Researching','Contacted','Interested','Quotation','Submitted','Won','Lost'];
 /* Canonical schema, taken directly from the official Excel template -
