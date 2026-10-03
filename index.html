@@ -10984,7 +10984,14 @@ const OppFinder = {
     const cols = ['score','type',...OPP_TEMPLATE_COLUMNS,'hits'];
     const out = [cols.join(',')];
     list.forEach(r=>out.push(cols.map(c=>'"'+String(c==='hits'?r.hits.join('; '):(r[c]==null?'':r[c])).replace(/"/g,'""')+'"').join(',')));
-    const blob = new Blob([out.join('\n')], {type:'text/csv;charset=utf-8'});
+    // A UTF-8 BOM is required here, not optional: without it, Excel (what
+    // most people double-click a .csv into, especially on Windows) guesses
+    // the file's encoding from the system's local codepage instead of
+    // UTF-8, and Malayalam project/local-body names come out as mojibake
+    // even though the file itself is valid UTF-8 the whole way through.
+    // The BOM makes Excel detect UTF-8 correctly; plain text editors and
+    // other CSV readers ignore it harmlessly.
+    const blob = new Blob(['﻿'+out.join('\n')], {type:'text/csv;charset=utf-8'});
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = 'JAYS_Project_Opportunities.csv'; a.click();
     setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
