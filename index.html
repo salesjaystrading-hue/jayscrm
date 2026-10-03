@@ -1271,10 +1271,16 @@ const Store = {
      during that one long response failed the entire load with nothing
      to show for it, which is exactly the "takes more time and failing"
      symptom reported against Reload from Database. This fetches in small
-     pages instead (opp_get_page, keyset-paginated off the table's
-     primary key index — see migration opp_get_page_for_chunked_client_fetch),
-     retrying a single flaky page a few times before giving up, so one
-     dropped chunk no longer throws away everything already fetched.
+     pages instead (opp_get_page_v2, keyset-paginated off the table's
+     primary key index — see migrations opp_get_page_for_chunked_client_fetch
+     and opp_get_page_v2_scalar_jsonb). Each page is returned as a single
+     jsonb VALUE (one row containing the array), not as a row-set — a
+     row-set response is capped by PostgREST's db-max-rows (1000 on this
+     project) regardless of p_limit, which is exactly why an earlier
+     version of this fix silently came back with only 1000 records; a
+     scalar jsonb return has no such cap. Also retries a single flaky
+     page a few times before giving up, so one dropped chunk no longer
+     throws away everything already fetched.
      onProgress(rowsSoFar, total), if given, is called after every page
      with the actual accumulated array so far (not just a count) so a
      caller can assign it straight to Store.data.oppProjects for
@@ -1292,7 +1298,7 @@ const Store = {
         let page = null, lastErr = null;
         for(let attempt=0; attempt<3; attempt++){
           try{
-            const { data, error } = await sb.rpc('opp_get_page', { p_after_key: afterKey, p_limit: PAGE_SIZE });
+            const { data, error } = await sb.rpc('opp_get_page_v2', { p_after_key: afterKey, p_limit: PAGE_SIZE });
             if(error) throw error;
             page = data || [];
             lastErr = null;
