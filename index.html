@@ -2355,7 +2355,36 @@ document.getElementById('loginUser').addEventListener('keydown', e=>{ if(e.key==
    ROUTER
 ===================================================================== */
 const Views = {};
-const Router = { render(view){ const fn = Views[view]; if(fn) fn(); BottomScroll.refresh(); } };
+/* Router.render() used to call the view function with no safety net. Most
+   views are plain synchronous functions, but several (Field.Plan.render()
+   among them) are declared async - if one of those throws before it
+   reaches its document.getElementById('content').innerHTML=... line, the
+   throw becomes a rejected Promise that Router never awaited, so it's an
+   invisible "Uncaught (in promise)" with no on-screen sign anything went
+   wrong: go() already updated the page title/sidebar highlight before
+   calling here, so the symptom is exactly "heading changed, content is
+   still whatever the previous menu showed" - confusing to diagnose and to
+   use. This wraps both the synchronous-throw and the async-rejection case
+   so a broken view always surfaces a visible toast (and a console.error
+   with the real stack for diagnosis) instead of leaving stale content
+   behind silently. */
+const Router = { render(view){
+  const fn = Views[view];
+  if(!fn) return;
+  try{
+    const r = fn();
+    if(r && typeof r.catch==='function'){
+      r.catch(err=>{
+        console.error('View render failed:', view, err);
+        UI.toast("Couldn't load this page — please try again.");
+      });
+    }
+  }catch(err){
+    console.error('View render failed:', view, err);
+    UI.toast("Couldn't load this page — please try again.");
+  }
+  BottomScroll.refresh();
+} };
 
 /* =====================================================================
    BOTTOM SCROLLBAR (screen-fixed horizontal scrollbar mirroring the
@@ -10201,7 +10230,7 @@ Views.fieldhome = ()=>Field.Plan.render();
    rest of the Field module.
 =========================================================================== */
 Field.Targets = {
-  get(staff){ return Store.data.staffTargets.find(t=>t.staff===staff) || null; },
+  get(staff){ return (Array.isArray(Store.data.staffTargets) ? Store.data.staffTargets : []).find(t=>t.staff===staff) || null; },
   openForm(staff){
     if(!Auth.isAdmin()){ UI.toast("You don't have permission to set targets"); return; }
     const t = this.get(staff) || {staff, visits:'', followups:'', requirements:'', pipeline:''};
