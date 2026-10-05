@@ -2107,12 +2107,17 @@ const UI = {
     const btn = document.getElementById('sideCollapseBtn');
     if(btn){ btn.innerHTML = '&#10095;'; btn.title = 'Expand sidebar'; }
   },
-  toast(msg){
+  toast(msg, ms){
     const t = document.getElementById('toast');
     t.textContent = msg;
     t.style.display='flex';
     clearTimeout(this._tt);
-    this._tt = setTimeout(()=>{ t.style.display='none'; }, 2400);
+    // ms===0 means "stays up until the next toast or a manual dismiss" -
+    // used for the view-render-failure error so it can never silently
+    // disappear before the user has a chance to read/screenshot it.
+    if(ms===0){ t.onclick = ()=>{ t.style.display='none'; }; return; }
+    t.onclick = null;
+    this._tt = setTimeout(()=>{ t.style.display='none'; }, ms || 2400);
   },
   openModal(title, bodyHtml, footHtml, wide){
     document.getElementById('modalTitle').textContent = title;
@@ -2355,7 +2360,49 @@ document.getElementById('loginUser').addEventListener('keydown', e=>{ if(e.key==
    ROUTER
 ===================================================================== */
 const Views = {};
-const Router = { render(view){ const fn = Views[view]; if(fn) fn(); BottomScroll.refresh(); } };
+/* Router.render() used to call the view function with no safety net. Most
+   views are plain synchronous functions, but several (Field.Plan.render()
+   among them) are declared async - if one of those throws before it
+   reaches its document.getElementById('content').innerHTML=... line, the
+   throw becomes a rejected Promise that Router never awaited, so it's an
+   invisible "Uncaught (in promise)" with no on-screen sign anything went
+   wrong: go() already updated the page title/sidebar highlight before
+   calling here, so the symptom is exactly "heading changed, content is
+   still whatever the previous menu showed" - confusing to diagnose and to
+   use. This wraps both the synchronous-throw and the async-rejection case
+   so a broken view always surfaces a visible toast (and a console.error
+   with the real stack for diagnosis) instead of leaving stale content
+   behind silently. */
+const Router = { render(view){
+  const fn = Views[view];
+  if(!fn) return;
+  /* The toast includes the raw error message (not just a generic "try
+     again") specifically so a screenshot of it is enough to diagnose a
+     report like "X menu isn't working" without needing the user to open
+     the browser console - which almost none of them can do in the field.
+     It stays on screen (ms===0, see UI.toast) until the next toast or a
+     tap, instead of a timed auto-hide, so a slow screenshot can't miss
+     it - earlier versions of this fix used a timed toast and at least one
+     real failure was reported with no toast visible, most likely because
+     it had already faded by the time a screenshot was taken. The error is
+     also stashed in localStorage so it can be recovered after the fact
+     (e.g. via browser devtools) even if the toast was still missed. */
+  const showErr = (view, err)=>{
+    console.error('View render failed:', view, err);
+    const msg = (err&&err.message?err.message:String(err));
+    try{ localStorage.setItem('jays_last_render_error', JSON.stringify({view, msg, at:new Date().toISOString()})); }catch(e){}
+    UI.toast("Couldn't load "+(PAGE_META[view]?PAGE_META[view][0]:view)+": "+msg+" (tap to dismiss)", 0);
+  };
+  try{
+    const r = fn();
+    if(r && typeof r.catch==='function'){
+      r.catch(err=>showErr(view, err));
+    }
+  }catch(err){
+    showErr(view, err);
+  }
+  BottomScroll.refresh();
+} };
 
 /* =====================================================================
    BOTTOM SCROLLBAR (screen-fixed horizontal scrollbar mirroring the
@@ -10201,7 +10248,7 @@ Views.fieldhome = ()=>Field.Plan.render();
    rest of the Field module.
 =========================================================================== */
 Field.Targets = {
-  get(staff){ return Store.data.staffTargets.find(t=>t.staff===staff) || null; },
+  get(staff){ return (Array.isArray(Store.data.staffTargets) ? Store.data.staffTargets : []).find(t=>t.staff===staff) || null; },
   openForm(staff){
     if(!Auth.isAdmin()){ UI.toast("You don't have permission to set targets"); return; }
     const t = this.get(staff) || {staff, visits:'', followups:'', requirements:'', pipeline:''};
