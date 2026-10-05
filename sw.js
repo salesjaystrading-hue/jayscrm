@@ -11,7 +11,7 @@
    version as soon as they're back online (never stuck on a stale cached
    copy of the CRM). Cross-origin requests (Supabase, CDN libraries, fonts)
    are left completely alone - untouched pass-through to the network. */
-const CACHE_NAME = 'jays-crm-shell-v1';
+const CACHE_NAME = 'jays-crm-shell-v2';
 const SHELL_FILES = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png', './icon-maskable-512.png'];
 
 self.addEventListener('install', (event) => {
@@ -36,7 +36,16 @@ self.addEventListener('fetch', (event) => {
   if (url.origin !== self.location.origin) return; // Supabase/CDN/fonts - pass through untouched
 
   event.respondWith(
-    fetch(req)
+    /* cache: 'no-store' bypasses the BROWSER's own HTTP cache (a separate
+       layer from the Cache Storage API used above), not just this service
+       worker's cache. Without it, a plain fetch() can still be silently
+       satisfied from the browser's disk cache for however long GitHub
+       Pages' CDN sends as a max-age - so after uploading a new
+       index.html, staff could keep getting an old cached copy for some
+       minutes with no sign anything was wrong, "network-first" or not.
+       This was very likely the real explanation for an update appearing
+       to "not take" even right after a fresh upload. */
+    fetch(req, { cache: 'no-store' })
       .then((res) => {
         const copy = res.clone();
         caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
