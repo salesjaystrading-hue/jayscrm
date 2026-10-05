@@ -1411,13 +1411,24 @@ const Store = {
      actually needs is in. */
   async loadAll(){
     this.loadFailed = {};
+    /* _users is a deliberate placeholder, not dead code: this.loadUsers()
+       below self-assigns this.data.users and its own Promise resolves to
+       undefined, so it needs SOME name here to hold that slot. It used to
+       have none, which silently shifted every name after it one position
+       to the left - dayPlans was actually being assigned loadUsers()'s
+       undefined result, staffTargets was getting what should have been
+       dayPlans's data, and the real staffTargets load was dropped on the
+       floor entirely. That's what broke My Day: Field.Day.active() calls
+       Store.data.dayPlans.find(...), and .find() on undefined throws
+       "Cannot read properties of undefined (reading 'find')" - exactly
+       the error reported, every single time the page loaded. */
     const [
       customers, products, quotations, payments, followups, tasks, notes,
       activityLog, gemcrac, orders, complaints, bids, waTemplates, waHistory,
       rateTemplates, rateDocs, rateTerms, rateDocTemplates,
       oppTracking, oppProducts, oppImportHistory, oppKeywordGroups,
       attendance, leaveRequests, bidDocs, visits, requirements, travelLogs,
-      lsgOfficeGeo, settings, counters, dayPlans, staffTargets
+      lsgOfficeGeo, settings, counters, _users, dayPlans, staffTargets
     ] = await Promise.all([
       this.loadCustomersDb(),
       this.loadKey('jays_products', null),
@@ -1450,7 +1461,7 @@ const Store = {
       this.loadKey('jays_lsgofficegeo', {}),
       this.loadKey('jays_settings', null),
       this.loadKey('jays_counters', null),
-      this.loadUsers(),
+      this.loadUsers(), // self-assigns this.data.users and resolves to undefined - _users above is a deliberate placeholder so it doesn't shift every destructured name after it (see the bug note on the line above)
       this.loadKey('jays_dayplans', []),
       this.loadKey('jays_stafftargets', []),
     ]);
@@ -2390,8 +2401,19 @@ const Router = { render(view){
   const showErr = (view, err)=>{
     console.error('View render failed:', view, err);
     const msg = (err&&err.message?err.message:String(err));
-    try{ localStorage.setItem('jays_last_render_error', JSON.stringify({view, msg, at:new Date().toISOString()})); }catch(e){}
-    UI.toast("Couldn't load "+(PAGE_META[view]?PAGE_META[view][0]:view)+": "+msg+" (tap to dismiss)", 0);
+    /* The error message alone ("Cannot read properties of undefined
+       (reading 'find')") is too generic to locate on its own - dozens of
+       .find() calls exist in this file. Pulling the first stack frame
+       that points at this file (with its line number) out of err.stack
+       and putting it IN the toast means a screenshot alone pinpoints the
+       exact line, with no need for the user to ever open devtools. */
+    let where = '';
+    if(err && err.stack){
+      const m = err.stack.match(/index\.html:(\d+):(\d+)/);
+      if(m) where = ' [line '+m[1]+']';
+    }
+    try{ localStorage.setItem('jays_last_render_error', JSON.stringify({view, msg, stack: err&&err.stack, at:new Date().toISOString()})); }catch(e){}
+    UI.toast("Couldn't load "+(PAGE_META[view]?PAGE_META[view][0]:view)+": "+msg+where+" (tap to dismiss)", 0);
   };
   try{
     const r = fn();
