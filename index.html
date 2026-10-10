@@ -6333,7 +6333,7 @@ const TenderCentre = {
       if(t.linked_bid_id || Store.data.bids.some(b=>b.tenderId===t.id)) throw new Error('A bid already exists for this tender');
       const bidId = (Store.data.settings.bidPrefix||'BID-')+String(Store.data.counters.bidNext||1).padStart(4,'0');
       const bid = {
-        id: bidId, tenderId: t.id, tenderPortal: t.portal_code,
+        id: bidId, tenderId: t.id, tenderPortal: t.portal_code, savedBy: bidUserName(), savedAt: new Date().toISOString(),
         checklist: DEFAULT_BID_CHECKLIST.map(name=>({name, done:false})),
         timeline: [{date:new Date().toISOString(), text:'Created from Tender Centre ('+t.portal_code+')', by:(Auth.session&&Auth.session.name)||'System'}],
         createdDate: Util.todayISO(),
@@ -6649,6 +6649,8 @@ function bidStatusColor(status){
   if(status==='Not Participating') return 'var(--text-mute,#6b7280)';
   return 'var(--amber,#d97706)';
 }
+function bidUserName(){ return (Auth.session && (Auth.session.name||Auth.session.username)) || 'System'; }
+function bidSavedByOf(b){ return (b && b.savedBy) || ''; }
 function bidTypeOf(b){ return (b && b.bidType && DROPDOWNS.bidType.includes(b.bidType)) ? b.bidType : 'Bid'; }
 // Map free-text / portal info from Tender Centre to a valid Bid Type dropdown value
 function bidTypeFromTender(t){
@@ -6673,11 +6675,13 @@ const BidSearch = {
     const fClosing = document.getElementById('bidClosingFilter')?document.getElementById('bidClosingFilter').value:'';
     const fMatch = document.getElementById('bidMatchFilter')?document.getElementById('bidMatchFilter').value:'';
     const fType = document.getElementById('bidTypeFilter')?document.getElementById('bidTypeFilter').value:'';
+    const fUser = document.getElementById('bidUserFilter')?document.getElementById('bidUserFilter').value:'';
 
     let list = Store.data.bids.map(b=>({...b, _match: bidMatch(b).score}));
-    if(q) list = list.filter(b=>[b.bidNumber,b.raNumber,b.title,b.boqTitle,b.category,b.organisation,b.department,b.ministry,b.location].some(v=>(v||'').toLowerCase().includes(q)));
+    if(q) list = list.filter(b=>[b.bidNumber,b.raNumber,b.title,b.boqTitle,b.category,b.organisation,b.department,b.ministry,b.location,b.savedBy].some(v=>(v||'').toLowerCase().includes(q)));
     if(fStatus) list = list.filter(b=>b.status===fStatus);
     if(fType) list = list.filter(b=>bidTypeOf(b)===fType);
+    if(fUser) list = list.filter(b=>fUser==='__none'?!bidSavedByOf(b):bidSavedByOf(b)===fUser);
     if(fMatch==='high') list = list.filter(b=>b._match>=80);
     else if(fMatch==='medium') list = list.filter(b=>b._match>=50 && b._match<80);
     else if(fMatch==='low') list = list.filter(b=>b._match<50);
@@ -6734,6 +6738,11 @@ const BidSearch = {
           <option value="">All Bid Types</option>
           ${DROPDOWNS.bidType.map(s=>`<option ${s===fType?'selected':''}>${s}</option>`).join('')}
         </select>
+        <select id="bidUserFilter" onchange="BidSearch.render()">
+          <option value="">All Users (Saved By)</option>
+          ${[...new Set(Store.data.bids.map(bidSavedByOf).filter(Boolean))].sort().map(u=>`<option value="${Util.escapeHtml(u)}" ${u===fUser?'selected':''}>${Util.escapeHtml(u)}</option>`).join('')}
+          <option value="__none" ${fUser==='__none'?'selected':''}>Not recorded</option>
+        </select>
         <select id="bidMatchFilter" onchange="BidSearch.render()">
           <option value="">All Match Scores</option>
           <option value="high" ${fMatch==='high'?'selected':''}>&#128293; High Match (80%+)</option>
@@ -6749,7 +6758,7 @@ const BidSearch = {
           <option value="won" ${fClosing==='won'?'selected':''}>&#127942; Won</option>
           <option value="lost" ${fClosing==='lost'?'selected':''}>&#10060; Lost</option>
         </select>
-        ${(q||fStatus||fType||fMatch||fClosing) ? `<button class="btn btn-outline btn-sm" onclick="document.getElementById('bidSearch').value='';document.getElementById('bidStatusFilter').value='';document.getElementById('bidTypeFilter').value='';document.getElementById('bidMatchFilter').value='';document.getElementById('bidClosingFilter').value='';BidSearch.render();">&#8635; Reset</button>` : ''}
+        ${(q||fStatus||fType||fUser||fMatch||fClosing) ? `<button class="btn btn-outline btn-sm" onclick="document.getElementById('bidSearch').value='';document.getElementById('bidStatusFilter').value='';document.getElementById('bidTypeFilter').value='';document.getElementById('bidUserFilter').value='';document.getElementById('bidMatchFilter').value='';document.getElementById('bidClosingFilter').value='';BidSearch.render();">&#8635; Reset</button>` : ''}
       </div>
       <div class="card"><div class="table-wrap">
       ${list.length ? `<table><thead><tr>
@@ -6766,6 +6775,7 @@ const BidSearch = {
         <th>End Date</th>
         <th>Time Left</th>
         <th>Status</th>
+        <th>Saved By</th>
       </tr></thead><tbody>
         ${pg.pageItems.map(b=>`<tr>
           <td class="col-actions"><div class="row-action-btns">
@@ -6786,6 +6796,7 @@ const BidSearch = {
           <td class="cell-mute">${Util.fmtDate(b.endDate)}</td>
           <td>${bidDeadlineBadgeHTML(b.endDate)}</td>
           <td><span class="badge" style="background:${bidStatusColor(b.status)};color:#fff;">${Util.escapeHtml(b.status||'New')}</span></td>
+          <td class="cell-mute" title="${b.savedAt?Util.escapeHtml(new Date(b.savedAt).toLocaleString('en-IN')):''}">${Util.escapeHtml(bidSavedByOf(b)||'—')}</td>
         </tr>`).join('')}
       </tbody></table>
       ${Paginate.controlsHTML('bids', pg, "BidSearch.render()")}` : `<div class="empty-state"><div class="ic">&#128203;</div><div class="t">No bids found</div><div class="d">Try changing your filters, or add a bid opportunity to start tracking it.</div>
@@ -6886,6 +6897,10 @@ const BidSearch = {
       status:g('b_status'), assignedTo:g('b_assignedTo'), sourceUrl:g('b_sourceUrl').trim()
     });
     const isNew = !id;
+    // Saved By = who first saved the bid (never overwritten); Updated By = last editor
+    const nowIso = new Date().toISOString();
+    if(isNew){ rec.savedBy = bidUserName(); rec.savedAt = nowIso; }
+    rec.updatedBy = bidUserName(); rec.updatedAt = nowIso;
     const prevStatus = id ? (Store.data.bids.find(x=>x.id===id)||{}).status : null;
     if(id){ const i=Store.data.bids.findIndex(x=>x.id===id); Store.data.bids[i]=rec; }
     else{
@@ -7015,6 +7030,7 @@ const BidSearch = {
         ${b.sourceUrl? `<a class="btn btn-outline btn-sm" href="${Util.escapeHtml(b.sourceUrl)}" target="_blank">&#128279; Open Source</a>` : ''}
         ${b.status==='Won'? `<button class="btn btn-primary btn-sm" onclick="BidSearch.convertToOrder('${id}')">&#8594; Convert to Order</button><button class="btn btn-outline btn-sm" onclick="BidSearch.recordEmd('${id}','PBG')">&#128274; Record PBG</button>` : ''}
       </div>
+      <div class="hint" style="margin-bottom:10px;">Saved by <b>${Util.escapeHtml(bidSavedByOf(b)||'not recorded')}</b>${b.savedAt?' on '+Util.escapeHtml(new Date(b.savedAt).toLocaleString('en-IN')):''}${b.updatedBy&&b.updatedBy!==b.savedBy?' &middot; last updated by <b>'+Util.escapeHtml(b.updatedBy)+'</b>':''}</div>
       <div class="field"><label>Update Status</label><select onchange="BidSearch.setStatus('${id}', this.value)">${DROPDOWNS.bidStatus.map(s=>`<option ${s===b.status?'selected':''}>${s}</option>`).join('')}</select></div>
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:16px 0;">
@@ -7079,7 +7095,7 @@ const BidSearch = {
     try{
       const rows = Store.data.bids.map(b=>({
         'Bid Type':bidTypeOf(b), 'Bid Number':b.bidNumber||'', 'RA Number':b.raNumber||'', Title:b.title||'', Category:b.category||'', Organisation:b.organisation||'',
-        'Bid Value':b.estimatedValue||0, 'End Date':b.endDate||'', Status:b.status||'', 'Assigned To':b.assignedTo||'',
+        'Bid Value':b.estimatedValue||0, 'End Date':b.endDate||'', Status:b.status||'', 'Assigned To':b.assignedTo||'', 'Saved By':b.savedBy||'', 'Saved On':b.savedAt?Util.fmtDate(b.savedAt.slice(0,10)):'', 'Last Updated By':b.updatedBy||'',
         Decision: BID_TERMINAL_STATUSES.includes(b.status)?b.status:'Pending', Result: b.status==='Won'?'Won':b.status==='Lost'?'Lost':'', Notes: b.description||''
       }));
       const ws = XLSX.utils.json_to_sheet(rows.length?rows:[{Info:'No bids yet'}]);
@@ -13083,6 +13099,7 @@ const Backup = {
             organisation: r.Department||r.Organisation||r.organisation||'',
             endDate: r['Closing Date']||r.EndDate||r['End Date']||'',
             estimatedValue: Number(r['Bid Value']||r.Value||r.estimatedValue)||0,
+            savedBy: bidUserName(), savedAt: new Date().toISOString(),
             status: 'New', decision:'', description:'', checklist: DEFAULT_BID_CHECKLIST.map(t=>({text:t, done:false})),
             activity:[{ts:new Date().toISOString(), text:'Imported from Excel', by:(Auth.session&&Auth.session.name)||'System'}]
           });
