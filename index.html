@@ -1008,6 +1008,7 @@ const Store = {
     customers: [], products: [], quotations: [], payments: [],
     followups: [], tasks: [], notes: [], users: [], settings: {}, activityLog: [],
     gemcrac: [], orders: [], complaints: [], bids: [], waTemplates: [], waHistory: [],
+    emdPbg: [], suppliers: [], purchaseOrders: [], amcRecords: [],
     rateTemplates: [], rateDocs: [], rateTerms: [], rateDocTemplates: [],
     oppProjects: [], oppTracking: {}, oppProducts: [], oppImportHistory: [], oppKeywordGroups: [],
     attendance: [], leaveRequests: [], bidDocs: [],
@@ -1428,7 +1429,8 @@ const Store = {
       rateTemplates, rateDocs, rateTerms, rateDocTemplates,
       oppTracking, oppProducts, oppImportHistory, oppKeywordGroups,
       attendance, leaveRequests, bidDocs, visits, requirements, travelLogs,
-      lsgOfficeGeo, settings, counters, _users, dayPlans, staffTargets
+      lsgOfficeGeo, settings, counters, _users, dayPlans, staffTargets,
+      emdPbg, suppliers, purchaseOrders, amcRecords
     ] = await Promise.all([
       this.loadCustomersDb(),
       this.loadKey('jays_products', null),
@@ -1464,6 +1466,10 @@ const Store = {
       this.loadUsers(), // self-assigns this.data.users and resolves to undefined - _users above is a deliberate placeholder so it doesn't shift every destructured name after it (see the bug note on the line above)
       this.loadKey('jays_dayplans', []),
       this.loadKey('jays_stafftargets', []),
+      this.loadKey('jays_emdpbg', []),
+      this.loadKey('jays_suppliers', []),
+      this.loadKey('jays_purchaseorders', []),
+      this.loadKey('jays_amcrecords', []),
     ]);
 
     /* customers now reads from public.customers (Phase 6 cutover), with
@@ -1516,6 +1522,10 @@ const Store = {
     this.data.lsgOfficeGeo = lsgOfficeGeo;
     this.data.dayPlans = dayPlans;
     this.data.staffTargets = staffTargets;
+    this.data.emdPbg = emdPbg;
+    this.data.suppliers = suppliers;
+    this.data.purchaseOrders = purchaseOrders;
+    this.data.amcRecords = amcRecords;
 
     await this.migrateWaTemplates();
     await this.migrateOppMachineKeywords();
@@ -2185,15 +2195,20 @@ const NAV = [
   {sec:'Products', items:[
     {id:'products', ic:'&#128230;', label:'Product Master'},
     {id:'inventory', ic:'&#127974;', label:'Inventory'},
+    {id:'suppliers', ic:'&#127981;', label:'Suppliers'},
+    {id:'purchaseorders', ic:'&#128722;', label:'Purchase Orders'},
   ]},
   {sec:'Government Business', items:[
     {id:'oppfinder', ic:'&#127963;', label:'Project Opportunities'},
     {id:'bidsearch', ic:'&#128269;', label:'GeM Bid Search'},
     {id:'biddocs', ic:'&#128196;', label:'Bid Documents'},
     {id:'gemcrac', ic:'&#128203;', label:'GEM CRAC'},
+    {id:'tenders', ic:'&#128209;', label:'Tender Centre'},
+    {id:'emdpbg', ic:'&#128274;', label:'EMD / PBG Tracker'},
   ]},
   {sec:'Operations', items:[
     {id:'complaints', ic:'&#128736;', label:'Complaints'},
+    {id:'amc', ic:'&#128295;', label:'Service &amp; AMC'},
     {id:'tasks', ic:'&#9989;', label:'Tasks &amp; To-Do'},
     {id:'attendance', ic:'&#128343;', label:'Attendance &amp; Leave'},
     {id:'notes', ic:'&#128221;', label:'Notes'},
@@ -2231,6 +2246,11 @@ const PAGE_META = {
   payments:['Payments Followup','Pending invoices & reminders'],
   gemcrac:['GEM CRAC','GEM order CRAC tracking & delivery-extension requests'],
   complaints:['Complaints','Log and track customer complaints'],
+  tenders:['Tender Centre','Collect, score and review e-tenders'],
+  emdpbg:['EMD / PBG Tracker','Earnest money, performance guarantees and deposits — with expiry alerts'],
+  suppliers:['Suppliers','Supplier master with products and payment terms'],
+  purchaseorders:['Purchase Orders','Orders placed with suppliers, delivery and payment status'],
+  amc:['Service & AMC','AMC contracts, warranties and service visits'],
   tasks:['Tasks & To-Do','Team to-do list &amp; task tracking'],
   notes:['Notes','Quick notes & reminders'],
   reports:['Reports','Business performance'],
@@ -2305,6 +2325,9 @@ function navBadgeCount(id){
   if(id==='biddocs'){
     return Store.data.bidDocs.filter(d=>d.status==='Draft').length;
   }
+  if(id==='emdpbg') return Alerts.collect().filter(a=>a.view==='emdpbg').length;
+  if(id==='purchaseorders') return Alerts.collect().filter(a=>a.view==='purchaseorders').length;
+  if(id==='amc') return Alerts.collect().filter(a=>a.view==='amc').length;
   return 0;
 }
 
@@ -2709,6 +2732,7 @@ Views.dashboard = function(){
   myComplaints.forEach(x=>actionItems.push({icon:'&#9888;', color:'var(--amber,#d97706)', text:'Open complaint: '+(x.complaintFrom||''), view:'complaints'}));
   bidsClosingSoon.forEach(b=>actionItems.push({icon:'&#127963;', color:'var(--red,#dc2626)', text:'GeM bid closing soon: '+(b.title||b.bidNumber||''), view:'bidsearch'}));
   oppNeedingAction.forEach(r=>actionItems.push({icon:'&#128269;', color:'var(--blue,#2563eb)', text:'High-match project opportunity: '+(r['Project Name Eng']||r['LB Name']||''), view:'oppfinder'}));
+  Alerts.collect().forEach(a=>actionItems.push({icon:a.icon, color:a.color, text:a.type+': '+a.text, view:a.view}));
   if(Auth.isAdmin()) pendingLeave.forEach(l=>actionItems.push({icon:'&#128197;', color:'var(--violet,#7c3aed)', text:'Leave approval pending: '+(l.name||l.username||''), view:'attendance'}));
 
   const byStatus = {};
@@ -2755,7 +2779,7 @@ Views.dashboard = function(){
     </div>
 
     <div class="card card-pad" style="margin-bottom:16px;border-left:4px solid var(--orange);">
-      <h3 style="margin:0 0 10px;font-size:14px;">&#128204; My Action Required ${actionItems.length?('<span class="badge badge-red">'+actionItems.length+'</span>'):''}</h3>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px;"><h3 style="margin:0;font-size:14px;">&#128204; My Action Required ${actionItems.length?('<span class="badge badge-red">'+actionItems.length+'</span>'):''}</h3><button class="btn btn-outline btn-sm" onclick="DailySummary.open()">&#128172; Daily Summary</button></div>
       ${actionItems.length ? `<div style="display:flex;flex-direction:column;gap:2px;max-height:260px;overflow:auto;">
         ${actionItems.slice(0,25).map(a=>`<div style="display:flex;align-items:center;gap:10px;padding:7px 4px;border-bottom:1px solid #F3F5F8;cursor:pointer;" onclick="go('${a.view}')">
           <span style="font-size:15px;">${a.icon}</span>
@@ -3384,6 +3408,58 @@ const Customers = {
     UI.closeModal();
     this.openDetail(id);
   },
+  /* Customer 360: money + service picture for one customer, built only
+     from records already linked by customerId (quotations, payments,
+     orders, complaints, AMC/service, tasks) - nothing new is stored. */
+  overview360(x){
+    const D = Store.data, id = x.id;
+    const quotes = D.quotations.filter(q=>q.customerId===id);
+    const pays = D.payments.filter(p=>p.customerId===id);
+    const orders = (D.orders||[]).filter(o=>o.customerId===id);
+    const complaints = D.complaints.filter(c=>c.customerId===id);
+    const amc = (D.amcRecords||[]).filter(r=>r.customerId===id);
+    const tasks = D.tasks.filter(t=>t.customerId===id && t.status!=='Completed');
+    const invoiced = pays.reduce((s,p)=>s+(Number(p.amount)||0),0);
+    const paid = pays.reduce((s,p)=>s+(Number(p.amountPaid)||0),0);
+    return {
+      quotes, pays, orders, complaints, amc, tasks, invoiced, paid,
+      due: Math.max(invoiced-paid,0),
+      quoted: quotes.reduce((s,q)=>s+(Number(q.total)||0),0),
+      won: quotes.filter(q=>q.status==='Accepted').reduce((s,q)=>s+(Number(q.total)||0),0),
+      openComplaints: complaints.filter(c=>c.status!=='Solved').length,
+      activeAmc: amc.filter(amcIsOpen).length
+    };
+  },
+  overview360HTML(x){
+    const o = this.overview360(x);
+    const cell = (label, val, color, view)=>`<div style="text-align:center;${view?'cursor:pointer;':''}" ${view?`onclick="UI.closeDrawer();go('${view}')"`:''}><div style="font-size:16px;font-weight:700;${color?'color:'+color+';':''}">${val}</div><div class="cell-mute" style="font-size:10.5px;">${label}</div></div>`;
+    const orderLine = o.orders.slice(0,3).map(r=>`<div style="font-size:12px;">&#128230; ${Util.escapeHtml(r.id||'')} &middot; ${Util.escapeHtml(r.productName||r.party||'')} <span class="cell-mute">(${Util.escapeHtml(r.status||'')})</span></div>`).join('');
+    const amcLine = o.amc.slice(0,3).map(r=>`<div style="font-size:12px;">&#128295; ${Util.escapeHtml(r.type||'')} &middot; ${Util.escapeHtml(r.product||'')} <span class="cell-mute">${r.endDate?'ends '+Util.escapeHtml(r.endDate):''}</span></div>`).join('');
+    return `<div class="card card-pad" style="margin-bottom:14px;" id="c360_${x.id}">
+      <div class="cell-mute" style="font-size:11px;margin-bottom:8px;">CUSTOMER 360</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;">
+        ${cell('Quoted', Util.fmtMoney(o.quoted))}
+        ${cell('Accepted', Util.fmtMoney(o.won), 'var(--green,#16a34a)')}
+        ${cell('Orders', o.orders.length, '', 'orders')}
+        ${cell('Invoiced', Util.fmtMoney(o.invoiced))}
+        ${cell('Outstanding', Util.fmtMoney(o.due), o.due?'var(--red,#dc2626)':'', 'outstanding')}
+        ${cell('Open Complaints', o.openComplaints, o.openComplaints?'var(--amber,#d97706)':'', 'complaints')}
+      </div>
+      ${(orderLine||amcLine||o.tasks.length)?`<div style="margin-top:10px;display:flex;flex-direction:column;gap:3px;">${orderLine}${amcLine}${o.tasks.length?`<div style="font-size:12px;">&#9989; ${o.tasks.length} open task(s)</div>`:''}</div>`:''}
+      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;">
+        <button class="btn btn-outline btn-sm" onclick="Customers.addAmc('${x.id}')">&#128295; Add Service / AMC</button>
+      </div>
+    </div>`;
+  },
+  addAmc(id){
+    const c = Store.data.customers.find(z=>z.id===id); if(!c) return;
+    UI.closeDrawer(); go('amc');
+    setTimeout(()=>{
+      Amc.openForm(null);
+      CustPicker.select('rm', id);
+      const n = document.getElementById('rm_customerName'); if(n) n.value = c.name;
+    }, 60);
+  },
   openDetail(id){
     const x = Store.data.customers.find(c=>c.id===id);
     if(!x) return;
@@ -3462,6 +3538,8 @@ const Customers = {
           <button class="btn btn-outline btn-sm" onclick="Customers.addTimelineForm('${x.id}')">&#128221; Add Timeline Entry</button>
           <button class="btn btn-outline btn-sm" onclick="Field.OfficeFinder.open({district:'${Util.escapeHtml(x.district||'')}', fromCustomerId:'${x.id}'})">&#127970; Find Nearby Government/Local Offices</button>
         </div>
+
+        ${Customers.overview360HTML(x)}
 
         <h4 style="font-size:12.5px;text-transform:uppercase;color:var(--text-mute);margin:16px 0 8px;">History Summary</h4>
         <div class="cell-mute" style="font-size:12.5px;margin-bottom:14px;">${relatedQuotes.length} quotation(s) &middot; ${relatedPayments.length} invoice(s) &middot; ${relatedFollowups.length} follow-up(s) &middot; ${Store.data.visits.filter(v=>v.customerId===x.id).length} visit(s)</div>
@@ -4970,6 +5048,402 @@ function complaintStatusBadge(status){
 }
 Views.complaints = ()=>Complaints.render();
 
+/* =====================================================================
+   PHASE 7 — EMD / PBG TRACKER, SUPPLIERS, PURCHASE ORDERS, SERVICE & AMC
+   Four plain jays_crm_store-backed collections (emdPbg, suppliers,
+   purchaseOrders, amcRecords), all built on ONE small list/form/save
+   factory (RecModule.make) that follows the same pattern as Complaints
+   (dashboard cards, search + status filter, Paginate, modal form,
+   Activity.log) so there is a single copy of that logic, not four.
+   GST is never required anywhere here.
+===================================================================== */
+const RecModule = {
+  make(cfg){
+    const M = {
+      cfg,
+      all(){ return Array.isArray(Store.data[cfg.coll]) ? Store.data[cfg.coll] : []; },
+      render(){
+        const sEl = document.getElementById('rm_search_'+cfg.coll);
+        const hadFocus = sEl && document.activeElement === sEl;
+        const caret = hadFocus ? sEl.selectionStart : null;
+        const q = (sEl ? sEl.value : '').toLowerCase();
+        const stEl = document.getElementById('rm_status_'+cfg.coll);
+        const fStatus = stEl ? stEl.value : '';
+        const all = this.all();
+        let list = all.slice();
+        if(q) list = list.filter(r=>cfg.searchKeys.some(k=>String(r[k]==null?'':r[k]).toLowerCase().includes(q)));
+        if(fStatus) list = list.filter(r=>r[cfg.statusField]===fStatus);
+        list.sort(cfg.sort || ((a,b)=>String(b.id).localeCompare(String(a.id))));
+        const pg = Paginate.slice(cfg.coll, list);
+        document.getElementById('content').innerHTML = `
+          ${dashboardCardsHTML(cfg.title+' Dashboard', cfg.cards(all))}
+          <div class="toolbar">
+            <div class="search"><span class="ic">&#128269;</span><input id="rm_search_${cfg.coll}" placeholder="${Util.escapeHtml(cfg.searchHint)}" oninput="${cfg.name}.render()" value="${Util.escapeHtml(q)}"></div>
+            <select id="rm_status_${cfg.coll}" onchange="${cfg.name}.render()">
+              <option value="">All Statuses</option>
+              ${cfg.statusOpts.map(s=>`<option ${s===fStatus?'selected':''}>${s}</option>`).join('')}
+            </select>
+            ${(q||fStatus) ? `<button class="btn btn-outline btn-sm" onclick="${cfg.name}.clearFilters()">Clear</button>` : ''}
+            <div class="toolbar-spacer"></div>
+            <button class="btn btn-primary btn-sm" onclick="${cfg.name}.openForm(null)">&#65291; ${cfg.addLabel}</button>
+          </div>
+          <div class="card"><div class="table-wrap">
+          ${list.length ? `<table><thead><tr><th class="col-actions">Actions</th>${cfg.cols.map(c=>`<th>${c.h}</th>`).join('')}</tr></thead><tbody>
+            ${pg.pageItems.map(r=>`<tr>
+              <td class="col-actions"><div class="row-action-btns">
+                <button class="icon-btn" title="Edit" onclick="${cfg.name}.openForm('${r.id}')">&#9998;</button>
+                <button class="icon-btn" title="Delete" onclick="${cfg.name}.remove('${r.id}')">&#128465;</button>
+              </div></td>
+              ${cfg.cols.map(c=>`<td class="${c.cls||'cell-mute'}">${c.f(r)}</td>`).join('')}
+            </tr>`).join('')}
+          </tbody></table>
+          ${Paginate.controlsHTML(cfg.coll, pg, cfg.name+'.render()')}` : `<div class="empty-state"><div class="ic">${cfg.icon}</div><div class="t">${(q||fStatus)?'No matching records':cfg.emptyTitle}</div><div class="d">${(q||fStatus)?'Try clearing filters.':cfg.emptyDesc}</div>
+          <button class="btn btn-primary btn-sm" onclick="${cfg.name}.openForm(null)">&#65291; ${cfg.addLabel}</button></div>`}
+          </div></div>`;
+        if(hadFocus){
+          const el = document.getElementById('rm_search_'+cfg.coll);
+          if(el){ el.focus(); el.setSelectionRange(caret, caret); }
+        }
+      },
+      clearFilters(){
+        const s = document.getElementById('rm_search_'+cfg.coll); if(s) s.value='';
+        const st = document.getElementById('rm_status_'+cfg.coll); if(st) st.value='';
+        this.render();
+      },
+      fieldHTML(f, v){
+        const val = v[f.k]==null ? '' : v[f.k];
+        const id = 'rm_'+f.k;
+        const lab = `<label>${f.label}${f.req?' *':''}</label>`;
+        let inner;
+        if(f.type==='select'){
+          const opts = typeof f.opts==='function' ? f.opts() : f.opts;
+          inner = `<select id="${id}">${f.blank?`<option value="">${f.blank}</option>`:''}${opts.map(o=>{
+            const ov = typeof o==='object'?o.v:o, ol = typeof o==='object'?o.l:o;
+            return `<option value="${Util.escapeHtml(ov)}" ${String(ov)===String(val)?'selected':''}>${Util.escapeHtml(ol)}</option>`;
+          }).join('')}</select>`;
+        } else if(f.type==='textarea'){
+          inner = `<textarea id="${id}">${Util.escapeHtml(val)}</textarea>`;
+        } else if(f.type==='cust'){
+          inner = CustPicker.html('rm', v.customerId, 'recModuleCustSelected');
+        } else {
+          inner = `<input type="${f.type||'text'}" id="${id}" value="${Util.escapeHtml(val)}">`;
+        }
+        return `<div class="field">${lab}${inner}</div>`;
+      },
+      openForm(id){
+        const rec = id ? this.all().find(x=>x.id===id) : null;
+        const v = rec || (typeof cfg.defaults==='function' ? cfg.defaults() : cfg.defaults);
+        const rows = cfg.layout.map(row=>`<div class="form-row">${row.map(k=>this.fieldHTML(cfg.fields.find(f=>f.k===k), v)).join('')}</div>`).join('');
+        UI.openModal(rec ? 'Edit '+cfg.singular : cfg.addLabel, rows,
+          `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="${cfg.name}.save('${id||''}')">Save</button>`, true);
+      },
+      async save(id){
+        const rec = {};
+        for(const f of cfg.fields){
+          if(f.type==='cust'){ const el = document.getElementById('rm_customerId'); rec.customerId = el ? el.value : ''; continue; }
+          const el = document.getElementById('rm_'+f.k);
+          let val = el ? el.value : '';
+          if(f.type==='number') val = val==='' ? '' : Number(val);
+          else if(typeof val==='string') val = val.trim();
+          if(f.req && (val===''||val===null)){ UI.toast(f.label+' is required'); return; }
+          rec[f.k] = val;
+        }
+        if(cfg.validate){ const msg = cfg.validate(rec, id); if(msg){ UI.toast(msg); return; } }
+        const list = this.all();
+        if(!Array.isArray(Store.data[cfg.coll])) Store.data[cfg.coll] = list;
+        const prev = id ? list.find(x=>x.id===id) : null;
+        const counters = Store.data.counters;
+        if(id){ rec.id = id; rec.createdDate = prev && prev.createdDate; }
+        else {
+          rec.id = cfg.prefix + String(counters[cfg.counter]||1).padStart(4,'0');
+          rec.createdDate = Util.todayISO();
+        }
+        rec.updatedDate = Util.todayISO();
+        if(cfg.beforeSave) cfg.beforeSave(rec, prev);
+        if(id){ const i = list.findIndex(x=>x.id===id); list[i] = rec; }
+        else { list.unshift(rec); counters[cfg.counter] = (counters[cfg.counter]||1)+1; await Store.save('counters'); }
+        await Store.save(cfg.coll);
+        await Activity.log((id?'Updated ':'Added ')+cfg.singular.toLowerCase(), rec.id+' — '+cfg.label(rec));
+        UI.closeModal(); UI.toast('Saved'); Router.render(cfg.view);
+      },
+      async remove(id){
+        if(!confirm('Delete this '+cfg.singular.toLowerCase()+' record?')) return;
+        Store.data[cfg.coll] = this.all().filter(x=>x.id!==id);
+        await Store.save(cfg.coll); UI.toast('Deleted'); Router.render(cfg.view);
+      }
+    };
+    return M;
+  }
+};
+/* CustPicker callback shared by every RecModule form that has a customer
+   field: copies the chosen customer's name into the form's name box. */
+function recModuleCustSelected(c){
+  const el = document.getElementById('rm_customerName');
+  if(el && c) el.value = c.name;
+}
+function recBadge(text, color){ return `<span class="badge badge-${color||'gray'}">${Util.escapeHtml(text||'—')}</span>`; }
+/* "12 days left" / "3 days overdue" badge for any expiry/due date. Returns
+   '' when there is no date or the record is already closed. */
+function recDueBadge(dateStr, closed, soonDays){
+  if(!dateStr || closed) return '<span class="cell-mute">&mdash;</span>';
+  const d = Util.daysUntil(dateStr);
+  if(d===null) return '<span class="cell-mute">&mdash;</span>';
+  if(d<0) return recBadge(Math.abs(d)+'d overdue','red');
+  if(d===0) return recBadge('Due today','red');
+  if(d<=(soonDays||30)) return recBadge(d+'d left','amber');
+  return recBadge(d+'d left','green');
+}
+
+/* ---------------- EMD / PBG TRACKER ---------------- */
+const EMDPBG_TYPES = ['EMD','PBG','Security Deposit','Tender Fee'];
+const EMDPBG_MODES = ['DD','Bank Guarantee','FDR','Online / NEFT','Cheque','Other'];
+const EMDPBG_STATUS = ['Active','Refund Requested','Refunded','Released','Forfeited'];
+const EMDPBG_CLOSED = ['Refunded','Released','Forfeited'];
+function emdPbgIsOpen(r){ return !EMDPBG_CLOSED.includes(r.status); }
+const EmdPbg = RecModule.make({
+  name:'EmdPbg', coll:'emdPbg', view:'emdpbg', title:'EMD / PBG', singular:'EMD/PBG Record', addLabel:'Add EMD / PBG',
+  icon:'&#128274;', emptyTitle:'No EMD / PBG records', emptyDesc:'Record every EMD, performance bank guarantee and deposit so refunds and expiries are never missed.',
+  prefix:'EMD-', counter:'emdNext', statusField:'status', statusOpts:EMDPBG_STATUS,
+  searchHint:'Search reference, organisation, instrument no, bank...',
+  searchKeys:['id','refNo','organisation','instrumentNo','bank','type'],
+  label:r=>(r.type||'')+' '+(r.refNo||r.organisation||''),
+  sort:(a,b)=>(a.expiryDate||'9999').localeCompare(b.expiryDate||'9999'),
+  defaults:()=>({type:'EMD', bidId:'', refNo:'', organisation:'', amount:'', mode:'DD', instrumentNo:'', bank:'', issueDate:Util.todayISO(), expiryDate:'', status:'Active', note:''}),
+  fields:[
+    {k:'type', label:'Type', type:'select', opts:EMDPBG_TYPES},
+    {k:'bidId', label:'Linked GeM Bid (optional)', type:'select', blank:'— none —', opts:()=>Store.data.bids.map(b=>({v:b.id, l:(b.bidNumber||b.id)+' — '+(b.title||'').slice(0,40)}))},
+    {k:'refNo', label:'Bid / Order / Reference No', req:true},
+    {k:'organisation', label:'Organisation / Buyer'},
+    {k:'amount', label:'Amount (₹)', type:'number', req:true},
+    {k:'mode', label:'Mode', type:'select', opts:EMDPBG_MODES},
+    {k:'instrumentNo', label:'DD / BG / FDR / Txn No'},
+    {k:'bank', label:'Bank'},
+    {k:'issueDate', label:'Issue / Paid Date', type:'date'},
+    {k:'expiryDate', label:'Expiry / Refund-due Date', type:'date'},
+    {k:'status', label:'Status', type:'select', opts:EMDPBG_STATUS},
+    {k:'note', label:'Note', type:'textarea'}
+  ],
+  layout:[['type','bidId'],['refNo','organisation'],['amount','mode'],['instrumentNo','bank'],['issueDate','expiryDate'],['status'],['note']],
+  beforeSave(rec){
+    /* Picking a bid pre-fills the reference/organisation if left blank. */
+    if(rec.bidId){ const b = Store.data.bids.find(x=>x.id===rec.bidId); if(b){ if(!rec.organisation) rec.organisation = b.organisation||''; } }
+  },
+  cards:(all)=>{
+    const open = all.filter(emdPbgIsOpen);
+    const soon = open.filter(r=>{ const d=Util.daysUntil(r.expiryDate); return d!==null && d>=0 && d<=30; });
+    const over = open.filter(r=>{ const d=Util.daysUntil(r.expiryDate); return d!==null && d<0; });
+    const locked = open.reduce((s,r)=>s+(Number(r.amount)||0),0);
+    return [
+      {label:'Money Locked In', value:Util.fmtMoney(locked), color:'var(--amber,#d97706)'},
+      {label:'Active', value:open.length},
+      {label:'Expiring in 30 days', value:soon.length, color:'var(--amber,#d97706)'},
+      {label:'Overdue / Expired', value:over.length, color:over.length?'var(--red,#dc2626)':undefined},
+      {label:'Refunded / Released', value:all.filter(r=>r.status==='Refunded'||r.status==='Released').length, color:'var(--green,#16a34a)'}
+    ];
+  },
+  cols:[
+    {h:'Type', f:r=>recBadge(r.type, r.type==='PBG'?'blue':r.type==='EMD'?'amber':'gray'), cls:''},
+    {h:'Reference', f:r=>Util.escapeHtml(r.refNo||'')+'<div class="cell-mute" style="font-size:11px;">'+Util.escapeHtml(r.id)+'</div>', cls:'cell-main'},
+    {h:'Organisation', f:r=>Util.escapeHtml(r.organisation||'—')},
+    {h:'Amount', f:r=>Util.fmtMoney(r.amount), cls:'mono'},
+    {h:'Mode / Instrument', f:r=>Util.escapeHtml((r.mode||'')+(r.instrumentNo?' · '+r.instrumentNo:'')+(r.bank?' · '+r.bank:''))},
+    {h:'Issued', f:r=>Util.fmtDate(r.issueDate)},
+    {h:'Expiry / Refund Due', f:r=>Util.fmtDate(r.expiryDate)},
+    {h:'Time Left', f:r=>recDueBadge(r.expiryDate, !emdPbgIsOpen(r)), cls:''},
+    {h:'Status', f:r=>recBadge(r.status, r.status==='Active'?'blue':r.status==='Refund Requested'?'amber':r.status==='Forfeited'?'red':'green'), cls:''}
+  ]
+});
+Views.emdpbg = ()=>EmdPbg.render();
+
+/* ---------------- SUPPLIER MASTER ---------------- */
+const SUPPLIER_STATUS = ['Active','Inactive'];
+const Suppliers = RecModule.make({
+  name:'Suppliers', coll:'suppliers', view:'suppliers', title:'Suppliers', singular:'Supplier', addLabel:'Add Supplier',
+  icon:'&#127981;', emptyTitle:'No suppliers yet', emptyDesc:'Keep every supplier, their products and payment terms in one place.',
+  prefix:'SUP-', counter:'supNext', statusField:'status', statusOpts:SUPPLIER_STATUS,
+  searchHint:'Search supplier, contact, phone, city, products...',
+  searchKeys:['id','name','contact','phone','city','products','gst'],
+  label:r=>r.name||'',
+  sort:(a,b)=>String(a.name||'').localeCompare(String(b.name||'')),
+  defaults:()=>({name:'', contact:'', phone:'', email:'', city:'', gst:'', products:'', paymentTerms:'', rating:'', status:'Active', note:''}),
+  fields:[
+    {k:'name', label:'Supplier Name', req:true},
+    {k:'contact', label:'Contact Person'},
+    {k:'phone', label:'Phone'},
+    {k:'email', label:'Email', type:'email'},
+    {k:'city', label:'City / District'},
+    {k:'gst', label:'GST No (optional)'},
+    {k:'products', label:'Products / Categories Supplied'},
+    {k:'paymentTerms', label:'Payment Terms (e.g. 30 days credit)'},
+    {k:'rating', label:'Rating', type:'select', blank:'— not rated —', opts:['1','2','3','4','5']},
+    {k:'status', label:'Status', type:'select', opts:SUPPLIER_STATUS},
+    {k:'note', label:'Note', type:'textarea'}
+  ],
+  layout:[['name','contact'],['phone','email'],['city','gst'],['products'],['paymentTerms','rating'],['status'],['note']],
+  validate(rec, id){
+    const dup = Store.data.suppliers.find(s=>s.id!==id && (s.name||'').trim().toLowerCase()===rec.name.toLowerCase());
+    return dup ? 'A supplier named "'+dup.name+'" already exists' : '';
+  },
+  cards:(all)=>{
+    const spend = (Store.data.purchaseOrders||[]).filter(p=>p.status!=='Cancelled').reduce((s,p)=>s+(Number(p.amount)||0),0);
+    return [
+      {label:'Total Suppliers', value:all.length},
+      {label:'Active', value:all.filter(s=>s.status==='Active').length, color:'var(--green,#16a34a)'},
+      {label:'Inactive', value:all.filter(s=>s.status==='Inactive').length},
+      {label:'Total PO Value', value:Util.fmtMoney(spend)}
+    ];
+  },
+  cols:[
+    {h:'Supplier', f:r=>Util.escapeHtml(r.name||'')+'<div class="cell-mute" style="font-size:11px;">'+Util.escapeHtml(r.id)+'</div>', cls:'cell-main'},
+    {h:'Contact', f:r=>Util.escapeHtml(r.contact||'—')},
+    {h:'Phone', f:r=>r.phone?`<a href="tel:${Util.escapeHtml(r.phone)}">${Util.escapeHtml(r.phone)}</a>`:'—'},
+    {h:'City', f:r=>Util.escapeHtml(r.city||'—')},
+    {h:'Products', f:r=>Util.escapeHtml(r.products||'—')},
+    {h:'Payment Terms', f:r=>Util.escapeHtml(r.paymentTerms||'—')},
+    {h:'Rating', f:r=>r.rating?('&#9733;'.repeat(Number(r.rating))+'<span style="opacity:.3">'+'&#9733;'.repeat(5-Number(r.rating))+'</span>'):'—', cls:''},
+    {h:'Status', f:r=>recBadge(r.status, r.status==='Active'?'green':'gray'), cls:''}
+  ]
+});
+Views.suppliers = ()=>Suppliers.render();
+
+/* ---------------- PURCHASE ORDERS ---------------- */
+const PO_STATUS = ['Draft','Placed','Partially Received','Received','Cancelled'];
+const PO_PAY = ['Unpaid','Part Paid','Paid'];
+function poIsOpen(p){ return p.status==='Placed' || p.status==='Partially Received'; }
+const PurchaseOrders = RecModule.make({
+  name:'PurchaseOrders', coll:'purchaseOrders', view:'purchaseorders', title:'Purchase Orders', singular:'Purchase Order', addLabel:'New Purchase Order',
+  icon:'&#128230;', emptyTitle:'No purchase orders', emptyDesc:'Raise a PO against a supplier and track it until the goods are received and paid.',
+  prefix:'PO-', counter:'poNext', statusField:'status', statusOpts:PO_STATUS,
+  searchHint:'Search PO no, supplier, item, linked order...',
+  searchKeys:['id','supplierName','item','linkedRef'],
+  label:r=>(r.supplierName||'')+' · '+(r.item||''),
+  sort:(a,b)=>String(b.poDate||'').localeCompare(String(a.poDate||'')) || String(b.id).localeCompare(String(a.id)),
+  defaults:()=>({supplierId:'', item:'', qty:'', amount:'', linkedRef:'', poDate:Util.todayISO(), expectedDate:'', receivedDate:'', status:'Placed', payStatus:'Unpaid', note:''}),
+  fields:[
+    {k:'supplierId', label:'Supplier', type:'select', req:true, blank:'— select supplier —', opts:()=>Store.data.suppliers.filter(s=>s.status!=='Inactive').map(s=>({v:s.id, l:s.name}))},
+    {k:'linkedRef', label:'Linked Order / Bid / Customer (optional)'},
+    {k:'item', label:'Item / Description', req:true},
+    {k:'qty', label:'Quantity', type:'number'},
+    {k:'amount', label:'PO Amount (₹)', type:'number', req:true},
+    {k:'poDate', label:'PO Date', type:'date'},
+    {k:'expectedDate', label:'Expected Delivery', type:'date'},
+    {k:'receivedDate', label:'Received On', type:'date'},
+    {k:'status', label:'PO Status', type:'select', opts:PO_STATUS},
+    {k:'payStatus', label:'Payment to Supplier', type:'select', opts:PO_PAY},
+    {k:'note', label:'Note', type:'textarea'}
+  ],
+  layout:[['supplierId','linkedRef'],['item'],['qty','amount'],['poDate','expectedDate'],['receivedDate'],['status','payStatus'],['note']],
+  beforeSave(rec){
+    const s = Store.data.suppliers.find(x=>x.id===rec.supplierId);
+    rec.supplierName = s ? s.name : '';
+    if(rec.status==='Received' && !rec.receivedDate) rec.receivedDate = Util.todayISO();
+  },
+  cards:(all)=>{
+    const open = all.filter(poIsOpen);
+    const late = open.filter(p=>{ const d=Util.daysUntil(p.expectedDate); return d!==null && d<0; });
+    const unpaid = all.filter(p=>p.status!=='Cancelled' && p.payStatus!=='Paid').reduce((s,p)=>s+(Number(p.amount)||0),0);
+    return [
+      {label:'Total POs', value:all.length},
+      {label:'Open (awaiting goods)', value:open.length, color:'var(--blue,#2563eb)'},
+      {label:'Delivery Overdue', value:late.length, color:late.length?'var(--red,#dc2626)':undefined},
+      {label:'Received', value:all.filter(p=>p.status==='Received').length, color:'var(--green,#16a34a)'},
+      {label:'Payable to Suppliers', value:Util.fmtMoney(unpaid), color:'var(--amber,#d97706)'}
+    ];
+  },
+  cols:[
+    {h:'PO No', f:r=>Util.escapeHtml(r.id), cls:'mono'},
+    {h:'Supplier', f:r=>Util.escapeHtml(r.supplierName||'—'), cls:'cell-main'},
+    {h:'Item', f:r=>Util.escapeHtml(r.item||'')+(r.qty?' × '+Util.escapeHtml(r.qty):'')},
+    {h:'Linked To', f:r=>Util.escapeHtml(r.linkedRef||'—')},
+    {h:'Amount', f:r=>Util.fmtMoney(r.amount), cls:'mono'},
+    {h:'PO Date', f:r=>Util.fmtDate(r.poDate)},
+    {h:'Expected', f:r=>Util.fmtDate(r.expectedDate)},
+    {h:'Delivery', f:r=>recDueBadge(r.expectedDate, !poIsOpen(r), 3), cls:''},
+    {h:'Status', f:r=>recBadge(r.status, r.status==='Received'?'green':r.status==='Cancelled'?'red':r.status==='Draft'?'gray':'blue'), cls:''},
+    {h:'Payment', f:r=>recBadge(r.payStatus||'Unpaid', r.payStatus==='Paid'?'green':r.payStatus==='Part Paid'?'amber':'red'), cls:''}
+  ]
+});
+Views.purchaseorders = ()=>PurchaseOrders.render();
+
+/* ---------------- SERVICE & AMC ---------------- */
+const AMC_TYPES = ['AMC','Warranty','Installation','Service Visit'];
+const AMC_STATUS = ['Active','Due for Renewal','Expired','Closed'];
+function amcIsOpen(r){ return r.status==='Active' || r.status==='Due for Renewal'; }
+const Amc = RecModule.make({
+  name:'Amc', coll:'amcRecords', view:'amc', title:'Service & AMC', singular:'Service/AMC Record', addLabel:'Add Service / AMC',
+  icon:'&#128295;', emptyTitle:'No service or AMC records', emptyDesc:'Track AMC contracts, warranties and service visits so renewals and service dues are never missed.',
+  prefix:'AMC-', counter:'amcNext', statusField:'status', statusOpts:AMC_STATUS,
+  searchHint:'Search customer, product, serial no, record id...',
+  searchKeys:['id','customerName','product','serialNo','type'],
+  label:r=>(r.type||'')+' — '+(r.customerName||''),
+  sort:(a,b)=>(a.nextServiceDate||a.endDate||'9999').localeCompare(b.nextServiceDate||b.endDate||'9999'),
+  defaults:()=>({type:'AMC', customerId:'', customerName:'', product:'', serialNo:'', startDate:Util.todayISO(), endDate:'', nextServiceDate:'', amount:'', status:'Active', note:''}),
+  fields:[
+    {k:'type', label:'Type', type:'select', opts:AMC_TYPES},
+    {k:'status', label:'Status', type:'select', opts:AMC_STATUS},
+    {k:'customer', label:'Customer (from Customers)', type:'cust'},
+    {k:'customerName', label:'Customer Name', req:true},
+    {k:'product', label:'Product / Equipment', req:true},
+    {k:'serialNo', label:'Serial / Model No'},
+    {k:'startDate', label:'Start Date', type:'date'},
+    {k:'endDate', label:'End / Renewal Date', type:'date'},
+    {k:'nextServiceDate', label:'Next Service Due', type:'date'},
+    {k:'amount', label:'Contract Value (₹)', type:'number'},
+    {k:'note', label:'Note / Service History', type:'textarea'}
+  ],
+  layout:[['type','status'],['customer'],['customerName','product'],['serialNo','amount'],['startDate','endDate'],['nextServiceDate'],['note']],
+  cards:(all)=>{
+    const open = all.filter(amcIsOpen);
+    const renew = open.filter(r=>{ const d=Util.daysUntil(r.endDate); return d!==null && d<=30; });
+    const svc = open.filter(r=>{ const d=Util.daysUntil(r.nextServiceDate); return d!==null && d<=7; });
+    return [
+      {label:'Active Contracts', value:open.length},
+      {label:'Renewal in 30 days', value:renew.length, color:'var(--amber,#d97706)'},
+      {label:'Service Due (7 days)', value:svc.length, color:svc.length?'var(--red,#dc2626)':undefined},
+      {label:'Contract Value', value:Util.fmtMoney(open.reduce((s,r)=>s+(Number(r.amount)||0),0)), color:'var(--green,#16a34a)'}
+    ];
+  },
+  cols:[
+    {h:'Type', f:r=>recBadge(r.type, r.type==='AMC'?'blue':'gray'), cls:''},
+    {h:'Customer', f:r=>Util.escapeHtml(r.customerName||'—')+'<div class="cell-mute" style="font-size:11px;">'+Util.escapeHtml(r.id)+'</div>', cls:'cell-main'},
+    {h:'Product', f:r=>Util.escapeHtml(r.product||'')+(r.serialNo?'<div class="cell-mute" style="font-size:11px;">'+Util.escapeHtml(r.serialNo)+'</div>':'')},
+    {h:'Value', f:r=>r.amount?Util.fmtMoney(r.amount):'—', cls:'mono'},
+    {h:'Ends', f:r=>Util.fmtDate(r.endDate)},
+    {h:'Renewal', f:r=>recDueBadge(r.endDate, !amcIsOpen(r)), cls:''},
+    {h:'Next Service', f:r=>Util.fmtDate(r.nextServiceDate)},
+    {h:'Service Due', f:r=>recDueBadge(r.nextServiceDate, !amcIsOpen(r), 7), cls:''},
+    {h:'Status', f:r=>recBadge(r.status, r.status==='Active'?'green':r.status==='Due for Renewal'?'amber':r.status==='Expired'?'red':'gray'), cls:''}
+  ]
+});
+Views.amc = ()=>Amc.render();
+
+/* ---------------- BID READINESS SCORE ----------------
+   One explainable 0-100 number per bid: 70 pts documents checklist,
+   20 pts EMD arranged (full marks when the bid needs no EMD), 10 pts
+   bid basics filled (title, organisation, closing date). Returns the
+   parts too so the detail view can say exactly what is missing. */
+function bidReadiness(b){
+  const cl = Array.isArray(b.checklist) ? b.checklist : [];
+  const docDone = cl.filter(c=>c.done).length;
+  const docPts = cl.length ? Math.round(70*docDone/cl.length) : 0;
+  const needsEmd = Number(b.emdAmount)>0;
+  const emdRec = (Store.data.emdPbg||[]).find(r=>r.bidId===b.id && r.type==='EMD' && r.status!=='Forfeited');
+  const emdPts = (!needsEmd || emdRec) ? 20 : 0;
+  const basics = [b.title, b.organisation, b.endDate].filter(Boolean).length;
+  const basicPts = Math.round(10*basics/3);
+  const missing = [];
+  if(cl.length && docDone<cl.length) missing.push((cl.length-docDone)+' document(s) pending');
+  if(!cl.length) missing.push('no document checklist');
+  if(!emdPts) missing.push('EMD not recorded');
+  if(basics<3) missing.push('bid details incomplete');
+  return {score: docPts+emdPts+basicPts, docDone, docTotal: cl.length, needsEmd, emdRec, missing};
+}
+function bidReadinessBadge(b){
+  const r = bidReadiness(b);
+  const cls = r.score>=80?'green':r.score>=50?'amber':'red';
+  return `<span class="badge badge-${cls}" title="${Util.escapeHtml(r.missing.join(', ')||'Ready to submit')}">${r.score}%</span>`;
+}
+
 /* Called by CustPicker in the Tasks & To-Do form — fills the customer
    name/phone captured on the task (Area/Panchayath is picked up
    automatically via custArea(customerId) in the table). */
@@ -5328,6 +5802,761 @@ Views.inventory = ()=>Inventory.render();
 /* =====================================================================
    NOTIFICATIONS  (computed action-items across every module)
 ===================================================================== */
+/* =====================================================================
+   ALERTS — one place that computes the Phase 7 alerts (EMD/PBG expiry,
+   overdue purchase orders, AMC renewal / service due, quotations with no
+   reply, complaints open too long). Notifications, the dashboard "My
+   Action Required" list and the sidebar badges all read from this, so
+   the rules live in exactly one spot.
+===================================================================== */
+const Alerts = {
+  TYPES:['Guarantee Expiring','Guarantee Overdue','PO Delivery Overdue','AMC Renewal','Service Due','Quotation No Reply','Complaint Open 2+ Days'],
+  collect(){
+    const out = [];
+    const D = Store.data;
+    (D.emdPbg||[]).forEach(r=>{
+      if(!emdPbgIsOpen(r)) return;
+      const d = Util.daysUntil(r.expiryDate); if(d===null) return;
+      const what = (r.type||'EMD')+' '+(r.refNo||r.id)+' (₹'+(Number(r.amount)||0).toLocaleString('en-IN')+')';
+      if(d<0) out.push({type:'Guarantee Overdue', text:what+' expired '+Math.abs(d)+'d ago', color:'var(--red,#dc2626)', icon:'&#128274;', view:'emdpbg'});
+      else if(d<=30) out.push({type:'Guarantee Expiring', text:what+' — '+(d===0?'today':d+' day(s) left'), color:'var(--amber,#d97706)', icon:'&#128274;', view:'emdpbg'});
+    });
+    (D.purchaseOrders||[]).forEach(p=>{
+      if(!poIsOpen(p)) return;
+      const d = Util.daysUntil(p.expectedDate);
+      if(d!==null && d<0) out.push({type:'PO Delivery Overdue', text:p.id+' — '+(p.supplierName||'')+' ('+Math.abs(d)+'d late)', color:'var(--red,#dc2626)', icon:'&#128230;', view:'purchaseorders'});
+    });
+    (D.amcRecords||[]).forEach(r=>{
+      if(!amcIsOpen(r)) return;
+      const e = Util.daysUntil(r.endDate), s = Util.daysUntil(r.nextServiceDate);
+      if(e!==null && e<=30) out.push({type:'AMC Renewal', text:(r.customerName||'')+' — '+(r.product||'')+' ('+(e<0?Math.abs(e)+'d overdue':e+'d left')+')', color:'var(--amber,#d97706)', icon:'&#128295;', view:'amc'});
+      if(s!==null && s<=7) out.push({type:'Service Due', text:(r.customerName||'')+' — '+(r.product||'')+' ('+(s<0?Math.abs(s)+'d overdue':s===0?'today':s+'d left')+')', color:'var(--red,#dc2626)', icon:'&#128295;', view:'amc'});
+    });
+    (D.quotations||[]).forEach(q=>{
+      if(q.status!=='Sent') return;
+      const age = -Util.daysUntil(q.date); // days since the quotation date
+      if(q.date && age>=3) out.push({type:'Quotation No Reply', text:(q.customerName||q.party||q.id||'Quotation')+' — sent '+age+' days ago', color:'var(--blue,#2563eb)', icon:'&#128196;', view:'quotations'});
+    });
+    (D.complaints||[]).forEach(c=>{
+      if(c.status==='Solved') return;
+      const age = -Util.daysUntil(c.complaintDate);
+      if(c.complaintDate && age>=2) out.push({type:'Complaint Open 2+ Days', text:(c.complaintFrom||'Customer')+' — open '+age+' days', color:'var(--amber,#d97706)', icon:'&#9888;', view:'complaints'});
+    });
+    return out;
+  }
+};
+
+/* =====================================================================
+   DAILY SUMMARY — builds a plain-text snapshot of today (follow-ups,
+   tasks, payments, bids, guarantees, POs, AMC, complaints) from the same
+   data and Alerts rules the dashboard uses, shown in a box the user can
+   copy or share (phone share sheet -> WhatsApp etc.). Nothing is sent
+   automatically and no new messaging link logic is involved.
+===================================================================== */
+const DailySummary = {
+  build(){
+    const D = Store.data, today = Util.todayISO();
+    const lines = [];
+    const co = (D.settings && D.settings.companyName) || 'Jays Trading';
+    lines.push('*'+co+' — Daily Summary*');
+    lines.push(new Date().toLocaleDateString('en-IN',{weekday:'long',day:'2-digit',month:'short',year:'numeric'}));
+    const sec = (title, arr, fmt, max)=>{
+      if(!arr.length) return;
+      lines.push('', '*'+title+' ('+arr.length+')*');
+      arr.slice(0,max||5).forEach(x=>lines.push('• '+fmt(x)));
+      if(arr.length>(max||5)) lines.push('  …and '+(arr.length-(max||5))+' more');
+    };
+    sec('Follow-ups due', D.followups.filter(f=>f.status!=='Done' && f.date && f.date<=today), f=>(f.customerName||'Customer')+(f.purpose?' — '+f.purpose:'')+(f.date<today?' (overdue)':''));
+    sec('Tasks due', D.tasks.filter(t=>t.status && t.status!=='Completed' && t.date && t.date<=today), t=>(t.todo||'Task')+(t.date<today?' (overdue)':''));
+    sec('Payments to collect', D.payments.filter(p=>Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0)>0 && p.followupDate && p.followupDate<=today),
+      p=>(p.party||'Party')+' — '+'₹'+Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0).toLocaleString('en-IN'));
+    sec('GeM bids closing in 3 days', (D.bids||[]).filter(b=>{ const d=bidDeadlineInfo(b.endDate).days; return d!==null && d>=0 && d<=3 && !BID_TERMINAL_STATUSES.includes(b.status); }),
+      b=>(b.bidNumber||b.title||'Bid')+' — '+bidDeadlineInfo(b.endDate).label+' (ready '+bidReadiness(b).score+'%)');
+    const al = Alerts.collect();
+    ['Guarantee Overdue','Guarantee Expiring','PO Delivery Overdue','AMC Renewal','Service Due','Quotation No Reply','Complaint Open 2+ Days'].forEach(t=>{
+      sec(t, al.filter(a=>a.type===t), a=>a.text);
+    });
+    if(lines.length===2) lines.push('', 'All clear — nothing needs attention today.');
+    return lines.join('\n');
+  },
+  open(){
+    UI.openModal('Daily Summary',
+      `<div class="hint" style="margin-bottom:8px;">Copy this, or share it straight to WhatsApp from your phone.</div><textarea id="ds_text" style="width:100%;min-height:300px;font-family:inherit;font-size:13px;">${Util.escapeHtml(this.build())}</textarea>`,
+      `<button class="btn btn-outline" onclick="UI.closeModal()">Close</button><button class="btn btn-outline" onclick="DailySummary.copy()">Copy</button><button class="btn btn-primary" onclick="DailySummary.share()">Share</button>`);
+  },
+  async copy(){
+    const el = document.getElementById('ds_text'); if(!el) return;
+    try{ await navigator.clipboard.writeText(el.value); UI.toast('Copied'); }
+    catch(e){ el.select(); try{ document.execCommand('copy'); UI.toast('Copied'); }catch(_){ UI.toast('Select the text and copy it manually'); } }
+  },
+  async share(){
+    const el = document.getElementById('ds_text'); if(!el) return;
+    if(navigator.share){ try{ await navigator.share({text: el.value}); }catch(e){ /* user cancelled */ } }
+    else this.copy();
+  }
+};
+
+/* =====================================================================
+   TENDER INTELLIGENCE CENTRE (Stage 1)
+   Collects government e-tenders into real database tables
+   (tenders / tender_sources / tender_collection_runs / tender_changes,
+   migration 001_tender_intelligence.sql) through ONE ingestion pipeline,
+   the tender_ingest_batch() database function, used by manual entry and
+   by spreadsheet import alike. De-duplication, change history and run
+   logging all happen inside that function, in the database, so they work
+   the same however records arrive.
+
+   Honest scope: sources are import-only. No portal is scraped and no
+   automated collection runs - GeM / CPPP / Kerala e-Tender lists are
+   brought in by Excel/CSV import or manual entry. Scoring REUSES the
+   existing Project Opportunity keyword groups (Store.data.oppKeywordGroups
+   + oppProducts + the excluded-bid-keywords setting) - there is no second
+   scoring engine. Relevance is not eligibility.
+===================================================================== */
+const TENDER_REVIEW_LABEL = {new:'New', under_review:'Under Review', shortlisted:'Shortlisted', rejected:'Rejected', converted:'Converted'};
+const TENDER_REVIEW_COLOR = {new:'blue', under_review:'amber', shortlisted:'green', rejected:'red', converted:'gray'};
+const TENDER_FIELDS = [
+  {k:'portal_tender_id', label:'Portal Tender / Bid ID', alias:['bid number','bid no','bid id','tender id','tender id ref','portal tender id','reference no','reference number','ref no']},
+  {k:'tender_number', label:'Tender Number', alias:['tender number','tender no','tender ref','nit no','nit number','nit','tender reference','e tender no']},
+  {k:'title', label:'Title', req:true, alias:['title','tender title','bid title','items','item','item category','work description','name of work','description of work','work name','tender description','subject']},
+  {k:'description', label:'Description', alias:['details','long description','scope','bid details','remarks']},
+  {k:'buyer_name', label:'Buyer / Department', alias:['department','department name','organisation','organization','organisation name','buyer','buyer name','ministry','tendering authority','tender inviting authority','office','tender owner']},
+  {k:'buyer_location', label:'Buyer Location', alias:['buyer location','office location','delivery location','consignee location','place']},
+  {k:'state', label:'State', alias:['state']},
+  {k:'district', label:'District', alias:['district','dist']},
+  {k:'category', label:'Category', alias:['category','product category','item category','tender category','type of work','work category']},
+  {k:'published_at', label:'Published Date', type:'date', alias:['published date','publish date','start date','bid start date','published on','tender published date','bid publish date','publication date']},
+  {k:'closing_at', label:'Closing Date', type:'date', alias:['closing date','end date','bid end date','bid submission end date','submission end date','due date','last date','bid closing date','closing on','bid end date time']},
+  {k:'estimated_value', label:'Estimated Value (₹)', type:'num', alias:['estimated value','tender value','value','estimated cost','estimated bid value','epc','tender value in','estimated amount','contract value']},
+  {k:'emd_amount', label:'EMD (₹)', type:'num', alias:['emd','emd amount','earnest money','earnest money deposit','emd value']},
+  {k:'tender_fee', label:'Tender Fee (₹)', type:'num', alias:['tender fee','document fee','bid fee','tender document fee','fee']},
+  {k:'bid_type', label:'Bid Type', alias:['bid type','tender type','type','procurement type','mode']},
+  {k:'source_url', label:'Official Source URL', type:'url', alias:['url','link','source url','bid url','tender url','official link','document link','web link']},
+  {k:'source_status', label:'Portal Status', alias:['status','bid status','tender status','portal status']}
+];
+function tenderNormHeader(h){ return String(h==null?'':h).toLowerCase().replace(/[^a-z0-9]+/g,' ').trim(); }
+function tenderSafeUrl(u){ return /^https?:\/\//i.test(String(u||'').trim()) ? String(u).trim() : ''; }
+/* Dates are shown and judged in Indian time, whatever the viewer's device clock says. */
+function tenderIstDate(iso){ if(!iso) return ''; const d = new Date(iso); return isNaN(d) ? '' : d.toLocaleDateString('en-CA', {timeZone:'Asia/Kolkata'}); }
+function tenderFmtDateTime(iso){
+  if(!iso) return '<span class="cell-mute">&mdash;</span>';
+  const d = new Date(iso); if(isNaN(d)) return Util.escapeHtml(iso);
+  const hasTime = d.toLocaleTimeString('en-GB',{timeZone:'Asia/Kolkata', hour12:false}) !== '00:00:00';
+  return d.toLocaleString('en-IN', Object.assign({timeZone:'Asia/Kolkata', day:'2-digit', month:'short', year:'numeric'}, hasTime?{hour:'2-digit', minute:'2-digit'}:{}));
+}
+/* Parses the date styles real portal exports use. Returns an ISO string
+   anchored to +05:30, '' when blank, or null when it can't be understood. */
+function tenderParseDate(v){
+  if(v===null || v===undefined || String(v).trim()==='') return '';
+  const pad = n=>String(n).padStart(2,'0');
+  const out = (y,m,d,hh,mm)=>{
+    y=+y; m=+m; d=+d; hh=+hh||0; mm=+mm||0;
+    if(y<100) y += 2000;
+    const t = new Date(Date.UTC(y, m-1, d));
+    if(t.getUTCFullYear()!==y || t.getUTCMonth()!==m-1 || t.getUTCDate()!==d || hh>23 || mm>59) return null;
+    return `${y}-${pad(m)}-${pad(d)}T${pad(hh)}:${pad(mm)}:00+05:30`;
+  };
+  if(v instanceof Date){
+    if(isNaN(v)) return null;
+    const r = new Date(v.getTime()+30000); // SheetJS dates carry sub-minute drift
+    return out(r.getFullYear(), r.getMonth()+1, r.getDate(), r.getHours(), r.getMinutes());
+  }
+  const s = String(v).trim();
+  let m;
+  if((m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T\s]+(\d{1,2}):(\d{2}))?/))) return out(m[1],m[2],m[3],m[4],m[5]);
+  if((m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})(?:[,\s]+(\d{1,2}):(\d{2})(?::\d{2})?\s*([AaPp][Mm])?)?/))){
+    let hh = m[4]; if(m[6] && hh){ hh = +hh % 12; if(/p/i.test(m[6])) hh += 12; }
+    return out(m[3], m[2], m[1], hh, m[5]);   // day-first, the Indian convention
+  }
+  const MON = {jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12};
+  if((m = s.match(/^(\d{1,2})[\s\-]([A-Za-z]{3})[a-z]*[\s\-,]+(\d{2,4})(?:[,\s]+(\d{1,2}):(\d{2})\s*([AaPp][Mm])?)?/)) && MON[m[2].toLowerCase()]){
+    let hh = m[4]; if(m[6] && hh){ hh = +hh % 12; if(/p/i.test(m[6])) hh += 12; }
+    return out(m[3], MON[m[2].toLowerCase()], m[1], hh, m[5]);
+  }
+  if(/^\d{5}(\.\d+)?$/.test(s)){ // Excel serial number
+    const ms = Math.round((Number(s)-25569)*86400000);
+    const d = new Date(ms);
+    return out(d.getUTCFullYear(), d.getUTCMonth()+1, d.getUTCDate(), d.getUTCHours(), d.getUTCMinutes());
+  }
+  return null;
+}
+function tenderParseAmount(v){
+  if(v===null || v===undefined || String(v).trim()==='') return '';
+  if(typeof v==='number') return isFinite(v) && v>=0 ? String(v) : null;
+  const s = String(v).replace(/[₹,\s]|rs\.?|inr/gi,'');
+  return /^\d+(\.\d+)?$/.test(s) ? s : null;
+}
+
+const TenderCentre = {
+  tab: 'tenders',                // tenders | runs | sources
+  f: {q:'', portal:'', review:'', status:'', closing:'', minScore:'', sort:'closing'},
+  page: 1, perPage: 25,
+  busy: false,
+  imp: null,                     // import-wizard state
+
+  /* ----------------------------------------------------- scoring (reuses Opportunity Finder keywords) */
+  score(t){
+    const text = oppNorm([t.title, t.description, t.category, t.buyer_name].filter(Boolean).join(' '));
+    if(!text) return {score:null, reasons:[]};
+    const excluded = (Store.data.settings.excludedBidKeywords||'').split(',').map(s=>oppNorm(s)).filter(Boolean);
+    const hitNeg = excluded.find(x=>text.includes(x));
+    if(hitNeg) return {score:0, reasons:[{word:hitNeg, weight:0, tier:'Excluded keyword'}]};
+    const groups = (Store.data.oppKeywordGroups && Store.data.oppKeywordGroups.length) ? Store.data.oppKeywordGroups : OPP_DEFAULT_KEYWORD_GROUPS;
+    const reasons = [];
+    groups.forEach(g=>(g.words||[]).forEach(w=>{
+      const wn = oppNorm(w);
+      if(wn && text.includes(wn)) reasons.push({word:w, weight:Number(g.weight)||0, tier:g.tier});
+    }));
+    (Store.data.oppProducts||[]).forEach(p=>String(p.keywords||'').split(',').forEach(k=>{
+      const wn = oppNorm(k);
+      if(wn && text.includes(wn)) reasons.push({word:k.trim(), weight:18, tier:'Your Product Keywords'});
+    }));
+    // The same word appearing in two groups is one reason, not two.
+    const seen = new Set(); const uniq = reasons.filter(r=>{ const k=oppNorm(r.word); if(seen.has(k)) return false; seen.add(k); return true; });
+    const sum = uniq.reduce((s,r)=>s+r.weight,0);
+    return {score: Math.min(100, Math.round(sum*2)), reasons: uniq.slice(0,12)};
+  },
+
+  /* ----------------------------------------------------- data access */
+  applyFilters(qb){
+    const f = this.f;
+    const q = String(f.q||'').replace(/[,()%*\\]/g,' ').trim();
+    if(q) qb = qb.or(`title.ilike.%${q}%,tender_number.ilike.%${q}%,portal_tender_id.ilike.%${q}%,buyer_name.ilike.%${q}%,category.ilike.%${q}%`);
+    if(f.portal) qb = qb.eq('portal_code', f.portal);
+    if(f.review){
+      if(f.review==='changed') qb = qb.eq('changed_since_review', true);
+      else qb = qb.eq('review_status', f.review);
+    }
+    const today = Util.todayISO();
+    const dayStart = d=>`${d}T00:00:00+05:30`;
+    if(f.status) qb = qb.eq('normalized_status', f.status);
+    if(f.closing==='today') qb = qb.gte('closing_at', dayStart(today)).lt('closing_at', dayStart(this.addDays(today,1)));
+    else if(f.closing==='week') qb = qb.gte('closing_at', dayStart(today)).lt('closing_at', dayStart(this.addDays(today,8)));
+    else if(f.closing==='expired') qb = qb.lt('closing_at', dayStart(today));
+    else if(f.closing==='open') qb = qb.gte('closing_at', dayStart(today));
+    if(f.minScore) qb = qb.gte('match_score', Number(f.minScore));
+    return qb;
+  },
+  addDays(iso, n){ const d = new Date(iso+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()+n); return d.toISOString().slice(0,10); },
+  async count(build){
+    const { count, error } = await build(sb.from('tenders').select('id', {count:'exact', head:true}));
+    if(error) throw new Error(error.message);
+    return count || 0;
+  },
+
+  /* ----------------------------------------------------- page */
+  async render(){
+    const tabs = [['tenders','Tenders'],['runs','Import Runs'],['sources','Sources']];
+    const head = `<div class="toolbar" style="gap:6px;flex-wrap:wrap;">${tabs.map(([k,l])=>`<button class="btn ${this.tab===k?'btn-primary':'btn-outline'} btn-sm" onclick="TenderCentre.setTab('${k}')">${l}</button>`).join('')}<div class="toolbar-spacer"></div></div>`;
+    document.getElementById('content').innerHTML = head + '<div class="card card-pad"><div class="cell-mute">Loading tenders&hellip;</div></div>';
+    try{
+      const body = this.tab==='runs' ? await this.runsHTML() : this.tab==='sources' ? await this.sourcesHTML() : await this.listHTML();
+      document.getElementById('content').innerHTML = head + body;
+    }catch(e){
+      console.error('Tender Centre load failed', e);
+      document.getElementById('content').innerHTML = head + `<div class="card card-pad"><b>Couldn't load tender data.</b><div class="cell-mute" style="margin:6px 0 10px;">${Util.escapeHtml(e.message||String(e))}</div><button class="btn btn-outline btn-sm" onclick="TenderCentre.render()">Retry</button></div>`;
+    }
+  },
+  setTab(t){ this.tab = t; this.render(); },
+  setFilter(k, v){ this.f[k] = v; this.page = 1; this.render(); },
+  clearFilters(){ this.f = {q:'', portal:'', review:'', status:'', closing:'', minScore:'', sort:this.f.sort}; this.page = 1; this.render(); },
+  setPage(p){ this.page = p; this.render(); },
+  setPerPage(n){ this.perPage = Number(n); this.page = 1; this.render(); },
+  searchSoon(v){ clearTimeout(this._st); this._st = setTimeout(()=>{ this.f.q = v; this.page = 1; this.render(); }, 350); },
+
+  async listHTML(){
+    const f = this.f, today = Util.todayISO();
+    const ds = d=>`${d}T00:00:00+05:30`;
+    const sortCfg = {closing:['closing_at',true], score:['match_score',false], newest:['first_seen_at',false], value:['estimated_value',false]}[f.sort] || ['closing_at',true];
+    let listQ = this.applyFilters(sb.from('tenders').select('*', {count:'exact'}))
+      .order(sortCfg[0], {ascending:sortCfg[1], nullsFirst:false}).order('id')
+      .range((this.page-1)*this.perPage, this.page*this.perPage-1);
+    const [list, sources, total, nNew, nChanged, nShort, nSoon, nExpired, nAwaiting, failedRuns] = await Promise.all([
+      listQ,
+      sb.from('tender_sources').select('*').eq('enabled', true).order('portal_code'),
+      this.count(q=>q), this.count(q=>q.eq('review_status','new')), this.count(q=>q.eq('changed_since_review',true)),
+      this.count(q=>q.eq('review_status','shortlisted')),
+      this.count(q=>q.gte('closing_at', ds(today)).lt('closing_at', ds(this.addDays(today,4))).neq('review_status','rejected')),
+      this.count(q=>q.or(`normalized_status.in.(cancelled,closed),closing_at.lt.${ds(today)}`)),
+      this.count(q=>q.in('review_status',['new','under_review'])),
+      sb.from('tender_collection_runs').select('id', {count:'exact', head:true}).in('status',['failed','partial']).gte('started_at', new Date(Date.now()-7*864e5).toISOString())
+    ]);
+    if(list.error) throw new Error(list.error.message);
+    if(sources.error) throw new Error(sources.error.message);
+    const rows = list.data || [], totalRows = list.count || 0;
+    const totalPages = Math.max(1, Math.ceil(totalRows/this.perPage));
+    const stale = (sources.data||[]).filter(s=>s.collection_method!=='manual' && (!s.last_success_at || (Date.now()-new Date(s.last_success_at))>14*864e5)).length;
+    const opt = (v, l, cur)=>`<option value="${v}" ${String(cur)===String(v)?'selected':''}>${l}</option>`;
+    return `
+      ${dashboardCardsHTML('Tender Intelligence', [
+        {label:'Total Collected', value:total},
+        {label:'New', value:nNew, color:'var(--blue,#2563eb)'},
+        {label:'Changed Since Review', value:nChanged, color:nChanged?'var(--amber,#d97706)':undefined, onclick:"TenderCentre.setFilter('review','changed')"},
+        {label:'Awaiting Review', value:nAwaiting, color:'var(--amber,#d97706)'},
+        {label:'Shortlisted', value:nShort, color:'var(--green,#16a34a)'},
+        {label:'Closing in 3 days', value:nSoon, color:nSoon?'var(--red,#dc2626)':undefined, onclick:"TenderCentre.setFilter('closing','week')"},
+        {label:'Expired / Cancelled', value:nExpired},
+        {label:'Failed runs (7d)', value:failedRuns.count||0, color:(failedRuns.count?'var(--red,#dc2626)':undefined)},
+        {label:'Stale sources', value:stale, color:stale?'var(--amber,#d97706)':undefined, onclick:"TenderCentre.setTab('sources')"}
+      ])}
+      <div class="toolbar">
+        <div class="search"><span class="ic">&#128269;</span><input id="tc_q" placeholder="Search title, tender no, buyer, category..." value="${Util.escapeHtml(f.q)}" oninput="TenderCentre.searchSoon(this.value)"></div>
+        <div class="toolbar-spacer"></div>
+        <button class="btn btn-outline btn-sm" onclick="TenderCentre.rescoreAll()">&#8635; Re-score</button>
+        <button class="btn btn-outline btn-sm" onclick="TenderCentre.exportView()">&#128228; Export</button>
+        <button class="btn btn-outline btn-sm" onclick="TenderCentre.openImport()">&#128229; Import Excel / CSV</button>
+        <button class="btn btn-primary btn-sm" onclick="TenderCentre.openForm(null)">&#65291; Add Tender</button>
+      </div>
+      <div class="toolbar" style="flex-wrap:wrap;">
+        <select onchange="TenderCentre.setFilter('portal',this.value)"><option value="">All Sources</option>${(sources.data||[]).map(s=>opt(s.portal_code, Util.escapeHtml(s.portal_name), f.portal)).join('')}</select>
+        <select onchange="TenderCentre.setFilter('review',this.value)">${opt('','All Review Status',f.review)}${Object.keys(TENDER_REVIEW_LABEL).map(k=>opt(k,TENDER_REVIEW_LABEL[k],f.review)).join('')}${opt('changed','Changed since review',f.review)}</select>
+        <select onchange="TenderCentre.setFilter('status',this.value)">${opt('','All Portal Status',f.status)}${['open','closed','cancelled','awarded','unknown'].map(k=>opt(k,k[0].toUpperCase()+k.slice(1),f.status)).join('')}</select>
+        <select onchange="TenderCentre.setFilter('closing',this.value)">${opt('','Any Closing Date',f.closing)}${opt('today','Closing today',f.closing)}${opt('week','Closing in 7 days',f.closing)}${opt('open','Still open',f.closing)}${opt('expired','Expired',f.closing)}</select>
+        <select onchange="TenderCentre.setFilter('minScore',this.value)">${opt('','Any Match Score',f.minScore)}${opt('80','80%+ High',f.minScore)}${opt('50','50%+ Medium',f.minScore)}${opt('1','Any match (1%+)',f.minScore)}</select>
+        <select onchange="TenderCentre.setFilter('sort',this.value)">${opt('closing','Sort: Closing soonest',f.sort)}${opt('score','Sort: Best match',f.sort)}${opt('newest','Sort: Newest collected',f.sort)}${opt('value','Sort: Highest value',f.sort)}</select>
+        ${(f.q||f.portal||f.review||f.status||f.closing||f.minScore) ? `<button class="btn btn-outline btn-sm" onclick="TenderCentre.clearFilters()">Clear</button>` : ''}
+      </div>
+      <div class="card"><div class="table-wrap">
+      ${rows.length ? `<table><thead><tr><th class="col-actions">Actions</th><th>Match</th><th>Tender</th><th>Buyer</th><th>Value / EMD</th><th>Closing</th><th>Time Left</th><th>Review</th></tr></thead><tbody>
+        ${rows.map(t=>this.rowHTML(t)).join('')}
+      </tbody></table>
+      <div class="pager"><span>Showing ${(this.page-1)*this.perPage+1}&ndash;${Math.min(this.page*this.perPage,totalRows)} of ${totalRows}</span>
+        <select onchange="TenderCentre.setPerPage(this.value)">${[25,50,100].map(n=>`<option value="${n}" ${n===this.perPage?'selected':''}>${n} / page</option>`).join('')}</select>
+        <button class="pg-btn" ${this.page<=1?'disabled':''} onclick="TenderCentre.setPage(${this.page-1})">&lsaquo; Prev</button>
+        <span>Page ${this.page} / ${totalPages}</span>
+        <button class="pg-btn" ${this.page>=totalPages?'disabled':''} onclick="TenderCentre.setPage(${this.page+1})">Next &rsaquo;</button></div>`
+      : `<div class="empty-state"><div class="ic">&#128196;</div><div class="t">${total?'No tenders match these filters':'No tenders collected yet'}</div><div class="d">${total?'Try clearing the filters.':'Add a tender manually, or import an Excel / CSV list exported from GeM, CPPP or the Kerala e-Tender portal.'}</div>
+        <button class="btn btn-primary btn-sm" onclick="TenderCentre.openImport()">&#128229; Import Excel / CSV</button></div>`}
+      </div></div>`;
+  },
+  rowHTML(t){
+    const url = tenderSafeUrl(t.source_url);
+    const eff = t.normalized_status==='cancelled' ? '<span class="badge badge-red">Cancelled</span>' : t.normalized_status==='awarded' ? '<span class="badge badge-gray">Awarded</span>' : bidDeadlineBadgeHTML(tenderIstDate(t.closing_at));
+    return `<tr>
+      <td class="col-actions"><div class="row-action-btns">
+        <button class="icon-btn" title="Details" onclick="TenderCentre.openDetail('${t.id}')">&#128065;</button>
+        ${url?`<a class="icon-btn" title="Open official source" href="${Util.escapeHtml(url)}" target="_blank" rel="noopener noreferrer">&#128279;</a>`:''}
+        <button class="icon-btn" title="Shortlist" onclick="TenderCentre.setReview('${t.id}','shortlisted')">&#11088;</button>
+        <button class="icon-btn" title="Reject" onclick="TenderCentre.openReject('${t.id}')">&#10060;</button>
+      </div></td>
+      <td>${t.match_score==null?'<span class="cell-mute">&mdash;</span>':matchBadgeHTML(t.match_score)}</td>
+      <td class="cell-main" style="max-width:300px;white-space:normal;">${Util.escapeHtml(t.title)}<div class="cell-mute mono" style="font-size:11px;">${Util.escapeHtml(t.portal_code)} &middot; ${Util.escapeHtml(t.tender_number||t.portal_tender_id||'no ID')}</div></td>
+      <td class="cell-mute" style="max-width:200px;white-space:normal;">${Util.escapeHtml(t.buyer_name||'—')}${t.district?'<div style="font-size:11px;">'+Util.escapeHtml(t.district)+'</div>':''}</td>
+      <td class="mono">${t.estimated_value!=null?Util.fmtMoney(t.estimated_value):'—'}<div class="cell-mute" style="font-size:11px;">EMD ${t.emd_amount!=null?Util.fmtMoney(t.emd_amount):'—'}</div></td>
+      <td class="cell-mute">${tenderFmtDateTime(t.closing_at)}</td>
+      <td>${eff}</td>
+      <td><span class="badge badge-${TENDER_REVIEW_COLOR[t.review_status]||'gray'}">${TENDER_REVIEW_LABEL[t.review_status]||t.review_status}</span>${t.changed_since_review?' <span class="badge badge-amber" title="Source changed after you reviewed it">Changed</span>':''}</td>
+    </tr>`;
+  },
+
+  /* ----------------------------------------------------- runs + sources tabs */
+  async runsHTML(){
+    const { data, error } = await sb.from('tender_collection_runs').select('*').order('started_at', {ascending:false}).limit(50);
+    if(error) throw new Error(error.message);
+    const color = {success:'green', partial:'amber', failed:'red', running:'blue', cancelled:'gray'};
+    return `<div class="card"><div class="table-wrap">${(data||[]).length ? `<table><thead><tr><th>When</th><th>Source</th><th>File</th><th>Result</th><th>Found</th><th>New</th><th>Updated</th><th>Unchanged</th><th>Rejected</th></tr></thead><tbody>
+      ${data.map(r=>`<tr><td class="cell-mute">${tenderFmtDateTime(r.started_at)}</td><td>${Util.escapeHtml(r.portal_code)}</td><td class="cell-mute">${Util.escapeHtml(r.file_name||r.trigger_type)}</td>
+        <td><span class="badge badge-${color[r.status]||'gray'}">${Util.escapeHtml(r.status)}</span></td><td>${r.records_found}</td><td>${r.records_inserted}</td><td>${r.records_updated}</td><td>${r.duplicates_skipped}</td><td>${r.records_rejected}</td></tr>`).join('')}
+      </tbody></table>` : `<div class="empty-state"><div class="ic">&#128203;</div><div class="t">No imports yet</div><div class="d">Every import and manual entry is logged here.</div></div>`}</div></div>`;
+  },
+  async sourcesHTML(){
+    const { data, error } = await sb.from('tender_sources').select('*').order('portal_code');
+    if(error) throw new Error(error.message);
+    return `<div class="card card-pad" style="margin-bottom:12px;"><b>Collection is import-only.</b>
+      <div class="cell-mute" style="font-size:12.5px;margin-top:4px;">No portal is scraped or polled automatically. GeM, CPPP and Kerala e-Tender do not offer a verified, permitted automatic feed for this CRM, so lists are brought in through Excel / CSV import or manual entry. An automatic adapter can be added per source later, once its access terms are confirmed.</div></div>
+      <div class="card"><div class="table-wrap"><table><thead><tr><th>Code</th><th>Source</th><th>Method</th><th>Last attempt</th><th>Last success</th><th>Last result</th></tr></thead><tbody>
+      ${(data||[]).filter(s=>s.enabled).map(s=>`<tr><td class="mono">${Util.escapeHtml(s.portal_code)}</td><td class="cell-main">${Util.escapeHtml(s.portal_name)}${tenderSafeUrl(s.base_url)?` <a href="${Util.escapeHtml(s.base_url)}" target="_blank" rel="noopener noreferrer">&#8599;</a>`:''}</td>
+        <td><span class="badge badge-gray">${Util.escapeHtml(s.collection_method)}</span></td><td class="cell-mute">${tenderFmtDateTime(s.last_attempt_at)}</td><td class="cell-mute">${tenderFmtDateTime(s.last_success_at)}</td><td class="cell-mute">${Util.escapeHtml(s.last_run_message||'—')}</td></tr>`).join('')}
+      </tbody></table></div></div>`;
+  },
+
+  /* ----------------------------------------------------- manual entry / edit */
+  async openForm(id){
+    let v = {portal_code:'OTHER'};
+    if(id){
+      const { data, error } = await sb.from('tenders').select('*').eq('id', id).maybeSingle();
+      if(error || !data){ UI.toast('Could not load tender'); return; }
+      v = data;
+    }
+    const inp = (k, label, type, extra)=>`<div class="field"><label>${label}</label><input id="tf_${k}" type="${type||'text'}" value="${Util.escapeHtml(v[k]==null?'':v[k])}" ${extra||''}></div>`;
+    const dt = k=>{ const d = tenderIstDate(v[k]); return d; };
+    UI.openModal(id?'Edit Tender':'Add Tender', `
+      <div class="form-row">
+        <div class="field"><label>Source</label><select id="tf_portal_code" ${id?'disabled':''}>${['GEM','CPPP','KERALA','OTHER'].map(p=>`<option ${p===v.portal_code?'selected':''}>${p}</option>`).join('')}</select></div>
+        ${inp('portal_tender_id','Portal Tender / Bid ID')}
+      </div>
+      <div class="form-row">${inp('tender_number','Tender Number')}${inp('bid_type','Bid Type')}</div>
+      <div class="field"><label>Title *</label><input id="tf_title" value="${Util.escapeHtml(v.title||'')}"></div>
+      <div class="field"><label>Official Source URL</label><input id="tf_source_url" type="url" placeholder="https://..." value="${Util.escapeHtml(v.source_url||'')}"></div>
+      <div class="form-row">${inp('buyer_name','Buyer / Department')}${inp('buyer_location','Buyer Location')}</div>
+      <div class="form-row">${inp('state','State')}${inp('district','District')}</div>
+      <div class="field"><label>Category</label><input id="tf_category" value="${Util.escapeHtml(v.category||'')}"></div>
+      <div class="form-row">
+        <div class="field"><label>Published</label><input id="tf_published_at" type="date" value="${dt('published_at')}"></div>
+        <div class="field"><label>Closing Date</label><input id="tf_closing_at" type="date" value="${dt('closing_at')}"></div>
+      </div>
+      <div class="form-row">${inp('estimated_value','Estimated Value (₹)','number','min="0"')}${inp('emd_amount','EMD (₹)','number','min="0"')}${inp('tender_fee','Tender Fee (₹)','number','min="0"')}</div>
+      <div class="field"><label>Description</label><textarea id="tf_description">${Util.escapeHtml(v.description||'')}</textarea></div>
+      <div class="field"><label>Internal Notes</label><textarea id="tf_notes">${Util.escapeHtml(v.notes||'')}</textarea></div>
+    `, `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" id="tf_saveBtn" onclick="TenderCentre.saveForm('${id||''}')">Save</button>`, true);
+  },
+  readForm(){
+    const g = k=>{ const el = document.getElementById('tf_'+k); return el ? el.value.trim() : ''; };
+    const row = {};
+    const problems = [];
+    TENDER_FIELDS.forEach(f=>{
+      let val = g(f.k);
+      if(f.type==='date'){ const p = tenderParseDate(val); if(p===null) problems.push(f.label+' is not a valid date'); val = p||''; }
+      if(f.type==='num'){ const p = tenderParseAmount(val); if(p===null) problems.push(f.label+' must be a number'); val = p||''; }
+      if(f.type==='url' && val && !tenderSafeUrl(val)) problems.push('Source URL must start with http:// or https://');
+      row[f.k] = val;
+    });
+    if(!row.title) problems.push('Title is required');
+    return {row, problems, portal: g('portal_code')};
+  },
+  async saveForm(id){
+    if(this.busy) return;
+    const {row, problems, portal} = this.readForm();
+    if(problems.length){ UI.toast(problems[0]); return; }
+    this.busy = true; const btn = document.getElementById('tf_saveBtn'); if(btn) btn.disabled = true;
+    try{
+      const sc = this.score(row); row.match_score = sc.score; row.match_reasons = sc.reasons;
+      if(id){
+        const upd = {title:row.title, tender_number:row.tender_number||null, portal_tender_id:row.portal_tender_id||null, bid_type:row.bid_type||null,
+          source_url:row.source_url||null, buyer_name:row.buyer_name||null, buyer_location:row.buyer_location||null, state:row.state||null, district:row.district||null,
+          category:row.category||null, published_at:row.published_at||null, closing_at:row.closing_at||null,
+          estimated_value:row.estimated_value===''?null:Number(row.estimated_value), emd_amount:row.emd_amount===''?null:Number(row.emd_amount),
+          tender_fee:row.tender_fee===''?null:Number(row.tender_fee), description:row.description||null, notes:(document.getElementById('tf_notes')||{}).value||null,
+          match_score:sc.score, match_reasons:sc.reasons};
+        const { error } = await sb.from('tenders').update(upd).eq('id', id);
+        if(error) throw new Error(error.message);
+        await Activity.log('Tender edited', row.title);
+      } else {
+        const res = await this.ingest(portal||'OTHER', [row], 'manual', null, false);
+        if(res.rejected){ throw new Error((res.errors[0]||{}).reason || 'Rejected'); }
+        const notes = (document.getElementById('tf_notes')||{}).value;
+        if(notes && res.inserted){ await sb.from('tenders').update({notes}).eq('portal_code', portal).eq('title', row.title).is('notes', null); }
+        await Activity.log('Tender added', row.title);
+        if(res.duplicates_skipped) UI.toast('Already in the tender list - nothing duplicated', 3500);
+      }
+      UI.closeModal(); UI.toast('Saved'); this.render();
+    }catch(e){ console.error(e); UI.toast('Could not save: '+(e.message||e), 5000); if(btn) btn.disabled = false; }
+    finally{ this.busy = false; }
+  },
+  async ingest(portal, rows, trigger, fileName, dryRun){
+    const { data, error } = await sb.rpc('tender_ingest_batch', {p_portal:portal, p_rows:rows, p_trigger:trigger, p_file_name:fileName, p_dry_run:!!dryRun});
+    if(error) throw new Error(error.message);
+    return data;
+  },
+
+  /* ----------------------------------------------------- details, review, convert */
+  async openDetail(id){
+    const [t, ch] = await Promise.all([
+      sb.from('tenders').select('*').eq('id', id).maybeSingle(),
+      sb.from('tender_changes').select('*').eq('tender_id', id).order('detected_at', {ascending:false}).limit(30)
+    ]);
+    if(t.error || !t.data){ UI.toast('Could not load tender'); return; }
+    const x = t.data, url = tenderSafeUrl(x.source_url);
+    const kv = (l, v)=>`<div><div class="cell-mute" style="font-size:11px;">${l}</div><div>${v}</div></div>`;
+    const reasons = Array.isArray(x.match_reasons) && x.match_reasons.length ? x.match_reasons.map(r=>`<span class="badge badge-gray" title="${Util.escapeHtml(r.tier||'')}">${Util.escapeHtml(r.word)}${r.weight?' +'+r.weight:''}</span>`).join(' ') : '<span class="cell-mute">No keyword matched</span>';
+    UI.openModal(x.title.length>70?x.title.slice(0,70)+'…':x.title, `
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
+        ${x.match_score==null?'':matchBadgeHTML(x.match_score)}
+        <span class="badge badge-${TENDER_REVIEW_COLOR[x.review_status]||'gray'}">${TENDER_REVIEW_LABEL[x.review_status]||x.review_status}</span>
+        ${x.changed_since_review?'<span class="badge badge-amber">Changed since review</span>':''}
+        ${bidDeadlineBadgeHTML(tenderIstDate(x.closing_at))}
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:13px;">
+        ${kv('Source', Util.escapeHtml(x.portal_code))}${kv('Portal status (original)', Util.escapeHtml(x.source_status||'—'))}
+        ${kv('Portal ID', Util.escapeHtml(x.portal_tender_id||'—'))}${kv('Tender No', Util.escapeHtml(x.tender_number||'—'))}
+        ${kv('Buyer', Util.escapeHtml(x.buyer_name||'—'))}${kv('Location', Util.escapeHtml([x.buyer_location,x.district,x.state].filter(Boolean).join(', ')||'—'))}
+        ${kv('Published', tenderFmtDateTime(x.published_at))}${kv('Closing', tenderFmtDateTime(x.closing_at))}
+        ${kv('Estimated value', x.estimated_value!=null?Util.fmtMoney(x.estimated_value):'—')}${kv('EMD / Fee', (x.emd_amount!=null?Util.fmtMoney(x.emd_amount):'—')+' / '+(x.tender_fee!=null?Util.fmtMoney(x.tender_fee):'—'))}
+        ${kv('First collected', tenderFmtDateTime(x.first_seen_at))}${kv('Last seen in a source', tenderFmtDateTime(x.last_seen_at))}
+      </div>
+      ${x.description?`<div class="cell-mute" style="font-size:12.5px;margin:12px 0;white-space:pre-wrap;">${Util.escapeHtml(x.description)}</div>`:''}
+      <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:14px 0 6px;">Why this score</h4><div style="display:flex;gap:4px;flex-wrap:wrap;">${reasons}</div>
+      <div class="hint" style="margin-top:4px;">Relevance only - it does not mean we are eligible. Eligibility is checked separately.</div>
+      ${x.decision_reason?`<h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:14px 0 6px;">Decision reason</h4><div style="font-size:13px;">${Util.escapeHtml(x.decision_reason)}</div>`:''}
+      <div class="field" style="margin-top:12px;"><label>Assigned to</label><select id="td_assigned" onchange="TenderCentre.assign('${x.id}',this.value)"><option value="">— unassigned —</option>${DROPDOWNS.assignedTo.map(a=>`<option ${a===x.assigned_to?'selected':''}>${a}</option>`).join('')}</select></div>
+      <div class="field"><label>Internal notes</label><textarea id="td_notes" onchange="TenderCentre.saveNotes('${x.id}',this.value)">${Util.escapeHtml(x.notes||'')}</textarea></div>
+      <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:14px 0 6px;">Change history</h4>
+      ${(ch.data||[]).length ? `<div style="font-size:12.5px;display:flex;flex-direction:column;gap:4px;">${ch.data.map(c=>`<div>&bull; <b>${Util.escapeHtml(c.change_type.replace(/_/g,' '))}</b> &mdash; ${Util.escapeHtml(c.field_name)}: <span class="cell-mute">${Util.escapeHtml(c.old_value||'—')}</span> &rarr; ${Util.escapeHtml(c.new_value||'—')} <span class="cell-mute">(${tenderFmtDateTime(c.detected_at)})</span></div>`).join('')}</div>` : '<div class="cell-mute" style="font-size:12.5px;">No changes detected since first collected.</div>'}
+    `, `${url?`<a class="btn btn-outline" href="${Util.escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Open official source &#8599;</a>`:''}
+        <button class="btn btn-outline" onclick="TenderCentre.openForm('${x.id}')">Edit</button>
+        <button class="btn btn-outline" onclick="TenderCentre.openReject('${x.id}')">Reject</button>
+        <button class="btn btn-outline" onclick="TenderCentre.setReview('${x.id}','shortlisted')">Shortlist</button>
+        ${x.linked_bid_id?`<button class="btn btn-primary" onclick="UI.closeModal();go('bidsearch');setTimeout(()=>BidSearch.openDetail('${Util.escapeHtml(x.linked_bid_id)}'),80)">Open linked bid</button>`:`<button class="btn btn-primary" onclick="TenderCentre.openConvert('${x.id}')">Convert to Bid</button>`}`, true);
+  },
+  async assign(id, who){
+    const { error } = await sb.from('tenders').update({assigned_to: who||null}).eq('id', id);
+    if(error){ UI.toast('Could not assign: '+error.message); return; }
+    await Activity.log('Tender assigned', (who||'unassigned')+' — '+id); UI.toast('Assigned');
+  },
+  async saveNotes(id, text){
+    const { error } = await sb.from('tenders').update({notes: text||null}).eq('id', id);
+    UI.toast(error ? 'Could not save notes' : 'Notes saved');
+  },
+  async setReview(id, status, reason){
+    const upd = {review_status: status, changed_since_review: false};
+    if(reason!==undefined) upd.decision_reason = reason;
+    const { error } = await sb.from('tenders').update(upd).eq('id', id);
+    if(error){ UI.toast('Could not update: '+error.message); return; }
+    await Activity.log('Tender '+status, id+(reason?' — '+reason:''));
+    UI.closeModal(); UI.toast(TENDER_REVIEW_LABEL[status]||status); this.render();
+  },
+  openReject(id){
+    UI.openModal('Reject tender', `<div class="field"><label>Reason for rejecting *</label><textarea id="tr_reason" placeholder="e.g. Not our product line / value too small / eligibility not met"></textarea></div>`,
+      `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="TenderCentre.confirmReject('${id}')">Reject</button>`);
+  },
+  confirmReject(id){
+    const reason = document.getElementById('tr_reason').value.trim();
+    if(!reason){ UI.toast('Please give a reason'); return; }
+    this.setReview(id, 'rejected', reason);
+  },
+  async openConvert(id){
+    const { data: t, error } = await sb.from('tenders').select('*').eq('id', id).maybeSingle();
+    if(error || !t){ UI.toast('Could not load tender'); return; }
+    const existing = Store.data.bids.find(b=>b.tenderId===t.id || (t.linked_bid_id && b.id===t.linked_bid_id));
+    if(existing){ UI.toast('A bid already exists for this tender: '+(existing.bidNumber||existing.id), 4000); return; }
+    UI.openModal('Convert to Bid', `
+      <p style="margin:0 0 10px;font-size:13px;">This creates a new record in <b>GeM Bid Search</b> from the tender below. Nothing is submitted to any portal.</p>
+      <div class="card card-pad" style="font-size:13px;"><b>${Util.escapeHtml(t.title)}</b><div class="cell-mute" style="margin-top:4px;">${Util.escapeHtml(t.buyer_name||'—')} &middot; closes ${tenderFmtDateTime(t.closing_at)} &middot; value ${t.estimated_value!=null?Util.fmtMoney(t.estimated_value):'—'} &middot; EMD ${t.emd_amount!=null?Util.fmtMoney(t.emd_amount):'—'}</div></div>`,
+      `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" id="tc_convBtn" onclick="TenderCentre.convert('${t.id}')">Create Bid</button>`);
+  },
+  async convert(id){
+    if(this.busy) return; this.busy = true;
+    const btn = document.getElementById('tc_convBtn'); if(btn) btn.disabled = true;
+    try{
+      const { data: t, error } = await sb.from('tenders').select('*').eq('id', id).maybeSingle();
+      if(error || !t) throw new Error('Tender not found');
+      if(t.linked_bid_id || Store.data.bids.some(b=>b.tenderId===t.id)) throw new Error('A bid already exists for this tender');
+      const bidId = (Store.data.settings.bidPrefix||'BID-')+String(Store.data.counters.bidNext||1).padStart(4,'0');
+      const bid = {
+        id: bidId, tenderId: t.id, tenderPortal: t.portal_code,
+        checklist: DEFAULT_BID_CHECKLIST.map(name=>({name, done:false})),
+        timeline: [{date:new Date().toISOString(), text:'Created from Tender Centre ('+t.portal_code+')', by:(Auth.session&&Auth.session.name)||'System'}],
+        createdDate: Util.todayISO(),
+        bidNumber: t.portal_tender_id || t.tender_number || '', raNumber:'', title: t.title, bidType: t.bid_type || 'Bid',
+        category: t.category||'', boqTitle:'', description: t.description||'', ministry:'', department: t.buyer_name||'', organisation: t.buyer_name||'',
+        buyerName:'', consignee:'', state: t.state||'', district: t.district||'', location: t.buyer_location||'',
+        estimatedValue: Number(t.estimated_value)||0, emdRequired: Number(t.emd_amount)>0, emdAmount: Number(t.emd_amount)||0, tenderFee: Number(t.tender_fee)||0,
+        securityDeposit:0, expectedMargin:0, ourQuote:0,
+        publishedDate: tenderIstDate(t.published_at), startDate: tenderIstDate(t.published_at), endDate: tenderIstDate(t.closing_at), openingDate:'', offerValidity:'',
+        status:'New', assignedTo: t.assigned_to||'', sourceUrl: tenderSafeUrl(t.source_url)
+      };
+      // Link the tender FIRST: if this succeeds and the bid save fails, the worst case is a
+      // retryable tender marked converted - never two bids for one tender.
+      const up = await sb.from('tenders').update({linked_bid_id: bidId, review_status:'converted', changed_since_review:false}).eq('id', t.id).is('linked_bid_id', null);
+      if(up.error) throw new Error(up.error.message);
+      Store.data.bids.unshift(bid);
+      Store.data.counters.bidNext = (Store.data.counters.bidNext||1)+1;
+      await Store.save('counters'); await Store.save('bids');
+      await Activity.log('Tender converted to bid', bidId+' ← '+t.title);
+      UI.closeModal(); UI.toast('Bid created');
+      go('bidsearch'); setTimeout(()=>BidSearch.openDetail(bidId), 80);
+    }catch(e){ console.error(e); UI.toast('Could not convert: '+(e.message||e), 5000); if(btn) btn.disabled = false; }
+    finally{ this.busy = false; }
+  },
+
+  /* ----------------------------------------------------- re-score + export */
+  async rescoreAll(){
+    if(this.busy) return;
+    if(!confirm('Re-calculate the match score of every tender using the current keyword groups? Review decisions are not changed.')) return;
+    this.busy = true;
+    try{
+      let from = 0, done = 0;
+      for(;;){
+        const { data, error } = await sb.from('tenders').select('id,portal_code,identity_key,title,description,category,buyer_name').order('id').range(from, from+499);
+        if(error) throw new Error(error.message);
+        if(!data.length) break;
+        const upd = data.map(t=>{ const s = this.score(t); return {id:t.id, portal_code:t.portal_code, identity_key:t.identity_key, title:t.title, match_score:s.score, match_reasons:s.reasons}; });
+        const r = await sb.from('tenders').upsert(upd, {onConflict:'id'});
+        if(r.error) throw new Error(r.error.message);
+        done += data.length; from += 500;
+        if(data.length < 500) break;
+      }
+      await Activity.log('Tenders re-scored', done+' tender(s)');
+      UI.toast(done+' tender(s) re-scored'); this.render();
+    }catch(e){ console.error(e); UI.toast('Re-score failed: '+(e.message||e), 5000); }
+    finally{ this.busy = false; }
+  },
+  async exportView(){
+    try{
+      const { data, error } = await this.applyFilters(sb.from('tenders').select('*')).order('closing_at', {ascending:true, nullsFirst:false}).limit(5000);
+      if(error) throw new Error(error.message);
+      const rows = (data||[]).map(t=>({Source:t.portal_code, 'Portal ID':t.portal_tender_id||'', 'Tender No':t.tender_number||'', Title:t.title, Buyer:t.buyer_name||'', District:t.district||'', State:t.state||'',
+        Category:t.category||'', Published:tenderIstDate(t.published_at), Closing:tenderIstDate(t.closing_at), 'Estimated Value':t.estimated_value, EMD:t.emd_amount, Fee:t.tender_fee,
+        'Portal Status':t.source_status||'', Match:t.match_score, Review:t.review_status, 'Decision Reason':t.decision_reason||'', 'Source URL':t.source_url||''}));
+      const ws = XLSX.utils.json_to_sheet(rows.length?rows:[{Info:'No tenders match'}]);
+      const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Tenders');
+      XLSX.writeFile(wb, 'jays-tenders-'+Util.todayISO()+'.xlsx');
+    }catch(e){ UI.toast('Export failed: '+(e.message||e), 4000); }
+  },
+
+  /* ----------------------------------------------------- import wizard */
+  openImport(){
+    this.imp = {step:'pick', portal:'GEM'};
+    UI.openModal('Import tenders (Excel / CSV)', `
+      <div class="field"><label>Source portal</label><select id="ti_portal">${['GEM','CPPP','KERALA','OTHER'].map(p=>`<option ${p==='GEM'?'selected':''}>${p}</option>`).join('')}</select></div>
+      <div class="field"><label>File (.xlsx, .xls or .csv)</label><input type="file" id="ti_file" accept=".xlsx,.xls,.csv" onchange="TenderCentre.onFile(this)"></div>
+      <div class="hint">Nothing is saved until you review the preview and confirm. Re-importing the same file never creates duplicates. Malayalam text is preserved.</div>
+      <div class="field" style="margin-top:10px;"><a href="#" onclick="TenderCentre.downloadTemplate();return false;">Download a sample file with the expected columns</a></div>
+    `, `<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>`, true);
+  },
+  downloadTemplate(){
+    const ws = XLSX.utils.json_to_sheet([{ 'Bid Number':'GEM/2026/B/1234567', 'Title':'Supply of twin bins', 'Department':'Sample Grama Panchayat', 'District':'Kozhikode', 'Category':'Waste bins',
+      'Start Date':'01-10-2026', 'End Date':'25-10-2026 15:00', 'Estimated Value':'450000', 'EMD':'9000', 'Tender Fee':'0', 'URL':'https://bidplus.gem.gov.in/' }]);
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Tenders');
+    XLSX.writeFile(wb, 'jays-tender-import-sample.xlsx');
+  },
+  async onFile(input){
+    const file = input.files && input.files[0]; if(!file) return;
+    try{
+      if(file.size > 15*1024*1024) throw new Error('File is larger than 15 MB - split it into smaller files');
+      const buf = await file.arrayBuffer();
+      let wb;
+      if(/\.csv$/i.test(file.name)){
+        let text = new TextDecoder('utf-8').decode(buf);
+        if(text.charCodeAt(0)===0xFEFF) text = text.slice(1);
+        wb = XLSX.read(text, {type:'string', cellDates:true, raw:true});
+      } else wb = XLSX.read(buf, {type:'array', cellDates:true});
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const raw = XLSX.utils.sheet_to_json(ws, {defval:'', raw:true});
+      if(!raw.length) throw new Error('The first sheet has no data rows');
+      if(raw.length > 20000) throw new Error('More than 20,000 rows - split the file');
+      const headers = Object.keys(raw[0]);
+      const map = {};
+      TENDER_FIELDS.forEach(f=>{
+        const hit = headers.find(h=>f.alias.includes(tenderNormHeader(h))) || headers.find(h=>tenderNormHeader(h)===tenderNormHeader(f.label));
+        if(hit) map[f.k] = hit;
+      });
+      this.imp = Object.assign(this.imp||{}, {step:'map', portal:document.getElementById('ti_portal').value, fileName:file.name, raw, headers, map});
+      this.renderMap();
+    }catch(e){ console.error(e); UI.toast('Could not read file: '+(e.message||e), 5000); input.value = ''; }
+  },
+  renderMap(){
+    const im = this.imp;
+    const opt = (cur)=>`<option value="">— not in file —</option>${im.headers.map(h=>`<option value="${Util.escapeHtml(h)}" ${h===cur?'selected':''}>${Util.escapeHtml(h)}</option>`).join('')}`;
+    UI.openModal('Match columns', `
+      <p style="margin:0 0 8px;font-size:13px;"><b>${Util.escapeHtml(im.fileName)}</b> &middot; ${im.raw.length} rows &middot; source ${Util.escapeHtml(im.portal)}</p>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;">
+        ${TENDER_FIELDS.map(f=>`<div class="field" style="margin:0;"><label style="font-size:11.5px;">${f.label}${f.req?' *':''}</label><select id="tm_${f.k}" onchange="TenderCentre.imp.map['${f.k}']=this.value||undefined">${opt(im.map[f.k])}</select></div>`).join('')}
+      </div>
+      <div class="hint" style="margin-top:8px;">Columns were matched automatically from common portal headings - fix any that are wrong. Title is required.</div>
+    `, `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="TenderCentre.preview()">Preview &rarr;</button>`, true);
+  },
+  /* Turns raw spreadsheet rows into pipeline rows + per-row problems. Never drops a row silently. */
+  buildRows(){
+    const im = this.imp, ok = [], bad = [];
+    im.raw.forEach((r, i)=>{
+      const row = {}, problems = [];
+      TENDER_FIELDS.forEach(f=>{
+        const h = im.map[f.k]; let v = h ? r[h] : '';
+        if(v instanceof Date && f.type!=='date') v = v.toISOString();
+        if(f.type==='date'){ const p = tenderParseDate(v); if(p===null) problems.push(f.label+' "'+v+'" is not a valid date'); v = p||''; }
+        else if(f.type==='num'){ const p = tenderParseAmount(v); if(p===null) problems.push(f.label+' "'+v+'" is not a valid amount'); v = p||''; }
+        else if(f.type==='url'){ v = String(v||'').trim(); if(v && !tenderSafeUrl(v)) problems.push('Source URL must start with http:// or https://'); }
+        else v = String(v==null?'':v).replace(/\s+/g,' ').trim();
+        row[f.k] = v;
+      });
+      if(!row.title) problems.push('Title is missing');
+      if(problems.length){ bad.push({line:i+2, reason:problems.join('; '), raw:r}); return; }
+      const sc = this.score(row); row.match_score = sc.score; row.match_reasons = sc.reasons;
+      ok.push({line:i+2, row});
+    });
+    return {ok, bad};
+  },
+  async preview(){
+    const im = this.imp;
+    if(!im.map.title){ UI.toast('Map the Title column first'); return; }
+    const {ok, bad} = this.buildRows();
+    im.ok = ok; im.bad = bad;
+    UI.openModal('Checking file…', '<div class="cell-mute">Checking against existing tenders&hellip;</div>', '');
+    try{
+      const agg = {found:0, inserted:0, updated:0, duplicates_skipped:0, rejected:0, errors:[]};
+      for(let i=0;i<ok.length;i+=1000){
+        const chunk = ok.slice(i,i+1000);
+        const res = await this.ingest(im.portal, chunk.map(x=>x.row), 'import', im.fileName, true);
+        agg.found += res.found; agg.inserted += res.inserted; agg.updated += res.updated; agg.duplicates_skipped += res.duplicates_skipped; agg.rejected += res.rejected;
+        (res.errors||[]).forEach(e=>agg.errors.push({line: chunk[e.row-1] ? chunk[e.row-1].line : e.row, reason:e.reason}));
+      }
+      im.dry = agg;
+      const cell = (l,v,c)=>`<div class="card card-pad" style="text-align:center;"><div style="font-size:20px;font-weight:700;${c?'color:'+c:''}">${v}</div><div class="cell-mute" style="font-size:11.5px;">${l}</div></div>`;
+      const allBad = bad.length + agg.errors.length;
+      UI.openModal('Review before importing', `
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-bottom:10px;">
+          ${cell('Rows in file', im.raw.length)}${cell('Will be added', agg.inserted, 'var(--green,#16a34a)')}${cell('Will be updated', agg.updated, 'var(--amber,#d97706)')}${cell('Already up to date', agg.duplicates_skipped)}${cell('Rejected', allBad, allBad?'var(--red,#dc2626)':undefined)}
+        </div>
+        ${allBad ? `<div style="font-size:12.5px;margin-bottom:8px;"><b>Rows that will NOT be imported:</b><div style="max-height:150px;overflow:auto;margin-top:4px;">${[...bad.map(b=>({line:b.line,reason:b.reason})), ...agg.errors].slice(0,40).map(b=>`<div>&bull; Row ${b.line}: ${Util.escapeHtml(b.reason)}</div>`).join('')}${allBad>40?`<div class="cell-mute">…and ${allBad-40} more - download the error report.</div>`:''}</div>
+          <button class="btn btn-outline btn-sm" style="margin-top:6px;" onclick="TenderCentre.downloadErrors()">&#128228; Download error report</button></div>` : ''}
+        <div class="hint">Importing is safe to repeat: tenders already in the list are matched by their portal ID (or tender number + buyer) and are never duplicated.</div>
+      `, `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-outline" onclick="TenderCentre.renderMap()">&larr; Back</button>
+          <button class="btn btn-primary" id="ti_go" ${agg.inserted+agg.updated+agg.duplicates_skipped===0?'disabled':''} onclick="TenderCentre.commitImport()">Import ${agg.inserted+agg.updated} tender(s)</button>`, true);
+    }catch(e){ console.error(e); UI.toast('Check failed: '+(e.message||e), 5000); this.renderMap(); }
+  },
+  downloadErrors(){
+    const im = this.imp;
+    const rows = [...im.bad.map(b=>Object.assign({'File Row':b.line, 'Problem':b.reason}, b.raw)), ...im.dry.errors.map(e=>({'File Row':e.line, 'Problem':e.reason}))];
+    const ws = XLSX.utils.json_to_sheet(rows.length?rows:[{Info:'No errors'}]);
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Rejected rows');
+    XLSX.writeFile(wb, 'tender-import-errors-'+Util.todayISO()+'.xlsx');
+  },
+  async commitImport(){
+    if(this.busy) return; this.busy = true;
+    const im = this.imp, btn = document.getElementById('ti_go'); if(btn){ btn.disabled = true; }
+    const tot = {found:0, inserted:0, updated:0, duplicates_skipped:0, rejected:0, errors:[]};
+    let failedFrom = null;
+    try{
+      for(let i=0;i<im.ok.length;i+=1000){
+        if(btn) btn.textContent = 'Importing '+Math.min(i+1000, im.ok.length)+' / '+im.ok.length+'…';
+        const chunk = im.ok.slice(i,i+1000);
+        try{
+          const res = await this.ingest(im.portal, chunk.map(x=>x.row), 'import', im.fileName, false);
+          tot.found += res.found; tot.inserted += res.inserted; tot.updated += res.updated; tot.duplicates_skipped += res.duplicates_skipped; tot.rejected += res.rejected;
+          (res.errors||[]).forEach(e=>tot.errors.push({line: chunk[e.row-1] ? chunk[e.row-1].line : e.row, reason:e.reason}));
+        }catch(e){ failedFrom = i; tot.fail = e.message||String(e); break; }   // earlier chunks stay saved
+      }
+      await Activity.log('Tenders imported', `${im.fileName}: ${tot.inserted} new, ${tot.updated} updated, ${tot.duplicates_skipped} unchanged, ${tot.rejected+im.bad.length} rejected`);
+      im.dry.errors = tot.errors;
+      UI.openModal(failedFrom===null?'Import complete':'Import stopped part-way', `
+        ${failedFrom!==null?`<div class="card card-pad" style="border-left:4px solid var(--red,#dc2626);margin-bottom:10px;"><b>Stopped at row ${failedFrom+2}.</b> ${Util.escapeHtml(tot.fail)}<div class="cell-mute" style="font-size:12.5px;">Rows before that were saved. Importing the same file again is safe - it will pick up where this left off.</div></div>`:''}
+        <div style="font-size:14px;line-height:1.8;">&#10003; <b>${tot.inserted}</b> new &middot; <b>${tot.updated}</b> updated &middot; <b>${tot.duplicates_skipped}</b> unchanged &middot; <b>${tot.rejected+im.bad.length}</b> rejected</div>
+        ${(tot.rejected+im.bad.length)?`<button class="btn btn-outline btn-sm" style="margin-top:8px;" onclick="TenderCentre.downloadErrors()">&#128228; Download error report</button>`:''}`,
+        `<button class="btn btn-primary" onclick="UI.closeModal();TenderCentre.render()">Done</button>`);
+    }finally{ this.busy = false; }
+  },
+
+  /* ----------------------------------------------------- backup / restore (tables are not part of Store) */
+  async exportAll(){
+    const out = {};
+    for(const t of ['tenders','tender_collection_runs','tender_changes']){
+      out[t] = [];
+      for(let from=0;;from+=1000){
+        const { data, error } = await sb.from(t).select('*').order('id').range(from, from+999);
+        if(error) throw new Error(t+': '+error.message);
+        out[t].push(...data);
+        if(data.length<1000) break;
+      }
+    }
+    return out;
+  },
+  async restoreAll(bk){
+    if(!bk) return 0;
+    let n = 0;
+    for(const t of ['tenders','tender_collection_runs','tender_changes']){
+      const rows = Array.isArray(bk[t]) ? bk[t] : [];
+      for(let i=0;i<rows.length;i+=500){
+        const { error } = await sb.from(t).upsert(rows.slice(i,i+500), {onConflict:'id'});
+        if(error) throw new Error(t+': '+error.message);
+      }
+      n += rows.length;
+    }
+    return n;
+  }
+};
+Views.tenders = ()=>TenderCentre.render();
+
 const Notifications = {
   render(){
     const today = Util.todayISO();
@@ -5350,12 +6579,16 @@ const Notifications = {
       else if(Number(p.stock)<5) items.push({type:'Low Stock', text:`${p.name} — ${p.stock} left`, color:'var(--amber,#d97706)', view:'inventory'});
     });
 
+    Alerts.collect().forEach(a=>items.push(a));
+
     document.getElementById('content').innerHTML = `
+      <div class="toolbar"><div class="toolbar-spacer"></div><button class="btn btn-outline btn-sm" onclick="DailySummary.open()">&#128172; Daily Summary</button></div>
       ${dashboardCardsHTML('Notifications Overview', [
         {label:'Total Alerts', value:items.length},
         {label:'Payment Overdue', value:items.filter(i=>i.type==='Payment Overdue').length, color:'var(--red,#dc2626)'},
         {label:'Open Complaints', value:items.filter(i=>i.type==='Open Complaint').length, color:'var(--amber,#d97706)'},
-        {label:'Stock Alerts', value:items.filter(i=>i.type==='Low Stock'||i.type==='Out of Stock').length, color:'var(--red,#dc2626)'}
+        {label:'Stock Alerts', value:items.filter(i=>i.type==='Low Stock'||i.type==='Out of Stock').length, color:'var(--red,#dc2626)'},
+        {label:'Guarantee / PO / AMC', value:items.filter(i=>Alerts.TYPES.includes(i.type)).length, color:'var(--amber,#d97706)'}
       ])}
       <div class="card"><div class="table-wrap">
       ${items.length ? `<table><thead><tr><th>Type</th><th>Details</th><th></th></tr></thead><tbody>
@@ -5497,6 +6730,7 @@ const BidSearch = {
       ${list.length ? `<table><thead><tr>
         <th class="col-actions">Actions</th>
         <th>Match</th>
+        <th>Ready</th>
         <th>Bid Number</th>
         <th class="sortable ${SortState.bids&&SortState.bids.key==='title'?'active':''}" onclick="toggleSort('bids','title','BidSearch.render()')">Bid Title ${sortArrow('bids','title')}</th>
         <th>Category</th>
@@ -5515,6 +6749,7 @@ const BidSearch = {
             <button class="icon-btn" title="Delete" onclick="BidSearch.remove('${b.id}')">&#128465;</button>
           </div></td>
           <td>${matchBadgeHTML(b._match)}</td>
+          <td>${BID_TERMINAL_STATUSES.includes(b.status)?'<span class="cell-mute">&mdash;</span>':bidReadinessBadge(b)}</td>
           <td class="mono cell-mute">${Util.escapeHtml(b.bidNumber||'—')}</td>
           <td class="cell-main" style="max-width:220px;white-space:normal;">${Util.escapeHtml(b.title||'—')}</td>
           <td class="cell-mute">${Util.escapeHtml(b.category||'—')}</td>
@@ -5623,6 +6858,7 @@ const BidSearch = {
       status:g('b_status'), assignedTo:g('b_assignedTo'), sourceUrl:g('b_sourceUrl').trim()
     });
     const isNew = !id;
+    const prevStatus = id ? (Store.data.bids.find(x=>x.id===id)||{}).status : null;
     if(id){ const i=Store.data.bids.findIndex(x=>x.id===id); Store.data.bids[i]=rec; }
     else{
       rec.timeline.push({date:new Date().toISOString(), text:'Bid created', by:(Auth.session&&Auth.session.name)||'System'});
@@ -5632,7 +6868,8 @@ const BidSearch = {
     }
     await Store.save('bids');
     await Activity.log(isNew?'Bid saved':'Bid updated', rec.bidNumber||rec.title);
-    UI.closeModal(); UI.toast('Saved'); Router.render('bidsearch');
+    const emdMsg = (!isNew && prevStatus!==rec.status) ? await BidSearch.onResult(rec) : '';
+    UI.closeModal(); UI.toast(emdMsg||'Saved', emdMsg?4500:undefined); Router.render('bidsearch');
   },
   async remove(id){
     if(!confirm('Delete this bid record?')) return;
@@ -5649,6 +6886,8 @@ const BidSearch = {
     b.timeline.push({date:new Date().toISOString(), text:'Status changed to '+status, by:(Auth.session&&Auth.session.name)||'System'});
     await Store.save('bids');
     await Activity.log('Bid status changed', (b.bidNumber||b.title)+' — '+status);
+    const emdMsg = await BidSearch.onResult(b);
+    if(emdMsg) UI.toast(emdMsg, 4500);
     BidSearch.openDetail(id);
   },
   async toggleChecklist(id, idx){
@@ -5704,6 +6943,34 @@ const BidSearch = {
       }, 80);
     }, 80);
   },
+  /* When a bid is marked Lost/Cancelled its EMD becomes refundable: every
+     still-Active EMD linked to it flips to 'Refund Requested' with a refund
+     due date 15 days out (kept if already set in the future), so it shows
+     up in the EMD tracker and alerts. Won just reminds about the PBG.
+     Returns a short message for the toast, or '' when nothing applied. */
+  async onResult(b){
+    if(b.status==='Lost' || b.status==='Cancelled'){
+      const recs = (Store.data.emdPbg||[]).filter(r=>r.bidId===b.id && r.type==='EMD' && r.status==='Active');
+      if(!recs.length) return '';
+      const due = new Date(Date.now()+15*864e5).toISOString().slice(0,10);
+      recs.forEach(r=>{ r.status='Refund Requested'; if(!r.expiryDate || r.expiryDate<Util.todayISO()) r.expiryDate = due; r.updatedDate = Util.todayISO(); });
+      await Store.save('emdPbg');
+      await Activity.log('EMD refund due', (b.bidNumber||b.title)+' — '+recs.length+' EMD record(s)');
+      return recs.length+' EMD record(s) moved to Refund Requested — see EMD / PBG Tracker';
+    }
+    if(b.status==='Won') return 'Bid won! Record the PBG in the bid detail, then Convert to Order.';
+    return '';
+  },
+  /* From bid detail: jump to EMD/PBG with this bid pre-linked. */
+  recordEmd(id, type){
+    const b = Store.data.bids.find(x=>x.id===id); if(!b) return;
+    UI.closeModal(); go('emdpbg');
+    setTimeout(()=>{
+      EmdPbg.openForm(null);
+      const set=(k,v)=>{ const el=document.getElementById('rm_'+k); if(el) el.value=v; };
+      set('bidId', b.id); set('refNo', b.bidNumber||b.id); set('organisation', b.organisation||''); set('type', type||'EMD'); if((type||'EMD')==='EMD') set('amount', b.emdAmount||'');
+    }, 60);
+  },
   openDetail(id){
     const b = Store.data.bids.find(x=>x.id===id); if(!b) return;
     const m = bidMatch(b);
@@ -5717,7 +6984,7 @@ const BidSearch = {
         ${bidDeadlineBadgeHTML(b.endDate)}
         <span class="badge" style="background:${bidStatusColor(b.status)};color:#fff;">${Util.escapeHtml(b.status||'New')}</span>
         ${b.sourceUrl? `<a class="btn btn-outline btn-sm" href="${Util.escapeHtml(b.sourceUrl)}" target="_blank">&#128279; Open Source</a>` : ''}
-        ${b.status==='Won'? `<button class="btn btn-primary btn-sm" onclick="BidSearch.convertToOrder('${id}')">&#8594; Convert to Order</button>` : ''}
+        ${b.status==='Won'? `<button class="btn btn-primary btn-sm" onclick="BidSearch.convertToOrder('${id}')">&#8594; Convert to Order</button><button class="btn btn-outline btn-sm" onclick="BidSearch.recordEmd('${id}','PBG')">&#128274; Record PBG</button>` : ''}
       </div>
       <div class="field"><label>Update Status</label><select onchange="BidSearch.setStatus('${id}', this.value)">${DROPDOWNS.bidStatus.map(s=>`<option ${s===b.status?'selected':''}>${s}</option>`).join('')}</select></div>
 
@@ -5732,10 +6999,11 @@ const BidSearch = {
         </div>
       </div>
 
+      ${(()=>{ const r=bidReadiness(b); return `<div class="card card-pad" style="margin:14px 0 0;"><b>Bid Readiness: ${bidReadinessBadge(b)}</b> <span class="cell-mute" style="font-size:12px;">${r.missing.length?'Missing: '+Util.escapeHtml(r.missing.join(' · ')):'Everything in place — ready to submit.'}</span>${r.needsEmd&&!r.emdRec?` <button class="btn btn-outline btn-sm" style="margin-left:8px;" onclick="BidSearch.recordEmd('${id}')">Record EMD</button>`:''}</div>`; })()}
       <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:16px 0 6px;">Document Checklist — ${doneCount}/${b.checklist.length}</h4>
       <div class="doc-progress"><div style="width:${pct}%;"></div></div>
       <div style="margin:10px 0;">
-        ${b.checklist.map((c,i)=>`<label class="chk" style="display:flex;align-items:center;gap:7px;margin-bottom:6px;"><input type="checkbox" ${c.done?'checked':''} onchange="BidSearch.toggleChecklist('${id}',${i})"> ${Util.escapeHtml(c.name)}</label>`).join('')}
+        ${b.checklist.map((c,i)=>`<label class="chk" style="display:flex;align-items:center;gap:7px;margin-bottom:6px;"><input type="checkbox" ${c.done?'checked':''} onchange="BidSearch.toggleChecklist('${id}',${i})"> ${Util.escapeHtml(c.name||c.text||'')}</label>`).join('')}
       </div>
       <div style="display:flex;gap:8px;">
         <input id="bd_newChecklistItem" placeholder="Add checklist item..." style="flex:1;">
@@ -11644,14 +12912,21 @@ const Backup = {
       attendance: Store.data.attendance, leaveRequests: Store.data.leaveRequests,
       bidDocs: Store.data.bidDocs,
       visits: Store.data.visits, requirements: Store.data.requirements, travelLogs: Store.data.travelLogs,
-      lsgOfficeGeo: Store.data.lsgOfficeGeo, dayPlans: Store.data.dayPlans, staffTargets: Store.data.staffTargets
+      lsgOfficeGeo: Store.data.lsgOfficeGeo, dayPlans: Store.data.dayPlans, staffTargets: Store.data.staffTargets,
+      emdPbg: Store.data.emdPbg, suppliers: Store.data.suppliers, purchaseOrders: Store.data.purchaseOrders, amcRecords: Store.data.amcRecords
     };
   },
-  downloadJSON(){
+  async downloadJSON(){
     // Full-database export (every customer, quotation, payment...) -
     // restricted to Admins, same as restore/import below.
     if(!Auth.isAdmin()){ UI.toast("You don't have permission to export the full database"); return; }
-    const data = JSON.stringify(this.snapshot(), null, 2);
+    const snap = this.snapshot();
+    /* Tender Centre data lives in its own database tables, not in Store,
+       so it is fetched separately. If that fails the rest of the backup
+       is still produced, but the admin is told it's incomplete. */
+    try{ snap.tenderIntel = await TenderCentre.exportAll(); }
+    catch(e){ console.error('Tender backup failed', e); UI.toast('Warning: tender data could not be included in this backup ('+(e.message||e)+')', 6000); }
+    const data = JSON.stringify(snap, null, 2);
     const blob = new Blob([data], {type:'application/json'});
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -11661,7 +12936,7 @@ const Backup = {
   },
   async googleDriveBackup(){
     if(!Auth.isAdmin()){ UI.toast("You don't have permission to back up the full database"); return; }
-    this.downloadJSON();
+    await this.downloadJSON();
     Store.data.settings.lastBackupAt = new Date().toISOString();
     await Store.save('settings');
     await Activity.log('Backup created', 'Full data snapshot downloaded for Google Drive');
@@ -11676,7 +12951,7 @@ const Backup = {
     try{
       const text = await file.text();
       const data = JSON.parse(text);
-      ['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo','dayPlans','staffTargets'].forEach(k=>{
+      ['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo','dayPlans','staffTargets','emdPbg','suppliers','purchaseOrders','amcRecords'].forEach(k=>{
         if(data[k]!==undefined) Store.data[k] = data[k];
       });
       // oppProjects lives in its own indexed table now, not the
@@ -11684,10 +12959,13 @@ const Backup = {
       // the dedicated full-replace path so opp_projects_rows (what
       // imports actually merge against) gets restored too, not just
       // the legacy blob.
-      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo','dayPlans','staffTargets'].map(k=>Store.save(k)));
+      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo','dayPlans','staffTargets','emdPbg','suppliers','purchaseOrders','amcRecords'].map(k=>Store.save(k)));
       if(data['oppProjects']!==undefined) await Store.replaceAllOppProjects(Store.data.oppProjects);
+      // Tender Centre tables: merged back by id (never deleted), only when the backup has them.
+      let tenderMsg = '';
+      if(data.tenderIntel){ try{ tenderMsg = ' + '+(await TenderCentre.restoreAll(data.tenderIntel))+' tender records'; }catch(te){ console.error(te); UI.toast('Warning: tender data could not be restored ('+(te.message||te)+')', 6000); } }
       await Activity.log('Data restored', 'Restored from backup file '+file.name);
-      UI.toast('Data restored successfully');
+      UI.toast('Data restored successfully'+tenderMsg);
       Router.render('backup');
     }catch(e){ console.error(e); UI.toast('Restore failed — invalid backup file'); }
   },
@@ -12742,6 +14020,7 @@ const UsersMgmt = {
     const list = Store.data.users;
     document.getElementById('content').innerHTML = `
       <div class="toolbar"><div class="toolbar-spacer"></div>
+        <button class="btn btn-outline btn-sm" onclick="UsersMgmt.grantAllMenus()">&#128275; Grant all menus to all staff</button>
         <button class="btn btn-primary btn-sm" onclick="UsersMgmt.openForm(null)">&#65291; Add User</button>
       </div>
       <p class="cell-mute" style="margin:0 0 10px;font-size:12.5px;">Team accounts are secured by Supabase Auth — sign-in is via email/password with Row Level Security, not the app's own password list.</p>
@@ -12772,6 +14051,7 @@ const UsersMgmt = {
       <div class="field"><label>Role</label><select id="u_role" onchange="UsersMgmt.toggleRoleUI()"><option ${v.role==='Sales'?'selected':''}>Sales</option><option ${v.role==='Admin'?'selected':''}>Admin</option></select></div>
       <div class="field" id="u_permsWrap" style="display:${v.role==='Admin'?'none':'block'};">
         <label>Menu Access</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:600;margin-bottom:8px;"><input type="checkbox" id="u_fullAccess" ${(rec && v.role==='Sales' && !v.permissions)?'checked':''} onchange="UsersMgmt.toggleFullAccess()"> Full access to every menu (including menus added in future)</label>
         <div style="display:flex;gap:6px;margin-bottom:6px;">
           <button type="button" class="btn btn-outline btn-sm" onclick="UsersMgmt.setAllPerms(true)">Select all</button>
           <button type="button" class="btn btn-outline btn-sm" onclick="UsersMgmt.setAllPerms(false)">Clear all</button>
@@ -12782,6 +14062,28 @@ const UsersMgmt = {
         <div class="hint" style="margin-top:6px;">Admins always have access to every menu.</div>
       </div>
     `, `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="UsersMgmt.save('${id||''}')">Save</button>`);
+    this.toggleFullAccess();
+  },
+  /* Ticking "Full access" greys out the individual boxes - saving then
+     stores permissions = null, which hasMenuAccess() treats as every menu,
+     so menus added in future releases show up without re-ticking. */
+  toggleFullAccess(){
+    const fa = document.getElementById('u_fullAccess'); if(!fa) return;
+    document.querySelectorAll('.u_perm').forEach(cb=>{ cb.disabled = fa.checked; if(fa.checked) cb.checked = true; });
+  },
+  async grantAllMenus(){
+    const staff = Store.data.users.filter(u=>u.role!=='Admin' && u.permissions);
+    if(!staff.length){ UI.toast('Every staff account already has full access'); return; }
+    if(!confirm('Give '+staff.length+' staff account(s) access to every menu, including menus added later?\n\n'+staff.map(u=>u.name||u.username).join(', '))) return;
+    let failed = 0;
+    for(const u of staff){
+      const out = await callTeamUserFn({ action:'update', id:u.id, name:u.name||'', role:'Sales', permissions:null });
+      if(out.error) failed++;
+    }
+    await Store.loadUsers();
+    await Activity.log('Granted all menus', staff.length+' staff account(s)');
+    UI.toast(failed ? failed+' account(s) failed — try again' : 'All staff now have full menu access');
+    Router.render('users');
   },
   toggleRoleUI(){
     const role = document.getElementById('u_role').value;
@@ -12798,7 +14100,8 @@ const UsersMgmt = {
     if(!id && !password){ UI.toast('Password is required for a new user'); return; }
     if(!id && Store.data.users.some(u=>u.username.toLowerCase()===username.toLowerCase())){ UI.toast('Username already exists'); return; }
     const role = document.getElementById('u_role').value;
-    const permissions = role==='Admin' ? null : Array.from(document.querySelectorAll('.u_perm:checked')).map(cb=>cb.value);
+    const fullAccess = document.getElementById('u_fullAccess');
+    const permissions = (role==='Admin' || (fullAccess && fullAccess.checked)) ? null : Array.from(document.querySelectorAll('.u_perm:checked')).map(cb=>cb.value);
     const name = document.getElementById('u_name').value.trim();
 
     const payload = id
