@@ -901,7 +901,7 @@ const DROPDOWNS = {
   orderStatus: ['In Progress','Work Order Done','Product Reached','Dispatched','Payment Received'],
   complaintStatus: ['Initiated','Pending','Solved'],
   taskStatus: ['Not Started','In Progress','Completed'],
-  bidType: ['Bid','RA (Reverse Auction)'],
+  bidType: ['Bid','RA (Reverse Auction)','e-Tender','Manual Tender'],
   bidStatus: ['New','Saved','Under Review','Go / No-Go Decision','Documents Pending','Under Preparation','Ready for Submission','Submitted','Technical Evaluation','Financial Evaluation','Won','Lost','Cancelled','Not Participating'],
   leaveType: ['Casual Leave','Sick Leave','Earned Leave','Unpaid Leave','Other'],
   attendanceStatus: ['Present','Leave','Absent'],
@@ -6337,7 +6337,7 @@ const TenderCentre = {
         checklist: DEFAULT_BID_CHECKLIST.map(name=>({name, done:false})),
         timeline: [{date:new Date().toISOString(), text:'Created from Tender Centre ('+t.portal_code+')', by:(Auth.session&&Auth.session.name)||'System'}],
         createdDate: Util.todayISO(),
-        bidNumber: t.portal_tender_id || t.tender_number || '', raNumber:'', title: t.title, bidType: t.bid_type || 'Bid',
+        bidNumber: t.portal_tender_id || t.tender_number || '', raNumber:'', title: t.title, bidType: bidTypeFromTender(t),
         category: t.category||'', boqTitle:'', description: t.description||'', ministry:'', department: t.buyer_name||'', organisation: t.buyer_name||'',
         buyerName:'', consignee:'', state: t.state||'', district: t.district||'', location: t.buyer_location||'',
         estimatedValue: Number(t.estimated_value)||0, emdRequired: Number(t.emd_amount)>0, emdAmount: Number(t.emd_amount)||0, tenderFee: Number(t.tender_fee)||0,
@@ -6649,16 +6649,35 @@ function bidStatusColor(status){
   if(status==='Not Participating') return 'var(--text-mute,#6b7280)';
   return 'var(--amber,#d97706)';
 }
+function bidTypeOf(b){ return (b && b.bidType && DROPDOWNS.bidType.includes(b.bidType)) ? b.bidType : 'Bid'; }
+// Map free-text / portal info from Tender Centre to a valid Bid Type dropdown value
+function bidTypeFromTender(t){
+  const raw = String((t && t.bid_type) || '').trim().toLowerCase();
+  const exact = DROPDOWNS.bidType.find(x=>x.toLowerCase()===raw);
+  if(exact) return exact;
+  if(/reverse|\bra\b/.test(raw)) return 'RA (Reverse Auction)';
+  const portal = String((t && t.portal_code) || '').toUpperCase();
+  if(portal==='GEM') return 'Bid';
+  if(portal==='KERALA' || portal==='CPPP' || /e-?tender/.test(raw)) return 'e-Tender';
+  return 'Manual Tender';
+}
+function bidTypeBadgeHTML(b){
+  const t = bidTypeOf(b);
+  const col = t==='Bid'?'#2563eb':t.indexOf('RA')===0?'#7c3aed':t==='e-Tender'?'#0d9488':'#6b7280';
+  return `<span class="badge" style="background:${col};color:#fff;white-space:nowrap;">${Util.escapeHtml(t==='RA (Reverse Auction)'?'RA':t)}</span>`;
+}
 const BidSearch = {
   render(){
     const q = (document.getElementById('bidSearch')?document.getElementById('bidSearch').value:'').toLowerCase();
     const fStatus = document.getElementById('bidStatusFilter')?document.getElementById('bidStatusFilter').value:'';
     const fClosing = document.getElementById('bidClosingFilter')?document.getElementById('bidClosingFilter').value:'';
     const fMatch = document.getElementById('bidMatchFilter')?document.getElementById('bidMatchFilter').value:'';
+    const fType = document.getElementById('bidTypeFilter')?document.getElementById('bidTypeFilter').value:'';
 
     let list = Store.data.bids.map(b=>({...b, _match: bidMatch(b).score}));
     if(q) list = list.filter(b=>[b.bidNumber,b.raNumber,b.title,b.boqTitle,b.category,b.organisation,b.department,b.ministry,b.location].some(v=>(v||'').toLowerCase().includes(q)));
     if(fStatus) list = list.filter(b=>b.status===fStatus);
+    if(fType) list = list.filter(b=>bidTypeOf(b)===fType);
     if(fMatch==='high') list = list.filter(b=>b._match>=80);
     else if(fMatch==='medium') list = list.filter(b=>b._match>=50 && b._match<80);
     else if(fMatch==='low') list = list.filter(b=>b._match<50);
@@ -6696,6 +6715,8 @@ const BidSearch = {
           <div class="search"><span class="ic">&#128269;</span><input id="bidLiveSearch" placeholder="Keyword, category, bid number, department..." onkeydown="if(event.key==='Enter') BidSearch.openLiveSearch()"></div>
           <button class="btn btn-primary btn-sm" onclick="BidSearch.openLiveSearch()">&#128279; Search on GeM BidPlus</button>
           <button class="btn btn-outline btn-sm" onclick="window.open('https://bidplus.gem.gov.in/all-bids','_blank')">All Bids &#8599;</button>
+          <button class="btn btn-outline btn-sm" id="btnManualTender" onclick="window.open('https://tender.lsgkerala.gov.in','_blank','noopener')">Manual Tender &#8599;</button>
+          <button class="btn btn-outline btn-sm" id="btnETender" onclick="window.open('https://etenders.kerala.gov.in/nicgep/app?page=FrontEndAdvancedSearch&amp;service=page','_blank','noopener')">e-Tender &#8599;</button>
         </div>
       </div>
       <div class="toolbar">
@@ -6708,6 +6729,10 @@ const BidSearch = {
         <select id="bidStatusFilter" onchange="BidSearch.render()">
           <option value="">All Statuses</option>
           ${DROPDOWNS.bidStatus.map(s=>`<option ${s===fStatus?'selected':''}>${s}</option>`).join('')}
+        </select>
+        <select id="bidTypeFilter" onchange="BidSearch.render()">
+          <option value="">All Bid Types</option>
+          ${DROPDOWNS.bidType.map(s=>`<option ${s===fType?'selected':''}>${s}</option>`).join('')}
         </select>
         <select id="bidMatchFilter" onchange="BidSearch.render()">
           <option value="">All Match Scores</option>
@@ -6724,14 +6749,15 @@ const BidSearch = {
           <option value="won" ${fClosing==='won'?'selected':''}>&#127942; Won</option>
           <option value="lost" ${fClosing==='lost'?'selected':''}>&#10060; Lost</option>
         </select>
-        ${(q||fStatus||fMatch||fClosing) ? `<button class="btn btn-outline btn-sm" onclick="document.getElementById('bidSearch').value='';document.getElementById('bidStatusFilter').value='';document.getElementById('bidMatchFilter').value='';document.getElementById('bidClosingFilter').value='';BidSearch.render();">&#8635; Reset</button>` : ''}
+        ${(q||fStatus||fType||fMatch||fClosing) ? `<button class="btn btn-outline btn-sm" onclick="document.getElementById('bidSearch').value='';document.getElementById('bidStatusFilter').value='';document.getElementById('bidTypeFilter').value='';document.getElementById('bidMatchFilter').value='';document.getElementById('bidClosingFilter').value='';BidSearch.render();">&#8635; Reset</button>` : ''}
       </div>
       <div class="card"><div class="table-wrap">
       ${list.length ? `<table><thead><tr>
         <th class="col-actions">Actions</th>
         <th>Match</th>
         <th>Ready</th>
-        <th>Bid Number</th>
+        <th>Type</th>
+        <th>Bid / Tender No.</th>
         <th class="sortable ${SortState.bids&&SortState.bids.key==='title'?'active':''}" onclick="toggleSort('bids','title','BidSearch.render()')">Bid Title ${sortArrow('bids','title')}</th>
         <th>Category</th>
         <th>Organisation</th>
@@ -6750,6 +6776,7 @@ const BidSearch = {
           </div></td>
           <td>${matchBadgeHTML(b._match)}</td>
           <td>${BID_TERMINAL_STATUSES.includes(b.status)?'<span class="cell-mute">&mdash;</span>':bidReadinessBadge(b)}</td>
+          <td>${bidTypeBadgeHTML(b)}</td>
           <td class="mono cell-mute">${Util.escapeHtml(b.bidNumber||'—')}</td>
           <td class="cell-main" style="max-width:220px;white-space:normal;">${Util.escapeHtml(b.title||'—')}</td>
           <td class="cell-mute">${Util.escapeHtml(b.category||'—')}</td>
@@ -6776,12 +6803,12 @@ const BidSearch = {
     UI.openModal(rec?'Edit Bid':'Add Bid', `
       <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:0 0 8px;">Basic Information</h4>
       <div class="form-row">
-        <div class="field"><label>Bid Number</label><input id="b_bidNumber" placeholder="GEM/2026/B/XXXXXXX" value="${Util.escapeHtml(v.bidNumber)}"></div>
-        <div class="field"><label>RA Number</label><input id="b_raNumber" value="${Util.escapeHtml(v.raNumber)}"></div>
+        <div class="field"><label id="b_bidNumberLbl">Bid Number</label><input id="b_bidNumber" placeholder="GEM/2026/B/XXXXXXX" value="${Util.escapeHtml(v.bidNumber)}"></div>
+        <div class="field" id="b_raWrap"><label>RA Number</label><input id="b_raNumber" value="${Util.escapeHtml(v.raNumber)}"></div>
       </div>
-      <div class="field"><label>Bid Title *</label><input id="b_title" value="${Util.escapeHtml(v.title)}"></div>
+      <div class="field"><label id="b_titleLbl">Bid Title *</label><input id="b_title" value="${Util.escapeHtml(v.title)}"></div>
       <div class="form-row">
-        <div class="field"><label>Bid Type</label><select id="b_bidType">${DROPDOWNS.bidType.map(s=>`<option ${s===v.bidType?'selected':''}>${s}</option>`).join('')}</select></div>
+        <div class="field"><label>Bid Type</label><select id="b_bidType" onchange="BidSearch.onTypeChange()">${DROPDOWNS.bidType.map(s=>`<option ${s===bidTypeOf(v)?'selected':''}>${s}</option>`).join('')}</select></div>
         <div class="field"><label>Category</label><input id="b_category" list="dl_bidcats" value="${Util.escapeHtml(v.category)}"></div>
       </div>
       <datalist id="dl_bidcats">${[...new Set(Store.data.products.map(p=>p.category))].map(c=>`<option value="${Util.escapeHtml(c)}">`).join('')}</datalist>
@@ -6837,6 +6864,7 @@ const BidSearch = {
       </div>
       <div class="field"><label>Source URL</label><input id="b_sourceUrl" placeholder="https://bidplus.gem.gov.in/..." value="${Util.escapeHtml(v.sourceUrl)}"></div>
     `, `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="BidSearch.save('${id||''}')">Save Bid</button>`, true);
+    this.onTypeChange();
   },
   async save(id){
     const title = document.getElementById('b_title').value.trim();
@@ -6980,6 +7008,7 @@ const BidSearch = {
     const linkedTasks = Store.data.tasks.filter(t=>t.bidId===id);
     UI.openModal(`${b.bidNumber||b.id} — ${Util.escapeHtml(b.title||'')}`, `
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px;">
+        ${bidTypeBadgeHTML(b)}
         ${matchBadgeHTML(m.score)}
         ${bidDeadlineBadgeHTML(b.endDate)}
         <span class="badge" style="background:${bidStatusColor(b.status)};color:#fff;">${Util.escapeHtml(b.status||'New')}</span>
@@ -7024,6 +7053,20 @@ const BidSearch = {
       </div>
     `, `<button class="btn btn-outline" onclick="UI.closeModal()">Close</button><button class="btn btn-primary" onclick="BidSearch.openForm('${id}')">Edit Full Details</button>`, true);
   },
+  // Adapt number/title labels to the selected Bid Type (values are never cleared)
+  onTypeChange(){
+    const sel = document.getElementById('b_bidType'); if(!sel) return;
+    const t = sel.value, ra = t==='RA (Reverse Auction)';
+    const cfg = {
+      'Bid':['Bid Number','GEM/2026/B/XXXXXXX','Bid Title *'],
+      'RA (Reverse Auction)':['Bid Number','GEM/2026/B/XXXXXXX','Bid Title *'],
+      'e-Tender':['Tender Number','e.g. 2026_KWA_123456_1 / NIT No.','Tender Title *'],
+      'Manual Tender':['Tender / Reference Number','Tender notice no. or your own reference','Tender Title *']
+    }[t] || ['Bid Number','',''];
+    const l=document.getElementById('b_bidNumberLbl'), i=document.getElementById('b_bidNumber'), w=document.getElementById('b_raWrap'), tl=document.getElementById('b_titleLbl');
+    if(l) l.textContent = cfg[0]; if(i) i.placeholder = cfg[1]; if(tl) tl.textContent = cfg[2];
+    if(w) w.style.display = (ra || (document.getElementById('b_raNumber')||{}).value) ? '' : 'none';
+  },
   openLiveSearch(){
     const term = (document.getElementById('bidLiveSearch').value||'').trim();
     if(term && navigator.clipboard && navigator.clipboard.writeText){
@@ -7035,7 +7078,7 @@ const BidSearch = {
   exportExcel(){
     try{
       const rows = Store.data.bids.map(b=>({
-        'Bid Number':b.bidNumber||'', Title:b.title||'', Category:b.category||'', Organisation:b.organisation||'',
+        'Bid Type':bidTypeOf(b), 'Bid Number':b.bidNumber||'', 'RA Number':b.raNumber||'', Title:b.title||'', Category:b.category||'', Organisation:b.organisation||'',
         'Bid Value':b.estimatedValue||0, 'End Date':b.endDate||'', Status:b.status||'', 'Assigned To':b.assignedTo||'',
         Decision: BID_TERMINAL_STATUSES.includes(b.status)?b.status:'Pending', Result: b.status==='Won'?'Won':b.status==='Lost'?'Lost':'', Notes: b.description||''
       }));
