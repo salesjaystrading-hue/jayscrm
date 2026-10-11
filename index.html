@@ -7822,7 +7822,64 @@ const GemParse = {
     const m = /(\d+(?:\.\d+)?)\s*(Lakh|Crore|Cr)/i.exec(txt||''); if(!m) return {text:'', amount:0};
     const n = Number(m[1]) * (/^l/i.test(m[2]) ? 100000 : 10000000); return { text: m[1]+' '+(/^l/i.test(m[2])?'Lakh':'Crore'), amount:n };
   },
-  parse(lines){
+  /* ---- Technical specification tables (column positions come from the PDF text coordinates) ---- */
+  tableRows(cells, cols){
+    const FOOT = /^\s*\d+\s*\/\s*\d+\s*$/, byPage = {};
+    cells.forEach(c=>{ (byPage[c.pg] = byPage[c.pg] || []).push(c); });
+    const data = [];
+    Object.keys(byPage).map(Number).sort((a,b)=>a-b).forEach(pg=>{
+      const cs = byPage[pg].filter(c=>c.s && c.s.trim() && !/[^\x00-\x7F]/.test(c.s) && !FOOT.test(c.s) && !/^\s*(Name|Specification Parameter|Specification|Bid Requirement.*|Allowed Values)\s*$/i.test(c.s) && !(cols===2 && c.x < 45));
+      const hdr = cs.filter(c=>/Allowed\s*Values/i.test(c.s)).pop();
+      cs.forEach(c=>{ if(hdr ? c.y < hdr.y - 3 : true) data.push(c); });
+    });
+    if(!data.length) return [];
+    const xs = {}; data.forEach(c=>{ const k = Math.round(c.x/6)*6; (xs[k] = xs[k] || {n:0, x:c.x}).n++; xs[k].x = Math.min(xs[k].x, c.x); });
+    let cl = Object.values(xs).sort((a,b)=>b.n-a.n || a.x-b.x).slice(0, cols).sort((a,b)=>a.x-b.x).map(o=>o.x);
+    const colOf = (x)=>{ let k = 0; cl.forEach((cx,i)=>{ if(x + 4 >= cx) k = i; }); return k; };
+    const ordered = data.slice().sort((a,b)=>a.pg-b.pg || b.y-a.y || a.x-b.x);
+    const lines = []; ordered.forEach(c=>{ const L = lines[lines.length-1]; if(L && L.pg===c.pg && Math.abs(L.y-c.y) <= 2) L.cells.push(c); else lines.push({pg:c.pg, y:c.y, cells:[c]}); });
+    const gaps = []; for(let i=1;i<lines.length;i++){ if(lines[i].pg===lines[i-1].pg){ const g = lines[i-1].y - lines[i].y; if(g >= 5) gaps.push(g); } }
+    const lh = gaps.length ? Math.min(...gaps) : 12;
+    const rows = []; let cur = null, prev = null;
+    lines.forEach(L=>{
+      if(!cur || !prev || prev.pg!==L.pg || (prev.y - L.y) > lh*1.5){ cur = new Array(cl.length).fill(''); rows.push(cur); }
+      L.cells.sort((a,b)=>a.x-b.x).forEach(c=>{ const k = colOf(c.x); cur[k] = (cur[k] ? cur[k]+' ' : '') + c.s.trim(); });
+      prev = L;
+    });
+    return rows.map(r=>r.map(x=>this.trimJunk(x)));
+  },
+  parseSpecs(cells, itemList){
+    const out = [];
+    if(!cells || !cells.length) return out;
+    const END = /Consignees\s*\/\s*Reporting|Additional Specification (Parameters|Documents)|Special terms and conditions|Buyer Added|Technical\s*Specifications/i;
+    let lim = cells.findIndex(c=>!/[^\x00-\x7F]/.test(c.s) && /Buyer\s*Added\s*Bid\s*Specific|\/\s*Disclaimer|^\s*Disclaimer/i.test(c.s)); if(lim < 0) lim = cells.length;
+    cells = cells.slice(0, lim);
+    let marks = []; cells.forEach((c,i)=>{ if(!/[^\x00-\x7F]/.test(c.s) && /^\W*Technical\s*Specifications\W*$/i.test(c.s.trim())) marks.push(i); });
+    if(itemList && itemList.length && marks.length > itemList.length) marks = marks.slice(0, itemList.length);
+    marks.forEach((mi, k)=>{
+      let e = cells.length; for(let j=mi+1;j<cells.length;j++){ if(END.test(cells[j].s) && !/[^\x00-\x7F]/.test(cells[j].s)){ e = j; break; } }
+      const reg = cells.slice(mi+1, e);
+      const note = '';
+      const rows3 = this.tableRows(reg, 3).filter(r=>r[1] || r[2]);
+      let group = ''; const rows = rows3.map(r=>{ if(r[0]) group = r[0]; return { group, name:r[1], value:r[2] }; });
+      // additional specification parameters belonging to this item (table that follows)
+      let add = []; for(let j=e;j<cells.length;j++){ if(/Technical\s*Specifications/i.test(cells[j].s) && !/[^\x00-\x7F]/.test(cells[j].s)) break;
+        if(/Additional Specification Parameters/i.test(cells[j].s) && !/[^\x00-\x7F]/.test(cells[j].s)){ let e2 = cells.length; for(let q=j+1;q<cells.length;q++){ if(/Bidders offering must also comply|Consignees\s*\/\s*Reporting|Additional Specification Documents|Technical\s*Specifications/i.test(cells[q].s) && !/[^\x00-\x7F]/.test(cells[q].s)){ e2 = q; break; } }
+          add = this.tableRows(cells.slice(j+1, e2), 2).filter(r=>r[0] || r[1]).map(r=>({ name:r[0], value:r[1] })); break; } }
+      const it = (itemList||[])[k] || {};
+      if(rows.length || add.length) out.push({ item: it.name || ('Item '+(k+1)), qty: it.qty || 0, unit: it.unit || '', note, rows, additional: add });
+    });
+    return out;
+  },
+  specsText(specs){
+    return (specs||[]).map(sp=>{
+      const L = [ sp.item + (sp.qty ? ' ('+sp.qty+(sp.unit?' '+sp.unit:'')+')' : '') ]; if(sp.note) L.push('['+sp.note+']');
+      let g = null; sp.rows.forEach(r=>{ if(r.group !== g){ g = r.group; if(g) L.push(g.toUpperCase()); } L.push('  - '+(r.name||'')+': '+(r.value||'')); });
+      if(sp.additional && sp.additional.length){ L.push('ADDITIONAL SPECIFICATION PARAMETERS'); sp.additional.forEach(r=>L.push('  - '+(r.name||'')+': '+(r.value||''))); }
+      return L.join('\n');
+    }).join('\n\n');
+  },
+  parse(lines, cells){
     const out = { warnings:[], found:{} };
     const rawLines = (lines||[]).map(it=>{ const o = Array.isArray(it) ? {items:it} : (it && it.items ? it : {items:[String(it||'')]}); return { items:o.items.map(x=>String(x==null?'':x)), xEnd:o.xEnd, y:o.y }; });
     const keep = rawLines.filter(o=>!/^\s*\d+\s*\/\s*\d+\s*$/.test(o.items.join('')));
@@ -7900,6 +7957,8 @@ const GemParse = {
     out.consignees = cons;
     if(!cons.length) out.warnings.push('Consignee / delivery details were not found');
 
+    out.specs = this.parseSpecs(cells, out.items); out.technicalSpecs = this.specsText(out.specs);
+    if(!out.specs.length) out.warnings.push('Technical specifications table was not found');
     // ---- Buyer added ATC (kept as text; the PDF itself is never stored) ----
     const iS = L.findIndex(x=>/Buyer\s*Added\s*Bid\s*Specific\s*Terms\s*and\s*Conditions/i.test(x));
     let iE = L.findIndex((x,i)=>i>iS && /\/\s*Disclaimer/i.test(x)); if(iE < 0) iE = L.length;
@@ -7944,7 +8003,6 @@ const GemParse = {
   }
 };
 
-
 /* =====================================================================
    GeM BID PDF IMPORT (drag & drop)
    Reads a downloaded GeM "Bid Document" PDF entirely in the browser with
@@ -7979,17 +8037,18 @@ const GemPdf = {
     try{ doc = await pdfjsLib.getDocument({ data: buf }).promise; }
     catch(e){ throw new Error(/password/i.test(e && (e.name||e.message)||'') ? 'password-protected PDF' : 'could not open this PDF'); }
     if(doc.numPages > GEMPDF_MAX_PAGES) throw new Error('PDF has too many pages for a GeM bid document');
-    const lines = [];
+    const lines = [], cells = [];
     for(let p = 1; p <= doc.numPages; p++){
       const tc = await (await doc.getPage(p)).getTextContent(); let cur = [], xe = 0, yy = 0;
       for(const it of tc.items){
+        if(it.str && it.str.trim()) cells.push({ s:it.str, x:it.transform[4], y:it.transform[5], pg:p });
         cur.push(it.str); if(it.str && it.str.trim()){ xe = Math.max(xe, it.transform[4] + it.width); yy = it.transform[5]; }
         if(it.hasEOL){ lines.push({ items:cur, xEnd:xe, y:yy }); cur = []; xe = 0; }
       }
       if(cur.length) lines.push({ items:cur, xEnd:xe, y:yy });
     }
     try{ doc.destroy(); }catch(e){}
-    const r = GemParse.parse(lines);
+    const r = GemParse.parse(lines, cells);
     if(r.notGem) throw new Error('this does not look like a GeM bid document (no GEM bid number found)');
     return r;
   },
@@ -8045,6 +8104,7 @@ const GemPdf = {
           <div><span class="cell-mute">Turnover (bidder / OEM):</span> ${E(p.minTurnover||'—')} / ${E(p.oemTurnover||'—')}</div>
           <div><span class="cell-mute">Buyer ATC:</span> ${p.atcClauses && p.atcClauses.length ? p.atcClauses.length+' paragraph(s)' : (p.atcGeneric?'standard clause only':'none found')}</div>
         </div>
+        ${p.specs && p.specs.length ? `<div class="cell-mute" style="font-size:12px;margin-top:6px;">Technical specifications: ${p.specs.map(x=>E(x.item)+' ('+((x.rows||[]).length+(x.additional||[]).length)+' lines)').join(' &middot; ')}</div>` : ''}
         ${p.warnings && p.warnings.length ? `<div style="font-size:12px;color:var(--amber,#d97706);margin-top:6px;">${p.warnings.map(E).join(' &middot; ')}</div>` : ''}
         <div style="margin-top:8px;font-size:12.5px;"><b>Bid letters to create (Draft):</b> ${Object.keys(it.letters).map(k=>{ const L = it.letters[k], lab = (BIDDOC_TEMPLATES[k]||{}).short || k;
           return L.has ? `<span class="badge" style="margin-right:6px;" title="Already exists for this bid">${E(lab)} &#10003; exists</span>` : `<label class="chk" style="margin-right:10px;"><input type="checkbox" ${L.on?'checked':''} onchange="GemPdf.S.items[${i}].letters['${k}'].on=this.checked"> ${E((BIDDOC_TEMPLATES[k]||{}).label||k)}</label>`; }).join('')}</div>
@@ -8061,7 +8121,7 @@ const GemPdf = {
   gemBlock(p, fileName){
     const g = {}; ['publishedDate','endDate','endTime','openingDate','openingTime','offerValidity','ministry','department','organisation','office','hodEmail','buyerEmail','quantity','itemCategory','items','consignees',
       'minTurnover','oemTurnover','experienceYears','mseRelaxation','startupRelaxation','docsRequired','pastPerformancePct','gemBidType','raEnabled','primaryCategory','evaluationMethod','paymentTimeline',
-      'emdRequired','emdAmount','epbgRequired','epbgPercent','msePreference','miiPreference','miiClauses','mseClauses','localContentPct','atcText','atcGeneric','atcClauses'].forEach(k=>{ if(p[k] !== undefined) g[k] = p[k]; });
+      'emdRequired','emdAmount','epbgRequired','epbgPercent','msePreference','miiPreference','miiClauses','mseClauses','localContentPct','atcText','atcGeneric','atcClauses','specs'].forEach(k=>{ if(p[k] !== undefined) g[k] = p[k]; });
     g.sourceFile = fileName; g.importedAt = new Date().toISOString(); g.importedBy = (typeof bidUserName==='function' ? bidUserName() : ((Auth.session&&Auth.session.name)||'System')); return g;
   },
   bidRecord(p, fileName){
@@ -8075,7 +8135,7 @@ const GemPdf = {
       state:'', district:'', location: (p.office && p.office !== p.organisation) ? p.office : '',
       estimatedValue:p.estimatedValue||0, emdAmount:p.emdAmount||0, emdRequired:p.emdRequired===true, tenderFee:0, securityDeposit:0, expectedMargin:0, ourQuote:0,
       publishedDate:p.publishedDate||'', startDate:p.publishedDate||'', endDate:p.endDate||'', openingDate:p.openingDate||'', offerValidity:p.offerValidity||'',
-      status:'New', assignedTo:'', sourceUrl:'', quantity:p.quantity||0
+      status:'New', assignedTo:'', sourceUrl:'', quantity:p.quantity||0, technicalSpecs:p.technicalSpecs||''
     };
   },
   async createAll(){
@@ -8117,6 +8177,11 @@ const GemPdf = {
     }catch(e){ D.errors.push(e.message||'failed'); }
     S.busy = false; S.done = D; S.items = S.items.filter(i=>!(i.include && i.p)); this.paint();
     if(UI.currentView === 'bidsearch'){ try{ BidSearch.render(); }catch(e){} } else if(UI.currentView === 'biddocs'){ try{ Router.render('biddocs'); }catch(e){} }
+  },
+  specsHTML(b){
+    const t = b && b.technicalSpecs; if(!t || !String(t).trim()) return '';
+    return `<h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:16px 0 6px;">Technical Specifications</h4>
+      <div class="card card-pad" style="font-size:12.5px;white-space:pre-wrap;line-height:1.55;max-height:360px;overflow:auto;">${Util.escapeHtml(String(t))}</div>`;
   },
   fmtList(a){ return (a||[]).filter(Boolean).join(', '); },
   detailHTML(b){
@@ -8416,6 +8481,7 @@ const BidSearch = {
       <datalist id="dl_bidcats">${[...new Set(Store.data.products.map(p=>p.category))].map(c=>`<option value="${Util.escapeHtml(c)}">`).join('')}</datalist>
       <div class="field"><label>BOQ Title</label><input id="b_boqTitle" value="${Util.escapeHtml(v.boqTitle)}"></div>
       <div class="field"><label>Description</label><textarea id="b_description">${Util.escapeHtml(v.description)}</textarea></div>
+      <div class="field"><label>Technical Specifications <span class="cell-mute" style="font-weight:400;">(filled from the GeM bid PDF - editable)</span></label><textarea id="b_techSpecs" rows="8" style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;">${Util.escapeHtml(v.technicalSpecs||'')}</textarea></div>
 
       <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:16px 0 8px;">Buyer Information</h4>
       <div class="form-row">
@@ -8479,7 +8545,7 @@ const BidSearch = {
     };
     Object.assign(rec, {
       bidNumber:g('b_bidNumber').trim(), raNumber:g('b_raNumber').trim(), title, bidType:g('b_bidType'),
-      category:g('b_category').trim(), boqTitle:g('b_boqTitle').trim(), description:g('b_description').trim(),
+      category:g('b_category').trim(), boqTitle:g('b_boqTitle').trim(), description:g('b_description').trim(), technicalSpecs:g('b_techSpecs').replace(/\s+$/,''),
       ministry:g('b_ministry').trim(), department:g('b_department').trim(), organisation:g('b_organisation').trim(),
       buyerName:g('b_buyerName').trim(), consignee:g('b_consignee').trim(), state:g('b_state'), district:g('b_district').trim(), location:g('b_location').trim(),
       estimatedValue:Number(g('b_estimatedValue'))||0, emdAmount:Number(g('b_emdAmount'))||0, tenderFee:Number(g('b_tenderFee'))||0,
@@ -8636,6 +8702,7 @@ const BidSearch = {
         </div>
       </div>
 
+      ${GemPdf.specsHTML(b)}
       ${GemPdf.detailHTML(b)}
       ${(()=>{ const r=bidReadiness(b); return `<div class="card card-pad" style="margin:14px 0 0;"><b>Bid Readiness: ${bidReadinessBadge(b)}</b> <span class="cell-mute" style="font-size:12px;">${r.missing.length?'Missing: '+Util.escapeHtml(r.missing.join(' · ')):'Everything in place — ready to submit.'}</span>${r.needsEmd&&!r.emdRec?` <button class="btn btn-outline btn-sm" style="margin-left:8px;" onclick="BidSearch.recordEmd('${id}')">Record EMD</button>`:''}</div>`; })()}
       <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:16px 0 6px;">Document Checklist — ${doneCount}/${b.checklist.length}</h4>
