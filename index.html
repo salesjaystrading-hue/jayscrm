@@ -217,7 +217,7 @@
   #appScreen{display:none;height:100vh;}
   .shell{display:flex;height:100vh;overflow:hidden;}
   .sidebar{
-    width:236px;flex-shrink:0;background:linear-gradient(180deg, var(--navy) 0%, #0A1220 100%);color:#cfe0ef;
+    width:256px;flex-shrink:0;background:linear-gradient(180deg, var(--navy) 0%, #0A1220 100%);color:#cfe0ef;
     display:flex;flex-direction:column;padding:16px 12px;
     transition:width .18s ease;
   }
@@ -258,6 +258,35 @@
   .nav-item .cnt{margin-left:auto;background:rgba(255,255,255,0.12);padding:1px 7px;border-radius:20px;font-size:10.5px;font-weight:700;}
   .nav-item.active .cnt{background:rgba(255,255,255,0.25);}
   .nav-section-label{font-size:10px;text-transform:uppercase;letter-spacing:0.7px;color:#5f7590;padding:14px 12px 6px;font-weight:700;}
+
+  /* ---- Grouped sidebar ---- */
+  .nav-group-head{display:flex;align-items:center;gap:10px;width:100%;padding:9px 12px;margin-top:2px;border:0;border-radius:9px;background:transparent;
+    color:#dbe7f3;font:inherit;font-size:12.5px;font-weight:700;cursor:pointer;text-align:left;min-height:38px;}
+  .nav-group-head:hover{background:var(--navy-2);color:#fff;}
+  .nav-group-head .ic{width:18px;text-align:center;font-size:14px;}
+  .nav-group-head .gl{flex:1;}
+  .nav-group-head .cnt{background:var(--orange);color:#fff;padding:1px 7px;border-radius:20px;font-size:10.5px;font-weight:700;}
+  .nav-group-head .chev{font-size:11px;color:#7d93ab;transition:transform .15s;transform:rotate(-90deg);}
+  .nav-group.open .nav-group-head .chev{transform:none;}
+  .nav-group-body{display:none;margin:0 0 4px 12px;padding-left:6px;border-left:1px solid rgba(255,255,255,0.08);}
+  .nav-group.open .nav-group-body{display:block;}
+  .nav-item{position:relative;min-height:36px;}
+  .nav-item .nav-star{margin-left:auto;background:transparent;border:0;color:#7d93ab;font-size:14px;line-height:1;cursor:pointer;padding:4px;border-radius:6px;opacity:0;}
+  .nav-item .cnt + .nav-star{margin-left:4px;}
+  .nav-item:hover .nav-star,.nav-item:focus-within .nav-star,.nav-star.on{opacity:1;}
+  .nav-star.on{color:#fbbf24;}
+  .nav-item:not(:has(.cnt)) .nav-star{margin-left:auto;}
+  .nav-item.active .nav-star{color:#fff;}
+  .nav-item.active .nav-star.on{color:#fde68a;}
+  .nav-item:focus-visible,.nav-group-head:focus-visible,.nav-star:focus-visible,.side-collapse-btn:focus-visible{outline:2px solid #fbbf24;outline-offset:1px;}
+  .nav-fav .nav-section-label{padding-top:6px;}
+  @media(hover:none){ .nav-item .nav-star{opacity:.7;} }
+  @media(max-width:880px){ .nav-item,.nav-group-head{min-height:44px;} .nav-item .nav-star{min-width:36px;min-height:36px;} }
+  /* collapsed (icon-only) desktop sidebar: every page stays reachable as an icon with a tooltip */
+  .sidebar.collapsed .nav-group-head{display:none;}
+  .sidebar.collapsed .nav-group-body{display:block;margin:0;padding:0;border:0;}
+  .sidebar.collapsed .nav-group{border-top:1px solid rgba(255,255,255,0.06);padding-top:4px;margin-top:4px;}
+  .sidebar.collapsed .nav-star,.sidebar.collapsed .nav-group-head .cnt{display:none;}
   .side-foot{padding-top:12px;border-top:1px solid var(--navy-3);margin-top:8px;}
   .user-pill{display:flex;align-items:center;gap:9px;padding:8px;border-radius:9px;background:var(--navy-2);}
   .user-pill .av{width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg, var(--orange), var(--orange-dark));color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12.5px;flex-shrink:0;}
@@ -555,7 +584,7 @@
   }
 
   @media(max-width:880px){
-    .sidebar{position:fixed;left:-250px;top:0;bottom:0;z-index:90;transition:left .2s;}
+    .sidebar{position:fixed;left:-280px;top:0;bottom:58px;z-index:90;transition:left .2s;}
     .sidebar.open{left:0;}
     .content{padding:14px;}
     .grid-4{grid-template-columns:repeat(2,1fr);}
@@ -2167,20 +2196,11 @@ const UI = {
    NAV
 ===================================================================== */
 const NAV = [
-  {sec:'Workspace', items:[
+  {sec:'Dashboard', ic:'&#127968;', items:[
     {id:'dashboard', ic:'&#127968;', label:'Dashboard'},
     {id:'notifications', ic:'&#128276;', label:'Notifications'},
   ]},
-  {sec:'Field Sales', items:[
-    {id:'fieldhome', ic:'&#128204;', label:'My Day'},
-    {id:'visits', ic:'&#128100;', label:'Visits'},
-    {id:'requirements', ic:'&#128221;', label:'Requirements'},
-    {id:'travel', ic:'&#128664;', label:'Travel Log'},
-    {id:'fieldmap', ic:'&#128506;', label:'Field Map'},
-    {id:'findlocation', ic:'&#128205;', label:'Find Location'},
-    {id:'officefinder', ic:'&#127970;', label:'Nearby Offices'},
-  ]},
-  {sec:'Sales', items:[
+  {sec:'Sales &amp; Customers', ic:'&#128101;', items:[
     {id:'leads', ic:'&#128101;', label:'Leads'},
     {id:'customers', ic:'&#128100;', label:'Customers'},
     {id:'pipeline', ic:'&#128202;', label:'Sales Pipeline'},
@@ -2192,44 +2212,51 @@ const NAV = [
     {id:'rate_docs', ic:'&#128196;', label:'Rate / Offer PDF'},
     {id:'orders', ic:'&#128230;', label:'Orders'},
   ]},
-  {sec:'Accounts', items:[
-    {id:'payments', ic:'&#128176;', label:'Payments Followup'},
-    {id:'outstanding', ic:'&#9888;', label:'Outstanding'},
+  {sec:'Government Tenders', ic:'&#127963;', items:[
+    {id:'bidsearch', ic:'&#128269;', label:'GeM Bid Search'},
+    {id:'tenders', ic:'&#128209;', label:'Tender Centre'},
+    {id:'oppfinder', ic:'&#127963;', label:'Project Opportunities'},
+    {id:'biddocs', ic:'&#128196;', label:'Bid Documents'},
+    {id:'gemcrac', ic:'&#128203;', label:'GEM CRAC'},
+    {id:'emdpbg', ic:'&#128274;', label:'EMD / PBG Tracker'},
   ]},
-  {sec:'Products', items:[
+  {sec:'Products &amp; Inventory', ic:'&#128230;', items:[
     {id:'products', ic:'&#128230;', label:'Product Master'},
     {id:'inventory', ic:'&#127974;', label:'Inventory'},
     {id:'suppliers', ic:'&#127981;', label:'Suppliers'},
     {id:'purchaseorders', ic:'&#128722;', label:'Purchase Orders'},
   ]},
-  {sec:'Government Business', items:[
-    {id:'oppfinder', ic:'&#127963;', label:'Project Opportunities'},
-    {id:'bidsearch', ic:'&#128269;', label:'GeM Bid Search'},
-    {id:'biddocs', ic:'&#128196;', label:'Bid Documents'},
-    {id:'gemcrac', ic:'&#128203;', label:'GEM CRAC'},
-    {id:'tenders', ic:'&#128209;', label:'Tender Centre'},
-    {id:'emdpbg', ic:'&#128274;', label:'EMD / PBG Tracker'},
+  {sec:'Payments &amp; Accounts', ic:'&#128176;', items:[
+    {id:'payments', ic:'&#128176;', label:'Payments Follow-up'},
+    {id:'outstanding', ic:'&#9888;', label:'Outstanding'},
   ]},
-  {sec:'Operations', items:[
+  {sec:'Field Sales', ic:'&#128204;', items:[
+    {id:'fieldhome', ic:'&#128204;', label:'My Day'},
+    {id:'visits', ic:'&#128100;', label:'Visits'},
+    {id:'requirements', ic:'&#128221;', label:'Requirements'},
+    {id:'travel', ic:'&#128664;', label:'Travel Log'},
+    {id:'fieldmap', ic:'&#128506;', label:'Field Map'},
+    {id:'findlocation', ic:'&#128205;', label:'Find Location'},
+    {id:'officefinder', ic:'&#127970;', label:'Nearby Offices'},
+  ]},
+  {sec:'Tasks &amp; Operations', ic:'&#9989;', items:[
     {id:'complaints', ic:'&#128736;', label:'Complaints'},
     {id:'amc', ic:'&#128295;', label:'Service &amp; AMC'},
     {id:'tasks', ic:'&#9989;', label:'Tasks &amp; To-Do'},
     {id:'attendance', ic:'&#128343;', label:'Attendance &amp; Leave'},
     {id:'notes', ic:'&#128221;', label:'Notes'},
   ]},
-  {sec:'Analytics', items:[
+  {sec:'Reports &amp; Analytics', ic:'&#128200;', items:[
     {id:'reports', ic:'&#128200;', label:'Reports'},
     {id:'fieldreports', ic:'&#128202;', label:'Field Reports'},
   ]},
-  {sec:'System', items:[
+  {sec:'Admin &amp; Settings', ic:'&#9881;', items:[
+    {id:'workmgmt', ic:'&#128203;', label:'Work Management', adminOnly:true},
+    {id:'callalloc', ic:'&#128222;', label:'Contact Allocation', adminOnly:true},
+    {id:'users', ic:'&#128272;', label:'Users &amp; Roles', adminOnly:true},
+    {id:'settings', ic:'&#9881;', label:'Settings', adminOnly:true},
     {id:'backup', ic:'&#9729;', label:'Backup &amp; Restore'},
   ]},
-  {sec:'Admin', adminOnly:true, items:[
-    {id:'workmgmt', ic:'&#128203;', label:'Work Management'},
-    {id:'callalloc', ic:'&#128222;', label:'Contact Allocation'},
-    {id:'users', ic:'&#128272;', label:'Users &amp; Roles'},
-    {id:'settings', ic:'&#9881;', label:'Settings'},
-  ]}
 ];
 const PAGE_META = {
   dashboard:['Dashboard','Overview of your business'],
@@ -2282,7 +2309,7 @@ const PAGE_META = {
    stay tied purely to the Admin role and are never toggled here. */
 function assignableMenus(){
   const out = [];
-  NAV.forEach(sec=>{ if(!sec.adminOnly) sec.items.forEach(it=>out.push({id:it.id, label:it.label})); });
+  NAV.forEach(sec=>{ sec.items.forEach(it=>{ if(!it.adminOnly) out.push({id:it.id, label:it.label}); }); });
   return out;
 }
 /* True if the logged-in user may open this view. Admins always can.
@@ -2342,22 +2369,67 @@ function navBadgeCount(id){
   return 0;
 }
 
+/* ---- Sidebar groups: expandable sections, favourites, keyboard support ----
+   Open/closed state and pinned pages are per-user UI preferences kept in
+   localStorage only (never in the business-data store). */
+const NavPrefs = {
+  key(n){ const id = (Auth.session && (Auth.session.id||Auth.session.username)) || 'anon'; return 'jays_nav_'+n+'_'+id; },
+  read(n, d){ try{ const v = JSON.parse(localStorage.getItem(this.key(n))); return Array.isArray(v) ? v : d; }catch(e){ return d; } },
+  write(n, v){ try{ localStorage.setItem(this.key(n), JSON.stringify(v)); }catch(e){} },
+  favs(){ return this.read('fav', []); },
+  openGroups(){ return this.read('open', null); },
+  toggleFav(id){ const f = this.favs(), i = f.indexOf(id); if(i>=0) f.splice(i,1); else f.push(id); this.write('fav', f); },
+  setOpen(sec, on){ let o = this.openGroups() || []; o = o.filter(x=>x!==sec); if(on) o.push(sec); this.write('open', o); }
+};
+function navGroupOf(viewId){ const g = NAV.find(sec=>sec.items.some(it=>it.id===viewId)); return g ? g.sec : null; }
+function navItemAllowed(it){ return !(it.adminOnly && !Auth.isAdmin()) && hasMenuAccess(it.id); }
 function renderNav(){
   const box = document.getElementById('navList');
+  const plain = (h)=>String(h).replace(/&amp;/g,'&');
+  const favs = NavPrefs.favs();
+  let open = NavPrefs.openGroups();
+  const activeSec = navGroupOf(UI.currentView);
+  if(open === null){ open = [activeSec].filter(Boolean); }
+  if(activeSec && !open.includes(activeSec)){ open = open.concat(activeSec); NavPrefs.write('open', open); }
+  const row = (it, inFav)=>{
+    const cnt = navBadgeCount(it.id), label = plain(it.label), pinned = favs.includes(it.id), act = UI.currentView===it.id;
+    return `<div class="nav-item ${act?'active':''}" role="link" tabindex="0" data-view="${it.id}" title="${Util.escapeHtml(label)}"${act?' aria-current="page"':''}>
+      <span class="ic" aria-hidden="true">${it.ic}</span><span>${it.label}</span>${cnt?`<span class="cnt" aria-label="${cnt} pending">${cnt}</span>`:''}
+      <button type="button" class="nav-star ${pinned?'on':''}" data-fav="${it.id}" aria-pressed="${pinned}" aria-label="${pinned?'Remove '+Util.escapeHtml(label)+' from Favorites':'Add '+Util.escapeHtml(label)+' to Favorites'}" title="${pinned?'Unpin from Favorites':'Pin to Favorites'}">${pinned?'&#9733;':'&#9734;'}</button>
+    </div>`;
+  };
   let html = '';
-  NAV.forEach(sec=>{
-    if(sec.adminOnly && !Auth.isAdmin()) return;
-    const visibleItems = sec.items.filter(it=>hasMenuAccess(it.id));
-    if(!visibleItems.length) return;
-    html += `<div class="nav-section-label">${sec.sec}</div>`;
-    visibleItems.forEach(it=>{
-      const cnt = navBadgeCount(it.id);
-      html += `<div class="nav-item ${UI.currentView===it.id?'active':''}" onclick="go('${it.id}')" title="${it.label.replace(/&amp;/g,'&')}">
-        <span class="ic">${it.ic}</span><span>${it.label}</span>${cnt?`<span class="cnt">${cnt}</span>`:''}
-      </div>`;
-    });
+  const favItems = favs.map(id=>{ for(const sec of NAV){ const it = sec.items.find(x=>x.id===id); if(it) return it; } return null; }).filter(it=>it && navItemAllowed(it));
+  if(favItems.length){
+    html += `<div class="nav-group nav-fav"><div class="nav-section-label">&#9733; Favorites</div>${favItems.map(it=>row(it,true)).join('')}</div>`;
+  }
+  NAV.forEach((sec, gi)=>{
+    const items = sec.items.filter(navItemAllowed);
+    if(!items.length) return;
+    const isOpen = open.includes(sec.sec), total = items.reduce((n,it)=>n+(navBadgeCount(it.id)||0),0);
+    html += `<div class="nav-group ${isOpen?'open':''}" data-sec="${Util.escapeHtml(sec.sec)}">
+      <button type="button" class="nav-group-head" data-sec="${Util.escapeHtml(sec.sec)}" aria-expanded="${isOpen}" aria-controls="navg${gi}" title="${Util.escapeHtml(plain(sec.sec))}">
+        <span class="ic" aria-hidden="true">${sec.ic}</span><span class="gl">${sec.sec}</span>${(!isOpen && total)?`<span class="cnt" aria-label="${total} pending">${total}</span>`:''}<span class="chev" aria-hidden="true">&#9662;</span>
+      </button>
+      <div class="nav-group-body" id="navg${gi}">${items.map(it=>row(it,false)).join('')}</div>
+    </div>`;
   });
   box.innerHTML = html;
+  if(!box._wired){
+    box._wired = true;
+    box.addEventListener('click', e=>{
+      const star = e.target.closest('.nav-star');
+      if(star){ e.stopPropagation(); NavPrefs.toggleFav(star.getAttribute('data-fav')); renderNav(); return; }
+      const head = e.target.closest('.nav-group-head');
+      if(head){ const sec = head.getAttribute('data-sec'); NavPrefs.setOpen(sec, head.getAttribute('aria-expanded')!=='true'); renderNav();
+        const again = box.querySelector('.nav-group-head[data-sec="'+sec.replace(/"/g,'\\"')+'"]'); if(again) again.focus(); return; }
+      const item = e.target.closest('.nav-item');
+      if(item) go(item.getAttribute('data-view'));
+    });
+    box.addEventListener('keydown', e=>{
+      if((e.key==='Enter' || e.key===' ') && e.target.classList && e.target.classList.contains('nav-item')){ e.preventDefault(); go(e.target.getAttribute('data-view')); }
+    });
+  }
   updateMobileNav();
 }
 function go(view){
@@ -8327,12 +8399,21 @@ const BidSearch = {
     const fMatch = document.getElementById('bidMatchFilter')?document.getElementById('bidMatchFilter').value:'';
     const fType = document.getElementById('bidTypeFilter')?document.getElementById('bidTypeFilter').value:'';
     const fUser = document.getElementById('bidUserFilter')?document.getElementById('bidUserFilter').value:'';
+    const fCat = document.getElementById('bidCatFilter')?document.getElementById('bidCatFilter').value:'';
+    const fOrg = document.getElementById('bidOrgFilter')?document.getElementById('bidOrgFilter').value:'';
+    const fLoc = document.getElementById('bidLocFilter')?document.getElementById('bidLocFilter').value:'';
+    const nrm = (v)=>String(v||'').trim().replace(/\s+/g,' '), locOf = (b)=>nrm(b.location||b.district||'');
+    const distinct = (fn)=>{ const m = new Map(); Store.data.bids.forEach(b=>{ const v = fn(b); if(v && !m.has(v.toLowerCase())) m.set(v.toLowerCase(), v); }); return [...m.values()].sort((x,y)=>x.localeCompare(y)); };
+    const optsFor = (vals, cur, label)=>`<option value="">${label}</option>` + vals.map(v=>`<option value="${Util.escapeHtml(v)}" ${v.toLowerCase()===String(cur).toLowerCase()?'selected':''}>${Util.escapeHtml(v.length>38?v.slice(0,36)+'…':v)}</option>`).join('');
 
     let list = Store.data.bids.map(b=>({...b, _match: bidMatch(b).score}));
     if(q) list = list.filter(b=>[b.bidNumber,b.raNumber,b.title,b.boqTitle,b.category,b.organisation,b.department,b.ministry,b.location,b.savedBy].some(v=>(v||'').toLowerCase().includes(q)));
     if(fStatus) list = list.filter(b=>b.status===fStatus);
     if(fType) list = list.filter(b=>bidTypeOf(b)===fType);
     if(fUser) list = list.filter(b=>fUser==='__none'?!bidSavedByOf(b):bidSavedByOf(b)===fUser);
+    if(fCat) list = list.filter(b=>nrm(b.category).toLowerCase()===fCat.toLowerCase());
+    if(fOrg) list = list.filter(b=>nrm(b.organisation).toLowerCase()===fOrg.toLowerCase());
+    if(fLoc) list = list.filter(b=>locOf(b).toLowerCase()===fLoc.toLowerCase());
     if(fMatch==='high') list = list.filter(b=>b._match>=80);
     else if(fMatch==='medium') list = list.filter(b=>b._match>=50 && b._match<80);
     else if(fMatch==='low') list = list.filter(b=>b._match<50);
@@ -8395,6 +8476,9 @@ const BidSearch = {
           ${[...new Set(Store.data.bids.map(bidSavedByOf).filter(Boolean))].sort().map(u=>`<option value="${Util.escapeHtml(u)}" ${u===fUser?'selected':''}>Saved by: ${Util.escapeHtml(u)}</option>`).join('')}
           <option value="__none" ${fUser==='__none'?'selected':''}>Not recorded</option>
         </select>
+        <select id="bidCatFilter" autocomplete="off" onchange="BidSearch.render()">${optsFor(distinct(b=>nrm(b.category)), fCat, 'All Categories')}</select>
+        <select id="bidOrgFilter" autocomplete="off" onchange="BidSearch.render()">${optsFor(distinct(b=>nrm(b.organisation)), fOrg, 'All Organisations')}</select>
+        <select id="bidLocFilter" autocomplete="off" onchange="BidSearch.render()">${optsFor(distinct(locOf), fLoc, 'All Locations')}</select>
         <select id="bidMatchFilter" autocomplete="off" onchange="BidSearch.render()">
           <option value="">All Match Scores</option>
           <option value="high" ${fMatch==='high'?'selected':''}>&#128293; High Match (80%+)</option>
@@ -8410,11 +8494,11 @@ const BidSearch = {
           <option value="won" ${fClosing==='won'?'selected':''}>&#127942; Won</option>
           <option value="lost" ${fClosing==='lost'?'selected':''}>&#10060; Lost</option>
         </select>
-        ${(q||fStatus||fType||fUser||fMatch||fClosing) ? `<button class="btn btn-outline btn-sm" onclick="document.getElementById('bidSearch').value='';document.getElementById('bidStatusFilter').value='';document.getElementById('bidTypeFilter').value='';document.getElementById('bidUserFilter').value='';document.getElementById('bidMatchFilter').value='';document.getElementById('bidClosingFilter').value='';BidSearch.render();">&#8635; Reset</button>` : ''}
+        ${(q||fStatus||fType||fUser||fCat||fOrg||fLoc||fMatch||fClosing) ? `<button class="btn btn-outline btn-sm" onclick="BidSearch.clearFilters()">&#8635; Reset</button>` : ''}
       </div>
-      ${(q||fStatus||fType||fUser||fMatch||fClosing) ? `<div class="card card-pad" style="margin-bottom:12px;border-left:4px solid var(--amber,#d97706);display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+      ${(q||fStatus||fType||fUser||fCat||fOrg||fLoc||fMatch||fClosing) ? `<div class="card card-pad" style="margin-bottom:12px;border-left:4px solid var(--amber,#d97706);display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
         <b>Filters are on &mdash; showing ${list.length} of ${all.length} bids.</b>
-        <span class="cell-mute" style="font-size:12px;">${[q?'Search: "'+Util.escapeHtml(q)+'"':'',fStatus?'Status: '+Util.escapeHtml(fStatus):'',fType?'Type: '+Util.escapeHtml(fType):'',fUser?'Saved by: '+Util.escapeHtml(fUser==='__none'?'not recorded':fUser):'',fMatch?'Match: '+Util.escapeHtml(fMatch):'',fClosing?'Quick: '+Util.escapeHtml(fClosing):''].filter(Boolean).join(' · ')}</span>
+        <span class="cell-mute" style="font-size:12px;">${[q?'Search: "'+Util.escapeHtml(q)+'"':'',fStatus?'Status: '+Util.escapeHtml(fStatus):'',fType?'Type: '+Util.escapeHtml(fType):'',fUser?'Saved by: '+Util.escapeHtml(fUser==='__none'?'not recorded':fUser):'',fCat?'Category: '+Util.escapeHtml(fCat):'',fOrg?'Organisation: '+Util.escapeHtml(fOrg):'',fLoc?'Location: '+Util.escapeHtml(fLoc):'',fMatch?'Match: '+Util.escapeHtml(fMatch):'',fClosing?'Quick: '+Util.escapeHtml(fClosing):''].filter(Boolean).join(' · ')}</span>
         <button class="btn btn-outline btn-sm" onclick="BidSearch.clearFilters()">Show all bids</button></div>` : ''}
       <div class="card"><div class="table-wrap">
       ${list.length ? `<table><thead><tr>
@@ -8730,7 +8814,7 @@ const BidSearch = {
     `, `<button class="btn btn-outline" onclick="UI.closeModal()">Close</button><button class="btn btn-primary" onclick="BidSearch.openForm('${id}')">Edit Full Details</button>`, true);
   },
   clearFilters(){
-    ['bidSearch','bidStatusFilter','bidTypeFilter','bidUserFilter','bidMatchFilter','bidClosingFilter'].forEach(id=>{ const e=document.getElementById(id); if(e) e.value=''; });
+    ['bidSearch','bidStatusFilter','bidTypeFilter','bidUserFilter','bidCatFilter','bidOrgFilter','bidLocFilter','bidMatchFilter','bidClosingFilter'].forEach(id=>{ const e=document.getElementById(id); if(e) e.value=''; });
     Paginate.get('bids').page = 1; BidSearch.render();
   },
   // Adapt number/title labels to the selected Bid Type (values are never cleared)
