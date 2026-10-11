@@ -27,6 +27,8 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <!-- Field Sales Map View - Leaflet + OpenStreetMap tiles, no API key required -->
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
@@ -2182,7 +2184,9 @@ const NAV = [
     {id:'leads', ic:'&#128101;', label:'Leads'},
     {id:'customers', ic:'&#128100;', label:'Customers'},
     {id:'pipeline', ic:'&#128202;', label:'Sales Pipeline'},
+    {id:'mywork', ic:'&#127919;', label:'My Work'},
     {id:'followupcentre', ic:'&#9200;', label:'Follow-ups'},
+    {id:'mycalls', ic:'&#9742;', label:'My Calling List'},
     {id:'officequeue', ic:'&#128203;', label:'Office Queue'},
     {id:'quotations', ic:'&#128196;', label:'Quotations'},
     {id:'rate_docs', ic:'&#128196;', label:'Rate / Offer PDF'},
@@ -2221,6 +2225,8 @@ const NAV = [
     {id:'backup', ic:'&#9729;', label:'Backup &amp; Restore'},
   ]},
   {sec:'Admin', adminOnly:true, items:[
+    {id:'workmgmt', ic:'&#128203;', label:'Work Management'},
+    {id:'callalloc', ic:'&#128222;', label:'Contact Allocation'},
     {id:'users', ic:'&#128272;', label:'Users &amp; Roles'},
     {id:'settings', ic:'&#9881;', label:'Settings'},
   ]}
@@ -2247,6 +2253,10 @@ const PAGE_META = {
   gemcrac:['GEM CRAC','GEM order CRAC tracking & delivery-extension requests'],
   complaints:['Complaints','Log and track customer complaints'],
   tenders:['Tender Centre','Collect, score and review e-tenders'],
+  mywork:['My Work','Your tasks, calling targets and notifications for today'],
+  workmgmt:['Work Management','Assign tasks, review work and monitor staff performance'],
+  mycalls:['My Calling List','Your assigned contacts, call logging and follow-ups'],
+  callalloc:['Contact Allocation','Assign contacts by district and local body, and monitor calling'],
   emdpbg:['EMD / PBG Tracker','Earnest money, performance guarantees and deposits — with expiry alerts'],
   suppliers:['Suppliers','Supplier master with products and payment terms'],
   purchaseorders:['Purchase Orders','Orders placed with suppliers, delivery and payment status'],
@@ -2325,6 +2335,7 @@ function navBadgeCount(id){
   if(id==='biddocs'){
     return Store.data.bidDocs.filter(d=>d.status==='Draft').length;
   }
+  if(id==='mywork') return (typeof Work!=='undefined' && Work.badge) || 0;
   if(id==='emdpbg') return Alerts.collect().filter(a=>a.view==='emdpbg').length;
   if(id==='purchaseorders') return Alerts.collect().filter(a=>a.view==='purchaseorders').length;
   if(id==='amc') return Alerts.collect().filter(a=>a.view==='amc').length;
@@ -2385,6 +2396,7 @@ const App = {
     if(!BottomScroll.bar) BottomScroll.init();
     go('dashboard');
     Attendance.checkFirstLoginToday();
+    setTimeout(()=>{ try{ Work.runAlerts(); Work.refreshBadge(); }catch(e){} }, 1500);
   }
 };
 document.getElementById('loginPass').addEventListener('keydown', e=>{ if(e.key==='Enter') Auth.login(); });
@@ -6557,6 +6569,1580 @@ const TenderCentre = {
 };
 Views.tenders = ()=>TenderCentre.render();
 
+/* =====================================================================
+   CALLING & CONTACT ALLOCATION  (Stage 1)
+   Admin: Contact Allocation (view 'callalloc') - filter customers/leads by
+   district / local body, bulk-assign to staff, see per-staff calling totals.
+   Staff: My Calling List (view 'mycalls') - assigned contacts, tel: link,
+   manual call logging, follow-ups, history.
+   Data lives in real Supabase tables (contact_assignments, call_activities,
+   call_activity_audit) with RLS + RPCs - see calling_stage1/*.sql. Contacts
+   are the existing public.customers rows. Calls are MANUALLY LOGGED: opening
+   a tel: link never counts as a call and nothing is verified by a phone system.
+===================================================================== */
+const CALL_OUTCOMES = ['Connected','No Answer','Busy','Switched Off','Invalid Number','Interested','Not Interested','Call Back Later'];
+const CALL_CONNECTED = ['Connected','Interested','Not Interested','Call Back Later'];
+const CALL_PURPOSES = ['Introduction','Product enquiry','Quotation follow-up','Payment follow-up','Bid / tender','Relationship call','Other'];
+const CALL_LB_TYPES = [['G','Grama Panchayat'],['B','Block Panchayat'],['D','District Panchayat'],['M','Municipality'],['C','Corporation']];
+function callIstToday(){ return new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'}); }
+function callIstStartIso(d){ return new Date(d+'T00:00:00+05:30').toISOString(); }
+function callIstEndIso(d){ return new Date(d+'T23:59:59.999+05:30').toISOString(); }
+function callLocalToIso(v){ if(!v) return null; const d = new Date(v+':00+05:30'); return isNaN(d) ? null : d.toISOString(); }
+function callIsoToLocal(iso){ if(!iso) return ''; const d = new Date(iso); return isNaN(d) ? '' : d.toLocaleString('sv-SE',{timeZone:'Asia/Kolkata'}).slice(0,16).replace(' ','T'); }
+function callFmt(iso){ if(!iso) return '—'; const d = new Date(iso); return isNaN(d) ? '—' : d.toLocaleString('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}); }
+function callOutcomeBadge(o){
+  if(!o) return '<span class="cell-mute">&mdash;</span>';
+  const col = o==='Interested'?'#16a34a':CALL_CONNECTED.includes(o)?'#2563eb':o==='Call Back Later'?'#d97706':'#6b7280';
+  return `<span class="badge" style="background:${col};color:#fff;white-space:nowrap;">${Util.escapeHtml(o)}</span>`;
+}
+function callErr(prefix, e){ console.error(prefix, e); UI.toast('⚠ '+prefix+': '+((e&&e.message)||'request failed'), 6000); }
+let callLbTypeMapCache = null;
+function callLbTypeMap(){
+  if(callLbTypeMapCache) return callLbTypeMapCache;
+  const m = {};
+  (typeof LSG_OFFICES_RAW!=='undefined' ? LSG_OFFICES_RAW : []).forEach(r=>{
+    const base = String(r[0]).replace(/\s+(Grama Panchayat|Block Panchayat|District Panchayat|Municipality|Corporation)$/i,'').trim().toLowerCase();
+    (m[base] = m[base] || new Set()).add(r[2]);
+  });
+  return (callLbTypeMapCache = m);
+}
+
+const Calling = {
+  /* ------------------------------ ADMIN: allocation ------------------------------ */
+  A: { f:{district:'',lbType:'',lb:'',status:'',assign:'all',staff:'',days:'',q:''}, page:0, per:50, rows:[], total:0, sel:new Set(), info:{}, staff:[], lbs:[], tk:0, err:'', loading:false, sumDate:'' },
+  busy: false,
+  async renderAlloc(){
+    if(!Auth.isAdmin()){ document.getElementById('content').innerHTML = '<div class="empty-state"><div class="ic">&#128274;</div><div class="t">Admin only</div><div class="d">Contact allocation is limited to administrators.</div></div>'; return; }
+    const A = this.A; if(!A.sumDate) A.sumDate = callIstToday();
+    const f = A.f;
+    document.getElementById('content').innerHTML = `
+      <div class="card card-pad" style="margin-bottom:16px;">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px;"><h3 style="margin:0;font-size:14px;">Staff calling activity</h3>
+          <input type="date" id="ca_sumDate" value="${A.sumDate}" onchange="Calling.A.sumDate=this.value;Calling.loadSummary()">
+          <button class="btn btn-outline btn-sm" onclick="Calling.loadSummary()">&#8635; Refresh</button></div>
+        <div class="hint" style="margin-bottom:8px;">Counts come from calls staff have manually logged. Calls = every logged attempt; Unique = distinct contacts; Connected = calls where the person answered.</div>
+        <div id="ca_summary" class="table-wrap"><div class="cell-mute">Loading&hellip;</div></div>
+      </div>
+      <div id="ca_reqs"></div>
+      <div class="card card-pad" style="margin-bottom:12px;">
+        <h3 style="margin:0 0 8px;font-size:14px;">Find contacts to allocate</h3>
+        <div class="toolbar" style="flex-wrap:wrap;">
+          <select id="ca_district" onchange="Calling.onDistrict()"><option value="">All districts</option>${DROPDOWNS.district.map(d=>`<option ${d===f.district?'selected':''}>${d}</option>`).join('')}</select>
+          <select id="ca_lbType" onchange="Calling.onLbType()"><option value="">Any local body type</option>${CALL_LB_TYPES.map(t=>`<option value="${t[0]}" ${t[0]===f.lbType?'selected':''}>${t[1]}</option>`).join('')}</select>
+          <select id="ca_lb" style="max-width:220px;"><option value="">All local bodies</option></select>
+          <select id="ca_status"><option value="">Any lead status</option>${DROPDOWNS.status.map(s=>`<option ${s===f.status?'selected':''}>${s}</option>`).join('')}</select>
+          <select id="ca_assign"><option value="all" ${f.assign==='all'?'selected':''}>Assigned + unassigned</option><option value="unassigned" ${f.assign==='unassigned'?'selected':''}>Unassigned only</option><option value="assigned" ${f.assign==='assigned'?'selected':''}>Assigned only</option></select>
+          <select id="ca_staff"><option value="">Any staff</option></select>
+          <select id="ca_days"><option value="">Last call: any</option>${[['3','Not called in 3 days'],['7','Not called in 7 days'],['30','Not called in 30 days']].map(o=>`<option value="${o[0]}" ${o[0]===f.days?'selected':''}>${o[1]}</option>`).join('')}</select>
+          <div class="search"><span class="ic">&#128269;</span><input id="ca_q" placeholder="Name, phone, local body..." value="${Util.escapeHtml(f.q)}" onkeydown="if(event.key==='Enter')Calling.search(0)"></div>
+          <button class="btn btn-primary btn-sm" onclick="Calling.search(0)">Search</button>
+          <button class="btn btn-outline btn-sm" onclick="Calling.resetAlloc()">Reset</button>
+        </div>
+        <div class="hint">Ward-level filtering is not available: customer records don't store a ward. Local body names come from your saved customers (matched with the Kerala LSG list for the type filter).</div>
+      </div>
+      <div id="ca_selbar"></div>
+      <div class="card"><div class="table-wrap" id="ca_results"></div><div id="ca_pager" style="padding:8px 12px;"></div></div>`;
+    try{ if(!A.staff.length) await this.loadStaff(); }catch(e){ callErr('Could not load staff', e); }
+    this.fillStaff();
+    this.loadLbs().then(()=>this.search(A.page||0));
+    this.loadSummary(); this.loadReqs();
+  },
+  async loadStaff(){
+    const { data, error } = await sb.rpc('list_staff'); if(error) throw error;
+    this.A.staff = data || [];
+  },
+  fillStaff(){
+    const A = this.A, el = document.getElementById('ca_staff'); if(!el) return;
+    el.innerHTML = '<option value="">Any staff</option>' + A.staff.map(s=>`<option value="${s.id}" ${s.id===A.f.staff?'selected':''}>${Util.escapeHtml(s.name||s.username)}</option>`).join('');
+  },
+  staffName(id){ const s = this.A.staff.find(x=>x.id===id); return s ? (s.name||s.username) : '—'; },
+  async loadLbs(){
+    const A = this.A, d = document.getElementById('ca_district') ? document.getElementById('ca_district').value : A.f.district;
+    try{
+      const { data, error } = await sb.rpc('customer_localbodies', { p_district: d || null }); if(error) throw error;
+      A.lbs = data || [];
+    }catch(e){ A.lbs = []; callErr('Could not load local bodies', e); }
+    this.fillLbs();
+  },
+  fillLbs(){
+    const A = this.A, el = document.getElementById('ca_lb'); if(!el) return;
+    const t = (document.getElementById('ca_lbType')||{}).value || '', map = callLbTypeMap();
+    const list = A.lbs.filter(x=>!t || (map[String(x.panchayath).trim().toLowerCase()] || new Set()).has(t));
+    el.innerHTML = '<option value="">All local bodies ('+list.length+')</option>' + list.map(x=>`<option value="${Util.escapeHtml(x.panchayath)}" ${x.panchayath===A.f.lb?'selected':''}>${Util.escapeHtml(x.panchayath)} (${x.n})</option>`).join('');
+  },
+  onDistrict(){ this.A.f.lb = ''; this.loadLbs(); },
+  onLbType(){ this.A.f.lb = ''; this.fillLbs(); },
+  readFilters(){
+    const g = id => { const e = document.getElementById(id); return e ? e.value : ''; };
+    const f = this.A.f;
+    f.district = g('ca_district'); f.lbType = g('ca_lbType'); f.lb = g('ca_lb'); f.status = g('ca_status'); f.assign = g('ca_assign') || 'all';
+    f.staff = g('ca_staff'); f.days = g('ca_days'); f.q = g('ca_q').trim();
+    return f;
+  },
+  lbArray(f){
+    if(f.lb) return [f.lb];
+    if(f.lbType){
+      const map = callLbTypeMap();
+      const names = this.A.lbs.filter(x=>(map[String(x.panchayath).trim().toLowerCase()] || new Set()).has(f.lbType)).map(x=>x.panchayath);
+      return names.length ? names : ['\u0001no-match'];
+    }
+    return null;
+  },
+  filterArgs(f){
+    return { p_district:f.district||null, p_localbodies:this.lbArray(f), p_status:f.status||null, p_q:f.q||null, p_assign:f.assign||'all', p_staff:f.staff||null, p_not_called_days:f.days?Number(f.days):null };
+  },
+  async search(page){
+    const A = this.A, f = this.readFilters(); A.page = page || 0; const tk = ++A.tk; A.loading = true; A.err = ''; this.paintResults();
+    try{
+      const { data, error } = await sb.rpc('allocation_contacts', Object.assign(this.filterArgs(f), { p_limit:A.per, p_offset:A.page*A.per }));
+      if(tk !== A.tk) return;
+      if(error) throw error;
+      A.rows = data || []; A.total = A.rows.length ? Number(A.rows[0].total_count) : 0;
+      A.rows.forEach(r=>{ A.info[r.id] = { name:r.name, owner_id:r.owner_id, owner_name:r.owner_name }; });
+    }catch(e){ if(tk !== A.tk) return; A.rows = []; A.total = 0; A.err = (e && e.message) || 'Search failed'; }
+    A.loading = false; this.paintResults();
+  },
+  resetAlloc(){ const A = this.A; A.f = {district:'',lbType:'',lb:'',status:'',assign:'all',staff:'',days:'',q:''}; A.page = 0; A.sel.clear(); this.renderAlloc(); },
+  paintResults(){
+    const A = this.A, box = document.getElementById('ca_results'); if(!box) return;
+    if(A.loading){ box.innerHTML = '<div class="empty-state"><div class="t">Loading contacts&hellip;</div></div>'; this.paintSelBar(); return; }
+    if(A.err){ box.innerHTML = `<div class="empty-state"><div class="ic">&#9888;</div><div class="t">Could not load contacts</div><div class="d">${Util.escapeHtml(A.err)}</div></div>`; this.paintSelBar(); document.getElementById('ca_pager').innerHTML=''; return; }
+    if(!A.rows.length){ box.innerHTML = '<div class="empty-state"><div class="ic">&#128222;</div><div class="t">No contacts match these filters</div></div>'; document.getElementById('ca_pager').innerHTML=''; this.paintSelBar(); return; }
+    const allOn = A.rows.every(r=>A.sel.has(r.id));
+    box.innerHTML = `<table><thead><tr><th><input type="checkbox" ${allOn?'checked':''} onchange="Calling.togglePage(this.checked)" title="Select this page"></th><th>Name</th><th>Phone</th><th>District</th><th>Local body</th><th>Lead status</th><th>Last call</th><th>Current owner</th></tr></thead><tbody>
+      ${A.rows.map(r=>`<tr><td><input type="checkbox" ${A.sel.has(r.id)?'checked':''} onchange="Calling.toggleOne('${r.id}',this.checked)"></td>
+        <td class="cell-main">${Util.escapeHtml(r.name||'—')}</td><td class="mono">${Util.escapeHtml(r.phone||'—')}</td><td class="cell-mute">${Util.escapeHtml(r.district||'—')}</td><td class="cell-mute">${Util.escapeHtml(r.panchayath||'—')}</td>
+        <td class="cell-mute">${Util.escapeHtml(r.status||'—')}</td><td class="cell-mute">${callFmt(r.last_call_at)}</td>
+        <td>${r.owner_id?`<span class="badge" style="background:#0B1424;color:#fff;">${Util.escapeHtml(r.owner_name||'—')}</span>`:'<span class="cell-mute">Unassigned</span>'}</td></tr>`).join('')}
+      </tbody></table>`;
+    const pages = Math.max(1, Math.ceil(A.total/A.per));
+    document.getElementById('ca_pager').innerHTML = `<div class="pager"><span>Showing ${A.page*A.per+1}&ndash;${A.page*A.per+A.rows.length} of ${A.total}</span>
+      <button class="pg-btn" ${A.page<=0?'disabled':''} onclick="Calling.search(${A.page-1})">&lsaquo; Prev</button><span>Page ${A.page+1} / ${pages}</span>
+      <button class="pg-btn" ${A.page+1>=pages?'disabled':''} onclick="Calling.search(${A.page+1})">Next &rsaquo;</button></div>`;
+    this.paintSelBar();
+  },
+  paintSelBar(){
+    const A = this.A, el = document.getElementById('ca_selbar'); if(!el) return;
+    el.innerHTML = `<div class="card card-pad" style="margin-bottom:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+      <b>${A.sel.size} selected</b>
+      ${A.total>A.rows.length?`<button class="btn btn-outline btn-sm" onclick="Calling.selectAllFiltered()">Select all ${Math.min(A.total,2000)} matching${A.total>2000?' (max 2000)':''}</button>`:''}
+      ${A.sel.size?`<button class="btn btn-outline btn-sm" onclick="Calling.A.sel.clear();Calling.paintResults()">Clear</button>`:''}
+      <div class="toolbar-spacer" style="flex:1"></div>
+      <button class="btn btn-primary btn-sm" ${A.sel.size?'':'disabled'} onclick="Calling.openAssign()">&#128101; Assign to staff</button></div>`;
+  },
+  toggleOne(id, on){ on ? this.A.sel.add(id) : this.A.sel.delete(id); this.paintResults(); },
+  togglePage(on){ this.A.rows.forEach(r=>{ on ? this.A.sel.add(r.id) : this.A.sel.delete(r.id); }); this.paintResults(); },
+  async selectAllFiltered(){
+    const A = this.A, f = this.readFilters();
+    try{
+      const { data, error } = await sb.rpc('allocation_contacts', Object.assign(this.filterArgs(f), { p_limit:2000, p_offset:0 })); if(error) throw error;
+      (data||[]).forEach(r=>{ A.sel.add(r.id); A.info[r.id] = { name:r.name, owner_id:r.owner_id, owner_name:r.owner_name }; });
+      UI.toast((data||[]).length+' contact(s) selected'); this.paintResults();
+    }catch(e){ callErr('Could not select all', e); }
+  },
+  openAssign(){
+    const A = this.A, ids = [...A.sel]; if(!ids.length) return;
+    const owned = ids.filter(id=>A.info[id] && A.info[id].owner_id);
+    const today = callIstToday();
+    UI.openModal('Assign '+ids.length+' contact(s)', `
+      <div class="field"><label>Staff (tick one or more)</label>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:6px;">${A.staff.map(s=>`<label style="font-weight:500;"><input type="checkbox" class="ca_stf" value="${s.id}"> ${Util.escapeHtml(s.name||s.username)}</label>`).join('')}</div></div>
+      <div class="field"><label>When several staff are ticked</label>
+        <label style="font-weight:500;display:block;"><input type="radio" name="ca_mode" value="split" checked> Split the contacts evenly between them</label>
+        <label style="font-weight:500;display:block;"><input type="radio" name="ca_mode" value="each"> Give every contact to every ticked staff member</label></div>
+      <div class="form-row"><div class="field"><label>Calling date</label><input type="date" id="ca_callDate" value="${today}"></div>
+        <div class="field"><label>Follow-up / due date</label><input type="date" id="ca_dueDate"></div></div>
+      <div class="form-row"><div class="field"><label>Priority</label><select id="ca_prio"><option>Medium</option><option>High</option><option>Low</option></select></div>
+        <div class="field"><label>Daily calling target (optional)</label><input type="number" min="0" id="ca_target" placeholder="e.g. 40"></div></div>
+      <div class="field"><label>Instructions (optional)</label><textarea id="ca_instr" placeholder="What should staff say / achieve?"></textarea></div>
+      ${owned.length?`<div class="card card-pad" style="border-left:4px solid #d97706;"><b>&#9888; ${owned.length} selected contact(s) already have an active owner.</b>
+        <div class="hint">They are skipped unless you tick the box below. Reassigning closes the previous owner's assignment (their call history is kept).</div>
+        <label style="font-weight:600;"><input type="checkbox" id="ca_reassign"> Reassign these contacts to the staff selected above</label></div>`:''}
+    `, `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" id="ca_goBtn" onclick="Calling.doAssign()">Assign</button>`, true);
+  },
+  async doAssign(){
+    if(this.busy) return;
+    const A = this.A, staff = [...document.querySelectorAll('.ca_stf:checked')].map(c=>c.value), ids = [...A.sel];
+    if(!staff.length){ UI.toast('Tick at least one staff member'); return; }
+    if(!ids.length){ UI.toast('No contacts selected'); return; }
+    const v = id => (document.getElementById(id)||{}).value || '';
+    const mode = (document.querySelector('input[name="ca_mode"]:checked')||{}).value || 'split';
+    this.busy = true; const btn = document.getElementById('ca_goBtn'); if(btn){ btn.disabled = true; btn.textContent = 'Assigning…'; }
+    try{
+      const { data, error } = await sb.rpc('assign_contacts', { p_customer_ids:ids, p_staff_ids:staff, p_mode:mode, p_call_date:v('ca_callDate')||null, p_due_date:v('ca_dueDate')||null,
+        p_priority:v('ca_prio')||'Medium', p_daily_target:v('ca_target')?Number(v('ca_target')):null, p_instructions:v('ca_instr')||null, p_reassign: !!(document.getElementById('ca_reassign')||{}).checked });
+      if(error) throw error;
+      const r = data || {};
+      UI.closeModal(); A.sel.clear();
+      const parts = [r.assigned+' assigned'];
+      if(r.already_assigned_same_staff) parts.push(r.already_assigned_same_staff+' already with that staff');
+      if(r.skipped_other_owner) parts.push(r.skipped_other_owner+' skipped (owned by someone else)');
+      if(r.reassigned_from_other_owner) parts.push(r.reassigned_from_other_owner+' reassigned');
+      UI.toast(parts.join(' · '), 6000);
+      Activity.log('Contacts allocated', (r.assigned||0)+' contact(s) to '+staff.map(s=>this.staffName(s)).join(', '));
+      this.search(A.page); this.loadSummary(); this.loadReqs();
+    }catch(e){ callErr('Assignment failed — nothing was saved', e); if(btn){ btn.disabled = false; btn.textContent = 'Assign'; } }
+    this.busy = false;
+  },
+  async loadSummary(){
+    const box = document.getElementById('ca_summary'); if(!box) return;
+    const d = this.A.sumDate || callIstToday();
+    try{
+      const { data, error } = await sb.rpc('calling_summary', { p_from:d, p_to:d }); if(error) throw error;
+      const rows = data || [];
+      box.innerHTML = rows.length ? `<table><thead><tr><th>Staff</th><th>Active assigned</th><th>Calls logged</th><th>Unique contacts</th><th>Connected</th><th>Interested</th><th>Follow-ups due today</th><th>Follow-ups overdue</th></tr></thead><tbody>
+        ${rows.map(r=>`<tr><td><a href="#" onclick="Calling.staffCalls('${r.staff_id}');return false;">${Util.escapeHtml(r.staff_name||'—')}</a></td><td>${r.active_assignments}</td><td>${r.calls}</td><td>${r.unique_contacts}</td><td>${r.connected}</td><td>${r.interested}</td><td>${r.followups_due_today}</td><td style="${Number(r.followups_overdue)?'color:var(--red,#dc2626);font-weight:700;':''}">${r.followups_overdue}</td></tr>`).join('')}</tbody></table>` : '<div class="cell-mute">No staff found.</div>';
+    }catch(e){ box.innerHTML = '<div class="cell-mute" style="color:var(--red,#dc2626);">Could not load summary: '+Util.escapeHtml(e.message||'error')+'</div>'; }
+  },
+  async loadReqs(){
+    const box = document.getElementById('ca_reqs'); if(!box) return;
+    try{
+      const { data, error } = await sb.from('contact_assignments').select('id,assigned_to,reassign_requested_at,reassign_reason,customers(name,panchayath,district)').eq('status','Active').not('reassign_requested_at','is',null).order('reassign_requested_at').limit(50);
+      if(error) throw error;
+      if(!(data||[]).length){ box.innerHTML = ''; return; }
+      box.innerHTML = `<div class="card card-pad" style="margin-bottom:16px;border-left:4px solid #d97706;"><h3 style="margin:0 0 8px;font-size:14px;">Reassignment requests (${data.length})</h3>
+        <table><thead><tr><th>Contact</th><th>Staff</th><th>Reason</th><th>Requested</th><th></th></tr></thead><tbody>
+        ${data.map(r=>`<tr><td>${Util.escapeHtml((r.customers&&r.customers.name)||'—')}<div class="cell-mute" style="font-size:11px;">${Util.escapeHtml([(r.customers||{}).panchayath,(r.customers||{}).district].filter(Boolean).join(', '))}</div></td><td>${Util.escapeHtml(this.staffName(r.assigned_to))}</td><td style="white-space:normal;max-width:260px;">${Util.escapeHtml(r.reassign_reason||'')}</td><td class="cell-mute">${callFmt(r.reassign_requested_at)}</td>
+        <td><button class="btn btn-outline btn-sm" onclick="Calling.releaseAssignment('${r.id}')">Release contact</button></td></tr>`).join('')}</tbody></table>
+        <div class="hint">Releasing makes the contact unassigned so you can allocate it again with the filters below.</div></div>`;
+    }catch(e){ box.innerHTML = ''; console.error('loadReqs', e); }
+  },
+  async releaseAssignment(id){
+    try{ const { error } = await sb.rpc('assignment_staff_action', { p_id:id, p_action:'cancel', p_note:null }); if(error) throw error; UI.toast('Contact released'); this.loadReqs(); this.search(this.A.page); this.loadSummary(); }
+    catch(e){ callErr('Could not release', e); }
+  },
+  async staffCalls(staffId){
+    const d = this.A.sumDate || callIstToday();
+    UI.openModal('Calls by '+this.staffName(staffId)+' — '+d, '<div class="cell-mute">Loading&hellip;</div>', '<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>', true);
+    try{
+      const { data, error } = await sb.from('call_activities').select('called_at,outcome,purpose,interest_level,summary,next_action,follow_up_at,follow_up_status,district,panchayath,customers(name,phone)')
+        .eq('staff_id', staffId).gte('called_at', callIstStartIso(d)).lte('called_at', callIstEndIso(d)).order('called_at',{ascending:false}).limit(300);
+      if(error) throw error;
+      document.getElementById('modalBody').innerHTML = (data||[]).length ? `<div class="table-wrap"><table><thead><tr><th>Time</th><th>Contact</th><th>Local body</th><th>Outcome</th><th>Interest</th><th>Summary</th><th>Follow-up</th></tr></thead><tbody>
+        ${data.map(r=>`<tr><td class="cell-mute">${callFmt(r.called_at)}</td><td>${Util.escapeHtml((r.customers||{}).name||'—')}<div class="cell-mute mono" style="font-size:11px;">${Util.escapeHtml((r.customers||{}).phone||'')}</div></td><td class="cell-mute">${Util.escapeHtml([r.panchayath,r.district].filter(Boolean).join(', '))}</td><td>${callOutcomeBadge(r.outcome)}</td><td class="cell-mute">${Util.escapeHtml(r.interest_level||'—')}</td><td style="white-space:normal;max-width:240px;">${Util.escapeHtml(r.summary||'')}</td><td class="cell-mute">${r.follow_up_at?callFmt(r.follow_up_at)+' ('+Util.escapeHtml(r.follow_up_status||'')+')':'—'}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-state"><div class="t">No calls logged on this date</div></div>';
+    }catch(e){ document.getElementById('modalBody').innerHTML = '<div style="color:var(--red,#dc2626);">Could not load: '+Util.escapeHtml(e.message||'error')+'</div>'; }
+  },
+
+  /* ------------------------------ STAFF: my calling list ------------------------------ */
+  M: { tab:'list', page:0, per:25, q:'', todayOnly:true, tk:0 },
+  async renderMy(){
+    const M = this.M;
+    document.getElementById('content').innerHTML = `
+      <div id="cl_cards"><div class="card card-pad cell-mute">Loading your day&hellip;</div></div>
+      <div class="toolbar" style="flex-wrap:wrap;">
+        <button class="btn ${M.tab==='list'?'btn-primary':'btn-outline'} btn-sm" onclick="Calling.setTab('list')">&#128222; Calling list</button>
+        <button class="btn ${M.tab==='fu'?'btn-primary':'btn-outline'} btn-sm" onclick="Calling.setTab('fu')">&#9200; Follow-ups</button>
+        <button class="btn ${M.tab==='hist'?'btn-primary':'btn-outline'} btn-sm" onclick="Calling.setTab('hist')">&#128337; My call history</button>
+      </div>
+      <div id="cl_body"></div>`;
+    this.loadStats(); this.loadTab();
+  },
+  setTab(t){ this.M.tab = t; this.M.page = 0; this.renderMy(); },
+  async loadStats(){
+    const box = document.getElementById('cl_cards'); if(!box) return;
+    try{
+      const { data, error } = await sb.rpc('my_calling_stats'); if(error) throw error;
+      const s = (data && data[0]) || {}, tgt = s.daily_target;
+      box.innerHTML = dashboardCardsHTML('My Calling Day', [
+        {label:'Assigned to me', value:Number(s.active_assignments)||0},
+        {label:"Today's list", value:Number(s.todays_list)||0},
+        {label:'Calls logged today', value:(Number(s.calls)||0)+(tgt?' / '+tgt:''), color: tgt && Number(s.calls)>=tgt ? 'var(--green,#16a34a)' : undefined},
+        {label:'Unique contacts', value:Number(s.unique_contacts)||0},
+        {label:'Connected', value:Number(s.connected)||0, color:'var(--blue,#2563eb)'},
+        {label:'Interested', value:Number(s.interested)||0, color:'var(--green,#16a34a)'},
+        {label:'Follow-ups due today', value:Number(s.followups_due_today)||0, color:'var(--amber,#d97706)', onclick:"Calling.setTab('fu')"},
+        {label:'Follow-ups overdue', value:Number(s.followups_overdue)||0, color:'var(--red,#dc2626)', onclick:"Calling.setTab('fu')"}
+      ]);
+    }catch(e){ box.innerHTML = '<div class="card card-pad" style="color:var(--red,#dc2626);">Could not load your numbers: '+Util.escapeHtml(e.message||'error')+'</div>'; }
+  },
+  loadTab(){ const t = this.M.tab; return t==='fu' ? this.loadFollowups() : t==='hist' ? this.loadHistory() : this.loadList(); },
+  async loadList(){
+    const M = this.M, box = document.getElementById('cl_body'); if(!box) return; const tk = ++M.tk;
+    box.innerHTML = `<div class="toolbar"><div class="search"><span class="ic">&#128269;</span><input id="cl_q" placeholder="Name, phone, local body, district..." value="${Util.escapeHtml(M.q)}" onkeydown="if(event.key==='Enter'){Calling.M.q=this.value.trim();Calling.M.page=0;Calling.loadList();}"></div>
+      <label style="font-size:13px;"><input type="checkbox" ${M.todayOnly?'checked':''} onchange="Calling.M.todayOnly=this.checked;Calling.M.page=0;Calling.loadList()"> Today's list only</label></div><div class="card"><div class="table-wrap" id="cl_list"><div class="empty-state"><div class="t">Loading&hellip;</div></div></div><div id="cl_pager" style="padding:8px 12px;"></div></div>`;
+    try{
+      const { data, error } = await sb.rpc('my_calls_list', { p_q:M.q||null, p_today_only:M.todayOnly, p_limit:M.per, p_offset:M.page*M.per });
+      if(tk !== M.tk) return; if(error) throw error;
+      const rows = data || []; this.cacheRows = rows; const total = rows.length ? Number(rows[0].total_count) : 0;
+      document.getElementById('cl_list').innerHTML = rows.length ? `<table><thead><tr><th class="col-actions">Action</th><th>Contact</th><th>Phone</th><th>Local body</th><th>Priority</th><th>Due</th><th>Calls</th><th>Last outcome</th><th>Next follow-up</th></tr></thead><tbody>
+        ${rows.map((r,i)=>`<tr><td class="col-actions"><div class="row-action-btns"><button class="btn btn-primary btn-sm" onclick="Calling.openLog(${i})">&#9742; Call / Log</button></div></td>
+          <td class="cell-main">${Util.escapeHtml(r.name||'—')}<div class="cell-mute" style="font-size:11px;">${Util.escapeHtml(r.lead_status||'')}${r.reassign_requested_at?' · reassignment requested':''}</div></td>
+          <td class="mono">${r.phone?`<a href="tel:${Util.escapeHtml(String(r.phone).replace(/[^\d+]/g,''))}">${Util.escapeHtml(r.phone)}</a>`:'—'}</td>
+          <td class="cell-mute">${Util.escapeHtml([r.panchayath,r.district].filter(Boolean).join(', ')||'—')}</td>
+          <td>${Util.escapeHtml(r.priority||'')}</td><td class="cell-mute">${Util.fmtDate(r.due_date)}</td><td>${r.calls_total}</td>
+          <td>${callOutcomeBadge(r.last_outcome)}<div class="cell-mute" style="font-size:11px;">${callFmt(r.last_call_at)}</div></td>
+          <td class="cell-mute">${r.next_follow_up_at?callFmt(r.next_follow_up_at):'—'}</td></tr>`).join('')}</tbody></table>`
+        : `<div class="empty-state"><div class="ic">&#128222;</div><div class="t">${M.q?'No matches':'Nothing assigned to you right now'}</div><div class="d">${M.todayOnly?'Untick "Today\'s list only" to see all your active contacts.':'Your manager will allocate contacts to you.'}</div></div>`;
+      const pages = Math.max(1, Math.ceil(total/M.per));
+      document.getElementById('cl_pager').innerHTML = total ? `<div class="pager"><span>${M.page*M.per+1}&ndash;${M.page*M.per+rows.length} of ${total}</span><button class="pg-btn" ${M.page<=0?'disabled':''} onclick="Calling.M.page--;Calling.loadList()">&lsaquo; Prev</button><span>Page ${M.page+1} / ${pages}</span><button class="pg-btn" ${M.page+1>=pages?'disabled':''} onclick="Calling.M.page++;Calling.loadList()">Next &rsaquo;</button></div>` : '';
+    }catch(e){ if(tk !== M.tk) return; document.getElementById('cl_list').innerHTML = `<div class="empty-state"><div class="ic">&#9888;</div><div class="t">Could not load your list</div><div class="d">${Util.escapeHtml(e.message||'error')}</div></div>`; }
+  },
+  async openLog(i){
+    const r = (this.cacheRows||[])[i]; if(!r) return;
+    this.cur = r;
+    UI.openModal('Call — '+(r.name||''), `<div class="cell-mute">Loading history&hellip;</div>`, `<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>`, true);
+    let hist = [], histErr = '';
+    try{
+      const { data, error } = await sb.from('call_activities').select('called_at,outcome,purpose,summary,next_action,staff_id,follow_up_at,follow_up_status').eq('customer_id', r.customer_id).order('called_at',{ascending:false}).limit(10);
+      if(error) throw error; hist = data || [];
+    }catch(e){ histErr = e.message || 'error'; }
+    const ph = String(r.phone||'').replace(/[^\d+]/g,'');
+    document.getElementById('modalBody').innerHTML = `
+      <div class="card card-pad" style="margin-bottom:12px;">
+        <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;justify-content:space-between;">
+          <div><b>${Util.escapeHtml(r.name||'')}</b><div class="cell-mute" style="font-size:12px;">${Util.escapeHtml([r.panchayath,r.district].filter(Boolean).join(', '))} · Lead status: ${Util.escapeHtml(r.lead_status||'—')}</div>
+            <div class="cell-mute" style="font-size:12px;">${r.email?Util.escapeHtml(r.email):''}</div>
+            ${r.instructions?`<div style="font-size:12px;margin-top:4px;"><b>Instructions:</b> ${Util.escapeHtml(r.instructions)}</div>`:''}</div>
+          ${ph?`<a class="btn btn-primary" href="tel:${Util.escapeHtml(ph)}" title="Opens your phone dialler. This does NOT log a call.">&#128222; Call ${Util.escapeHtml(r.phone)}</a>`:'<span class="cell-mute">No phone number</span>'}
+        </div>
+        <div class="hint" style="margin-top:6px;">Tapping Call only opens your dialler. After the call, record what happened below &mdash; only logged calls are counted.</div>
+      </div>
+      <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:0 0 6px;">Log this call</h4>
+      <div class="field"><label>Outcome *</label><div style="display:flex;flex-wrap:wrap;gap:6px;" id="cl_outcomes">${CALL_OUTCOMES.map(o=>`<button type="button" class="btn btn-outline btn-sm" data-o="${o}" onclick="Calling.pickOutcome('${o}')">${o}</button>`).join('')}</div></div>
+      <div class="form-row"><div class="field"><label>Purpose</label><select id="cl_purpose"><option value="">—</option>${CALL_PURPOSES.map(p=>`<option>${p}</option>`).join('')}</select></div>
+        <div class="field"><label>Interest level</label><select id="cl_interest"><option value="">—</option><option>Hot</option><option>Warm</option><option>Cold</option><option>None</option></select></div></div>
+      <div class="form-row"><div class="field"><label>Duration (minutes, optional — only if you know it)</label><input type="number" min="0" step="1" id="cl_dur"></div>
+        <div class="field"><label>Update lead status (optional)</label><select id="cl_lead"><option value="">Keep "${Util.escapeHtml(r.lead_status||'—')}"</option>${DROPDOWNS.status.map(s=>`<option>${s}</option>`).join('')}</select></div></div>
+      <div class="field"><label>Discussion summary / remarks</label><textarea id="cl_summary"></textarea></div>
+      <div class="form-row"><div class="field"><label>Next action</label><input id="cl_next" placeholder="e.g. send quotation"></div>
+        <div class="field"><label>Follow-up date &amp; time (IST)</label><input type="datetime-local" id="cl_fu"></div></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 14px;">
+        <button class="btn btn-primary" id="cl_saveBtn" onclick="Calling.saveCall()">Save call</button>
+        <button class="btn btn-outline btn-sm" onclick="Calling.requestReassign()">Request reassignment</button>
+        <button class="btn btn-outline btn-sm" onclick="Calling.completeAssignment()">Complete this contact</button></div>
+      <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:0 0 6px;">Previous calls</h4>
+      ${histErr?`<div style="color:var(--red,#dc2626);">Could not load history: ${Util.escapeHtml(histErr)}</div>`:hist.length?`<div class="table-wrap"><table><thead><tr><th>When</th><th>Outcome</th><th>Remarks</th><th>Follow-up</th></tr></thead><tbody>${hist.map(h=>`<tr><td class="cell-mute">${callFmt(h.called_at)}</td><td>${callOutcomeBadge(h.outcome)}</td><td style="white-space:normal;max-width:300px;">${Util.escapeHtml(h.summary||'')}${h.next_action?`<div class="cell-mute" style="font-size:11px;">Next: ${Util.escapeHtml(h.next_action)}</div>`:''}</td><td class="cell-mute">${h.follow_up_at?callFmt(h.follow_up_at)+' ('+Util.escapeHtml(h.follow_up_status||'')+')':'—'}</td></tr>`).join('')}</tbody></table></div>`:'<div class="cell-mute">No calls logged yet.</div>'}`;
+    this.outcome = '';
+  },
+  pickOutcome(o){
+    this.outcome = o;
+    document.querySelectorAll('#cl_outcomes button').forEach(b=>{ b.className = 'btn btn-sm ' + (b.dataset.o===o ? 'btn-primary' : 'btn-outline'); });
+  },
+  async saveCall(){
+    if(this.busy) return; const r = this.cur; if(!r) return;
+    if(!this.outcome){ UI.toast('Choose the call outcome'); return; }
+    const v = id => (document.getElementById(id)||{}).value || '';
+    const fuLocal = v('cl_fu'), fuIso = callLocalToIso(fuLocal);
+    if(fuLocal && !fuIso){ UI.toast('Follow-up date is not valid'); return; }
+    if(fuIso && new Date(fuIso) < new Date(Date.now()-60000)){ UI.toast('Follow-up must be in the future'); return; }
+    const dur = v('cl_dur');
+    const row = { customer_id:r.customer_id, assignment_id:r.assignment_id, outcome:this.outcome, purpose:v('cl_purpose')||null, interest_level:v('cl_interest')||null,
+      duration_sec: dur!=='' ? Math.max(0, Math.round(Number(dur)*60)) : null, summary:v('cl_summary').trim()||null, next_action:v('cl_next').trim()||null, follow_up_at:fuIso };
+    this.busy = true; const btn = document.getElementById('cl_saveBtn'); if(btn){ btn.disabled = true; btn.textContent = 'Saving…'; }
+    try{
+      const ins = await sb.from('call_activities').insert(row).select('id').single();
+      if(ins.error) throw ins.error;
+      const warns = [];
+      // Logging a new call completes this staff member's earlier pending follow-ups for the same contact
+      const prev = await sb.from('call_activities').update({ follow_up_status:'Done' }).eq('customer_id', r.customer_id).eq('follow_up_status','Pending').eq('staff_id', Auth.session.id).neq('id', ins.data.id);
+      if(prev.error) warns.push('earlier follow-ups not auto-closed');
+      const ls = v('cl_lead');
+      if(ls && ls !== r.lead_status){
+        const u = await sb.rpc('call_set_lead_status', { p_customer:r.customer_id, p_status:ls });
+        if(u.error) warns.push('lead status not updated: '+u.error.message);
+      }
+      UI.closeModal(); UI.toast(warns.length ? 'Call saved (note: '+warns.join('; ')+')' : 'Call saved', warns.length?6000:undefined);
+      this.loadStats(); this.loadTab();
+    }catch(e){ callErr('Call NOT saved', e); if(btn){ btn.disabled = false; btn.textContent = 'Save call'; } }
+    this.busy = false;
+  },
+  async requestReassign(){
+    const r = this.cur; if(!r) return;
+    const reason = prompt('Why should this contact be reassigned?'); if(reason===null) return;
+    if(!reason.trim()){ UI.toast('A reason is required'); return; }
+    try{ const { error } = await sb.rpc('assignment_staff_action', { p_id:r.assignment_id, p_action:'request_reassign', p_note:reason.trim() }); if(error) throw error; UI.closeModal(); UI.toast('Reassignment requested — your manager will review it'); this.loadTab(); }
+    catch(e){ callErr('Request failed', e); }
+  },
+  async completeAssignment(){
+    const r = this.cur; if(!r) return;
+    if(!confirm('Mark this contact as done? It will leave your calling list (call history is kept).')) return;
+    try{ const { error } = await sb.rpc('assignment_staff_action', { p_id:r.assignment_id, p_action:'complete', p_note:null }); if(error) throw error; UI.closeModal(); UI.toast('Contact completed'); this.loadStats(); this.loadTab(); }
+    catch(e){ callErr('Could not complete', e); }
+  },
+  async loadFollowups(){
+    const box = document.getElementById('cl_body'); if(!box) return;
+    box.innerHTML = '<div class="card"><div class="table-wrap" id="cl_fu_list"><div class="empty-state"><div class="t">Loading&hellip;</div></div></div></div>';
+    try{
+      const { data, error } = await sb.from('call_activities').select('id,customer_id,follow_up_at,next_action,outcome,summary,customers(name,phone,panchayath,district)').eq('staff_id', Auth.session.id).eq('follow_up_status','Pending').order('follow_up_at').limit(200);
+      if(error) throw error; const rows = data || []; this.cacheFu = rows; const today = callIstToday();
+      document.getElementById('cl_fu_list').innerHTML = rows.length ? `<table><thead><tr><th>Due</th><th>Contact</th><th>Phone</th><th>Previous outcome</th><th>Next action</th><th></th></tr></thead><tbody>
+        ${rows.map((r,i)=>{ const d = new Date(r.follow_up_at).toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'}); const over = d<today, dueT = d===today;
+          return `<tr style="${over?'background:rgba(220,38,38,.07);':dueT?'background:rgba(217,119,6,.08);':''}"><td>${callFmt(r.follow_up_at)}<div style="font-size:11px;font-weight:700;color:${over?'var(--red,#dc2626)':dueT?'var(--amber,#d97706)':'var(--text-mute)'};">${over?'OVERDUE':dueT?'DUE TODAY':'Upcoming'}</div></td>
+          <td class="cell-main">${Util.escapeHtml((r.customers||{}).name||'—')}<div class="cell-mute" style="font-size:11px;">${Util.escapeHtml([(r.customers||{}).panchayath,(r.customers||{}).district].filter(Boolean).join(', '))}</div></td>
+          <td class="mono">${(r.customers||{}).phone?`<a href="tel:${Util.escapeHtml(String(r.customers.phone).replace(/[^\d+]/g,''))}">${Util.escapeHtml(r.customers.phone)}</a>`:'—'}</td>
+          <td>${callOutcomeBadge(r.outcome)}</td><td style="white-space:normal;max-width:220px;">${Util.escapeHtml(r.next_action||'')}</td>
+          <td><button class="btn btn-outline btn-sm" onclick="Calling.fuReschedule(${i})">Reschedule</button> <button class="btn btn-outline btn-sm" onclick="Calling.fuDone(${i})">Done</button></td></tr>`; }).join('')}</tbody></table>`
+        : '<div class="empty-state"><div class="ic">&#9989;</div><div class="t">No pending follow-ups</div></div>';
+    }catch(e){ document.getElementById('cl_fu_list').innerHTML = `<div class="empty-state"><div class="ic">&#9888;</div><div class="t">Could not load follow-ups</div><div class="d">${Util.escapeHtml(e.message||'error')}</div></div>`; }
+  },
+  async fuDone(i){
+    const r = (this.cacheFu||[])[i]; if(!r) return;
+    try{ const { error } = await sb.from('call_activities').update({ follow_up_status:'Done' }).eq('id', r.id); if(error) throw error; UI.toast('Follow-up marked done'); this.loadStats(); this.loadFollowups(); }
+    catch(e){ callErr('Could not update', e); }
+  },
+  fuReschedule(i){
+    const r = (this.cacheFu||[])[i]; if(!r) return; this.fuCur = r;
+    UI.openModal('Reschedule follow-up — '+((r.customers||{}).name||''), `<div class="field"><label>New date &amp; time (IST) *</label><input type="datetime-local" id="cl_fuNew" value="${callIsoToLocal(r.follow_up_at)}"></div>
+      <div class="field"><label>Reason for rescheduling *</label><input id="cl_fuReason" placeholder="e.g. customer asked to call after Onam"></div>`,
+      `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="Calling.fuRescheduleSave()">Save</button>`);
+  },
+  async fuRescheduleSave(){
+    const r = this.fuCur; if(!r) return;
+    const iso = callLocalToIso((document.getElementById('cl_fuNew')||{}).value), reason = ((document.getElementById('cl_fuReason')||{}).value||'').trim();
+    if(!iso){ UI.toast('Choose a valid date and time'); return; }
+    if(new Date(iso) < new Date(Date.now()-60000)){ UI.toast('New time must be in the future'); return; }
+    if(!reason){ UI.toast('Please give a reason'); return; }
+    try{ const { error } = await sb.from('call_activities').update({ follow_up_at:iso, reschedule_reason:reason }).eq('id', r.id); if(error) throw error; UI.closeModal(); UI.toast('Follow-up rescheduled'); this.loadStats(); this.loadFollowups(); }
+    catch(e){ callErr('Could not reschedule', e); }
+  },
+  async loadHistory(){
+    const M = this.M, box = document.getElementById('cl_body'); if(!box) return;
+    box.innerHTML = '<div class="card"><div class="table-wrap" id="cl_h"><div class="empty-state"><div class="t">Loading&hellip;</div></div></div><div id="cl_hp" style="padding:8px 12px;"></div></div>';
+    try{
+      const from = M.page*M.per;
+      const { data, error, count } = await sb.from('call_activities').select('id,called_at,outcome,purpose,summary,next_action,customers(name,phone,panchayath,district)',{count:'exact'}).eq('staff_id', Auth.session.id).order('called_at',{ascending:false}).range(from, from+M.per-1);
+      if(error) throw error; const rows = data || [];
+      document.getElementById('cl_h').innerHTML = rows.length ? `<table><thead><tr><th>When</th><th>Contact</th><th>Outcome</th><th>Purpose</th><th>Remarks</th></tr></thead><tbody>${rows.map(r=>`<tr><td class="cell-mute">${callFmt(r.called_at)}</td><td class="cell-main">${Util.escapeHtml((r.customers||{}).name||'—')}<div class="cell-mute" style="font-size:11px;">${Util.escapeHtml([(r.customers||{}).panchayath,(r.customers||{}).district].filter(Boolean).join(', '))}</div></td><td>${callOutcomeBadge(r.outcome)}</td><td class="cell-mute">${Util.escapeHtml(r.purpose||'—')}</td><td style="white-space:normal;max-width:300px;">${Util.escapeHtml(r.summary||'')}</td></tr>`).join('')}</tbody></table>` : '<div class="empty-state"><div class="ic">&#128337;</div><div class="t">No calls logged yet</div></div>';
+      const total = count||0, pages = Math.max(1, Math.ceil(total/M.per));
+      document.getElementById('cl_hp').innerHTML = total ? `<div class="pager"><span>${from+1}&ndash;${from+rows.length} of ${total}</span><button class="pg-btn" ${M.page<=0?'disabled':''} onclick="Calling.M.page--;Calling.loadHistory()">&lsaquo; Prev</button><span>Page ${M.page+1} / ${pages}</span><button class="pg-btn" ${M.page+1>=pages?'disabled':''} onclick="Calling.M.page++;Calling.loadHistory()">Next &rsaquo;</button></div>` : '';
+    }catch(e){ document.getElementById('cl_h').innerHTML = `<div class="empty-state"><div class="ic">&#9888;</div><div class="t">Could not load history</div><div class="d">${Util.escapeHtml(e.message||'error')}</div></div>`; }
+  }
+};
+Views.callalloc = ()=>Calling.renderAlloc();
+Views.mycalls = ()=>Calling.renderMy();
+
+/* =====================================================================
+   STAFF WORK MANAGEMENT  (Stage 2)
+   Admin: Work Management (view 'workmgmt') - assign/monitor tasks, recurring
+   templates, performance dashboard, workload, end-of-day reports.
+   Staff: My Work (view 'mywork') - today's tasks, calling summary, notifications.
+   Data: real Supabase tables work_tasks / work_task_events / work_notifications /
+   work_templates (see work_stage2/004_work_management.sql). Tasks are changed only
+   through database functions that enforce the status machine and approval rules.
+   Existing "Tasks & To-Do" (customer to-dos) is a separate, untouched module.
+===================================================================== */
+const WORK_CATS = ['Calling','Lead Follow-up','Sales','Customer Visits','GeM Bids','Quotations','Accounts','Payments','Data Entry','Office Work','Other'];
+const WORK_PRIOS = ['Low','Medium','High','Urgent'];
+const WORK_OPEN = ['Assigned','In Progress','Blocked','Rejected'];
+const WORK_STATUSES = ['Assigned','In Progress','Blocked','Submitted','Approved','Rejected','Cancelled'];
+function workIsOverdue(t){ return !!(t && t.deadline && WORK_OPEN.includes(t.status) && t.deadline < callIstToday()); }
+function workStatusBadge(t){
+  const col = {Assigned:'#6b7280','In Progress':'#2563eb',Blocked:'#d97706',Submitted:'#7c3aed',Approved:'#16a34a',Rejected:'#dc2626',Cancelled:'#9ca3af'}[t.status] || '#6b7280';
+  return `<span class="badge" style="background:${col};color:#fff;white-space:nowrap;">${Util.escapeHtml(t.status)}</span>` + (workIsOverdue(t) ? ' <span class="badge" style="background:#dc2626;color:#fff;">OVERDUE</span>' : '');
+}
+function workPrioBadge(p){ const col = {Low:'#9ca3af',Medium:'#2563eb',High:'#d97706',Urgent:'#dc2626'}[p] || '#6b7280'; return `<span class="badge" style="background:${col};color:#fff;">${Util.escapeHtml(p||'')}</span>`; }
+function workBar(pct, color){ pct = Math.max(0, Math.min(100, Number(pct)||0)); return `<div style="background:var(--border,#e5e7eb);border-radius:6px;height:8px;min-width:70px;"><div style="width:${pct}%;height:8px;border-radius:6px;background:${color||'var(--orange,#EB5A28)'};"></div></div>`; }
+function workPct(a, b){ return b ? Math.round(a/b*100) : 0; }
+
+const Work = {
+  busy:false, staff:[], badge:0, genDay:'',
+  A:{ tab:'tasks', f:{staff:'',status:'',cat:'',q:'',from:'',to:''}, page:0, per:25, rows:[], total:0, tk:0, perf:{from:'',to:'',staff:'',cat:''}, tplRows:[] },
+  M:{ filter:'active', tasks:[], notifs:[] },
+  staffName(id){ const s = this.staff.find(x=>x.id===id); if(s) return s.name||s.username; if(Auth.session && id===Auth.session.id) return Auth.session.name||'Me'; return (id && !this.staff.length) ? 'Manager' : '—'; },
+  async ensureStaff(){ if(this.staff.length) return; const { data, error } = await sb.rpc('list_staff'); if(error) throw error; this.staff = data || []; if(typeof Calling!=='undefined') Calling.A.staff = this.staff; },
+  async generate(manual){
+    try{ const { data, error } = await sb.rpc('work_generate_recurring'); if(error) throw error; this.genDay = callIstToday(); if(manual) UI.toast((data||0)+' recurring task(s) generated for today'+(data?'':' (none were due, or already generated)')); return data; }
+    catch(e){ if(manual) callErr('Could not generate', e); else console.error('work_generate_recurring', e); }
+  },
+  /* Missed-target / overdue alerts: server cron (pg_cron) is the primary trigger; this is the idempotent fallback when anyone signs in. */
+  async runAlerts(){
+    try{
+      if(!Auth.session || this.alertDay === callIstToday()) return;
+      const { error } = await sb.rpc('work_run_alerts'); if(error) throw error;
+      this.alertDay = callIstToday(); this.refreshBadge();
+    }catch(e){ console.error('work_run_alerts', e); }
+  },
+  async paintAlerts(){
+    const box = document.getElementById('wk_alerts'); if(!box) return;
+    try{
+      const { data, error } = await sb.from('work_notifications').select('id,task_id,kind,message,created_at').eq('user_id', Auth.session.id).is('read_at', null).in('kind', ['missed_target','overdue_task','overdue_followup']).order('created_at',{ascending:false}).limit(30);
+      if(error) throw error;
+      if(!data || !data.length){ box.innerHTML = ''; return; }
+      const ic = {missed_target:'&#127919;', overdue_task:'&#9200;', overdue_followup:'&#128222;'};
+      box.innerHTML = `<div class="card card-pad" style="margin-bottom:16px;border-left:4px solid var(--red,#dc2626);"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><h3 style="margin:0;font-size:14px;">Missed target &amp; overdue alerts (${data.length})</h3><button class="btn btn-outline btn-sm" onclick="Work.readAlerts()">Mark all read</button></div>
+        ${data.map(n=>`<div style="padding:6px 0;border-top:1px solid var(--border,#e5e7eb);font-size:13px;cursor:${n.task_id?'pointer':'default'};" ${n.task_id?`onclick="Work.openTask('${n.task_id}')"`:''}>${ic[n.kind]||''} ${Util.escapeHtml(n.message)} <span class="cell-mute" style="font-size:11px;">${callFmt(n.created_at)}</span></div>`).join('')}</div>`;
+    }catch(e){ box.innerHTML = ''; console.error('work alerts', e); }
+  },
+  async readAlerts(){
+    try{ const { error } = await sb.rpc('work_notifications_read', { p_ids:null }); if(error) throw error; this.paintAlerts(); this.refreshBadge(); }catch(e){ callErr('Could not update', e); }
+  },
+  async refreshBadge(){
+    try{
+      if(!Auth.session) return;
+      const [n, o] = await Promise.all([
+        sb.from('work_notifications').select('id',{count:'exact',head:true}).eq('user_id', Auth.session.id).is('read_at', null),
+        sb.from('work_tasks').select('id',{count:'exact',head:true}).eq('assigned_to', Auth.session.id).in('status', WORK_OPEN).lt('deadline', callIstToday())
+      ]);
+      this.badge = (n.count||0) + (o.count||0);
+      if(typeof renderNav==='function') renderNav();
+    }catch(e){ console.error('work badge', e); }
+  },
+
+  /* ---------------------------- shared: prompt dialog ---------------------------- */
+  ask(o, onOk){
+    this._ask = onOk;
+    const today = callIstToday();
+    UI.openModal(o.title, `
+      ${o.hint?`<div class="hint" style="margin-bottom:8px;">${o.hint}</div>`:''}
+      ${o.staff?`<div class="field"><label>New owner *</label><select id="wk_pStaff"><option value="">Select&hellip;</option>${this.staff.filter(s=>s.id!==o.exclude).map(s=>`<option value="${s.id}">${Util.escapeHtml(s.name||s.username)}</option>`).join('')}</select></div>`:''}
+      ${o.progress?`<div class="field"><label>Progress: <b id="wk_pProgVal">${o.progressVal||0}</b>%</label><input type="range" min="0" max="99" value="${o.progressVal||0}" id="wk_pProg" oninput="document.getElementById('wk_pProgVal').textContent=this.value"></div>`:''}
+      ${o.date?`<div class="field"><label>${o.dateLabel||'Date'} *</label><input type="date" id="wk_pDate" min="${o.dateMin||today}"></div>`:''}
+      ${o.url?`<div class="field"><label>Evidence link (optional, e.g. Drive / photo link)</label><input id="wk_pUrl" placeholder="https://..."></div>`:''}
+      ${o.noteLabel?`<div class="field"><label>${o.noteLabel}${o.noteReq?' *':''}</label><textarea id="wk_pNote"></textarea></div>`:''}`,
+      `<button class="btn btn-outline" onclick="Work.closeAsk()">Cancel</button><button class="btn btn-primary" id="wk_pOk" onclick="Work.askOk(${o.noteReq?'true':'false'})">${o.ok||'Save'}</button>`);
+  },
+  closeAsk(){ UI.closeModal(); if(this._reopen) this.openTask(this._reopen); },
+  async askOk(noteReq){
+    if(this.busy) return;
+    const g = id => (document.getElementById(id)||{}).value;
+    const v = { note:(g('wk_pNote')||'').trim(), progress:g('wk_pProg')!==undefined?Number(g('wk_pProg')):null, date:g('wk_pDate')||null, staff:g('wk_pStaff')||null, url:(g('wk_pUrl')||'').trim() };
+    if(noteReq && !v.note){ UI.toast('Please fill in the required note'); return; }
+    if(document.getElementById('wk_pDate') && !v.date){ UI.toast('Choose a date'); return; }
+    if(document.getElementById('wk_pStaff') && !v.staff){ UI.toast('Choose a staff member'); return; }
+    this.busy = true; const b = document.getElementById('wk_pOk'); if(b){ b.disabled = true; b.textContent = 'Saving…'; }
+    try{ await this._ask(v); }catch(e){ callErr('Not saved', e); if(b){ b.disabled = false; b.textContent = 'Save'; } }
+    this.busy = false;
+  },
+  async rpcAction(id, action, v){
+    const { error } = await sb.rpc('work_task_action', { p_id:id, p_action:action, p_note:(v&&v.note)||null, p_progress:(v&&v.progress!=null)?v.progress:null, p_date:(v&&v.date)||null, p_staff:(v&&v.staff)||null, p_url:(v&&v.url)||null });
+    if(error) throw error;
+  },
+  afterChange(id, msg){
+    UI.toast(msg || 'Saved'); this.refreshBadge();
+    if(document.getElementById('modalOverlay').style.display!=='none') this.openTask(id);
+    this.reloadCurrent();
+  },
+  reloadCurrent(){
+    const v = UI.currentView;
+    if(v==='workmgmt'){ if(this.A.tab==='tasks') this.loadTasks(); else if(this.A.tab==='load') this.loadLoad(); }
+    else if(v==='mywork') this.renderMy(true);
+  },
+
+  /* ---------------------------- task detail ---------------------------- */
+  async openTask(id){
+    this._reopen = null;
+    UI.openModal('Task', '<div class="cell-mute">Loading&hellip;</div>', '<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>', true);
+    try{
+      const [tr, er] = await Promise.all([ sb.from('work_tasks').select('*').eq('id', id).maybeSingle(), sb.from('work_task_events').select('*').eq('task_id', id).order('created_at') ]);
+      if(tr.error) throw tr.error; if(!tr.data) throw new Error('Task not found or not visible to you');
+      const t = tr.data, ev = er.data || [];
+      try{ await this.ensureStaff(); }catch(e){ /* staff names only matter to managers */ }
+      const mine = t.assigned_to === Auth.session.id, mgr = Auth.isAdmin(), closed = ['Approved','Cancelled'].includes(t.status);
+      const btn = (label, js, cls) => `<button class="btn ${cls||'btn-outline'} btn-sm" onclick="${js}">${label}</button>`;
+      const A = [];
+      if(mine && !closed){
+        if(['Assigned','Rejected'].includes(t.status)) A.push(btn('&#9654; Start','Work.doStart(\''+id+'\')','btn-primary'));
+        if(['Assigned','In Progress','Rejected'].includes(t.status)){ A.push(btn('Update progress','Work.doProgress(\''+id+'\','+t.progress+')')); A.push(btn('Report blocker','Work.doBlock(\''+id+'\')')); A.push(btn('Submit for review','Work.doSubmit(\''+id+'\')','btn-primary')); }
+        if(t.status==='Blocked') A.push(btn('Resume','Work.doResume(\''+id+'\')','btn-primary'));
+        A.push(btn('Add remark','Work.doRemark(\''+id+'\')')); A.push(btn('Request extension','Work.doExtension(\''+id+'\')'));
+      }
+      if(mgr && !closed){
+        if(t.status==='Submitted' && (!mine || t.assigned_by===Auth.session.id)){ A.push(btn('&#10003; Approve','Work.doReview(\''+id+'\',\'approve\')','btn-primary')); A.push(btn('&#10007; Reject','Work.doReview(\''+id+'\',\'reject\')')); }
+        if(t.ext_status==='Requested'){ A.push(btn('Grant extension','Work.doExt(\''+id+'\',\'grant_extension\')','btn-primary')); A.push(btn('Deny extension','Work.doExt(\''+id+'\',\'deny_extension\')')); }
+        A.push(btn('Edit','Work.openEdit(\''+id+'\')')); A.push(btn('Reassign','Work.doReassign(\''+id+'\',\''+t.assigned_to+'\')')); A.push(btn('Comment','Work.doComment(\''+id+'\')')); A.push(btn('Cancel task','Work.doCancel(\''+id+'\')'));
+      }
+      const kv = (k,v) => `<div><div class="cell-mute" style="font-size:11px;text-transform:uppercase;">${k}</div><div style="font-size:13px;">${v||'—'}</div></div>`;
+      document.getElementById('modalTitle').textContent = t.task_no + ' — ' + t.title;
+      document.getElementById('modalBody').innerHTML = `
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">${workStatusBadge(t)} ${workPrioBadge(t.priority)} <span class="badge" style="background:#0B1424;color:#fff;">${Util.escapeHtml(t.category)}</span></div>
+        <div style="margin-bottom:12px;">${workBar(t.progress)}<div class="cell-mute" style="font-size:11px;">Progress ${t.progress}%</div></div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:12px;">
+          ${kv('Assigned to', Util.escapeHtml(this.staffName(t.assigned_to)))}${kv('Assigned by', Util.escapeHtml(this.staffName(t.assigned_by)))}
+          ${kv('Start', Util.fmtDate(t.start_date))}${kv('Deadline', Util.fmtDate(t.deadline))}${kv('Target', t.target_count!=null?String(t.target_count):'—')}
+          ${kv('Started', callFmt(t.started_at))}${kv('Submitted', callFmt(t.submitted_at))}${kv('Approved', t.approved_at?callFmt(t.approved_at)+' by '+Util.escapeHtml(this.staffName(t.approved_by)):'—')}</div>
+        ${t.description?`<p style="font-size:13px;white-space:pre-wrap;">${Util.escapeHtml(t.description)}</p>`:''}
+        ${t.instructions?`<div class="card card-pad" style="margin-bottom:10px;"><b>Instructions</b><div style="font-size:13px;white-space:pre-wrap;">${Util.escapeHtml(t.instructions)}</div></div>`:''}
+        ${t.staff_remarks?`<div style="font-size:13px;margin-bottom:6px;"><b>Staff remarks:</b> ${Util.escapeHtml(t.staff_remarks)}</div>`:''}
+        ${t.delay_reason&&t.status==='Blocked'?`<div style="font-size:13px;margin-bottom:6px;color:var(--amber,#d97706);"><b>Blocked:</b> ${Util.escapeHtml(t.delay_reason)}</div>`:''}
+        ${t.review_remarks?`<div style="font-size:13px;margin-bottom:6px;"><b>Manager remarks:</b> ${Util.escapeHtml(t.review_remarks)}</div>`:''}
+        ${t.evidence_url?`<div style="font-size:13px;margin-bottom:6px;"><b>Evidence:</b> ${/^https?:\/\//i.test(t.evidence_url)?`<a href="${Util.escapeHtml(t.evidence_url)}" target="_blank" rel="noopener">${Util.escapeHtml(t.evidence_url)}</a>`:Util.escapeHtml(t.evidence_url)}</div>`:''}
+        ${t.ext_status?`<div style="font-size:13px;margin-bottom:6px;"><b>Extension ${Util.escapeHtml(t.ext_status.toLowerCase())}:</b> to ${Util.fmtDate(t.ext_deadline)} &mdash; ${Util.escapeHtml(t.ext_reason||'')}</div>`:''}
+        ${A.length?`<div style="display:flex;gap:6px;flex-wrap:wrap;margin:12px 0;">${A.join('')}</div>`:''}
+        <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:14px 0 6px;">History</h4>
+        ${ev.length?`<div class="table-wrap"><table><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Status</th><th>Note</th></tr></thead><tbody>${ev.map(e=>`<tr><td class="cell-mute">${callFmt(e.created_at)}</td><td class="cell-mute">${Util.escapeHtml(this.staffName(e.actor))}</td><td>${Util.escapeHtml(e.action)}</td><td class="cell-mute">${Util.escapeHtml((e.from_status||'')+(e.to_status&&e.to_status!==e.from_status?' → '+e.to_status:''))}</td><td style="white-space:normal;max-width:260px;">${Util.escapeHtml(e.note||'')}</td></tr>`).join('')}</tbody></table></div>`:'<div class="cell-mute">No history.</div>'}`;
+    }catch(e){ document.getElementById('modalBody').innerHTML = '<div style="color:var(--red,#dc2626);">Could not load task: '+Util.escapeHtml(e.message||'error')+'</div>'; }
+  },
+  doStart(id){ this._reopen = id; this.ask({title:'Start task', noteLabel:'Note (optional)', ok:'Start'}, async v=>{ await this.rpcAction(id,'start',v); this.afterChange(id,'Task started'); }); },
+  doProgress(id, cur){ this._reopen = id; this.ask({title:'Update progress', progress:true, progressVal:Math.min(cur,99), noteLabel:'What was done?', ok:'Save progress', hint:'Use "Submit for review" when the work is finished.'}, async v=>{ await this.rpcAction(id,'progress',v); this.afterChange(id,'Progress saved'); }); },
+  doBlock(id){ this._reopen = id; this.ask({title:'Report a blocker', noteLabel:'What is blocking you?', noteReq:true, ok:'Report'}, async v=>{ await this.rpcAction(id,'block',v); this.afterChange(id,'Blocker reported to your manager'); }); },
+  doResume(id){ this._reopen = id; this.ask({title:'Resume task', noteLabel:'Note (optional)', ok:'Resume'}, async v=>{ await this.rpcAction(id,'resume',v); this.afterChange(id,'Task resumed'); }); },
+  doSubmit(id){ this._reopen = id; this.ask({title:'Submit for review', noteLabel:'Completion note', url:true, ok:'Submit', hint:'Your manager must approve it before it counts as completed.'}, async v=>{ await this.rpcAction(id,'submit',v); this.afterChange(id,'Submitted for review'); }); },
+  doRemark(id){ this._reopen = id; this.ask({title:'Add remark', noteLabel:'Remark', noteReq:true}, async v=>{ await this.rpcAction(id,'remark',v); this.afterChange(id,'Remark saved'); }); },
+  doExtension(id){ this._reopen = id; this.ask({title:'Request deadline extension', date:true, dateLabel:'Requested new deadline', noteLabel:'Reason', noteReq:true, ok:'Send request'}, async v=>{ await this.rpcAction(id,'request_extension',v); this.afterChange(id,'Extension requested'); }); },
+  doReview(id, action){ this._reopen = id; this.ask({title: action==='approve'?'Approve work':'Reject work', noteLabel: action==='approve'?'Remarks (optional)':'Reason for rejecting', noteReq: action==='reject', ok: action==='approve'?'Approve':'Reject'}, async v=>{ await this.rpcAction(id,action,v); this.afterChange(id, action==='approve'?'Approved':'Rejected — staff notified'); }); },
+  doExt(id, action){ this._reopen = id; this.ask({title: action==='grant_extension'?'Grant extension':'Deny extension', noteLabel:'Remarks (optional)', ok:'Confirm'}, async v=>{ await this.rpcAction(id,action,v); this.afterChange(id,'Done'); }); },
+  doReassign(id, cur){ this._reopen = id; this.ask({title:'Reassign task', staff:true, exclude:cur, noteLabel:'Reason (optional)', ok:'Reassign'}, async v=>{ await this.rpcAction(id,'reassign',v); this.afterChange(id,'Task reassigned'); }); },
+  doComment(id){ this._reopen = id; this.ask({title:'Comment to staff', noteLabel:'Comment', noteReq:true, ok:'Send'}, async v=>{ await this.rpcAction(id,'comment',v); this.afterChange(id,'Comment sent'); }); },
+  doCancel(id){ this._reopen = id; this.ask({title:'Cancel task', noteLabel:'Reason', noteReq:true, ok:'Cancel task'}, async v=>{ await this.rpcAction(id,'cancel',v); this.afterChange(id,'Task cancelled'); }); },
+
+  /* ---------------------------- admin: create / edit ---------------------------- */
+  async openCreate(){
+    try{ await this.ensureStaff(); }catch(e){ callErr('Could not load staff', e); return; }
+    UI.openModal('New task', '<div class="cell-mute">Loading workload&hellip;</div>', '', true);
+    let load = {};
+    try{ const { data } = await sb.rpc('work_staff_load'); (data||[]).forEach(r=>{ load[r.staff_id] = r; }); }catch(e){ /* workload is advisory */ }
+    const today = callIstToday();
+    document.getElementById('modalBody').innerHTML = `
+      <div class="field"><label>Assign to * (tick one or more — each gets their own copy)</label>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:6px;">${this.staff.map(s=>{ const l = load[s.id]||{}; return `<label style="font-weight:500;"><input type="checkbox" class="wk_stf" value="${s.id}"> ${Util.escapeHtml(s.name||s.username)}<div class="cell-mute" style="font-size:11px;margin-left:20px;">${l.open_tasks!=null?`${l.open_tasks} open · ${l.overdue} overdue · ${l.active_contacts} contacts · ${l.calls_today} calls today`:'workload unavailable'}</div></label>`; }).join('')}</div></div>
+      <div class="field"><label>Title *</label><input id="wk_title" maxlength="200"></div>
+      <div class="form-row"><div class="field"><label>Category *</label><select id="wk_cat">${WORK_CATS.map(c=>`<option>${c}</option>`).join('')}</select></div>
+        <div class="field"><label>Priority</label><select id="wk_prio">${WORK_PRIOS.map(c=>`<option ${c==='Medium'?'selected':''}>${c}</option>`).join('')}</select></div></div>
+      <div class="form-row"><div class="field"><label>Start date</label><input type="date" id="wk_start" value="${today}"></div>
+        <div class="field"><label>Deadline</label><input type="date" id="wk_deadline" value="${today}"></div></div>
+      <div class="form-row"><div class="field"><label>Target (number, optional)</label><input type="number" min="0" id="wk_target" placeholder="e.g. 40 calls"></div><div class="field"></div></div>
+      <div class="field"><label>Description</label><textarea id="wk_desc"></textarea></div>
+      <div class="field"><label>Instructions</label><textarea id="wk_instr"></textarea></div>`;
+    document.getElementById('modalFoot').innerHTML = `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" id="wk_createBtn" onclick="Work.saveCreate()">Assign task</button>`;
+  },
+  async saveCreate(){
+    if(this.busy) return;
+    const g = id => (document.getElementById(id)||{}).value || '';
+    const staff = [...document.querySelectorAll('.wk_stf:checked')].map(c=>c.value);
+    if(!staff.length){ UI.toast('Tick at least one staff member'); return; }
+    if(!g('wk_title').trim()){ UI.toast('Title is required'); return; }
+    if(g('wk_deadline') && g('wk_start') && g('wk_deadline') < g('wk_start')){ UI.toast('Deadline cannot be before the start date'); return; }
+    this.busy = true; const b = document.getElementById('wk_createBtn'); if(b){ b.disabled = true; b.textContent = 'Saving…'; }
+    try{
+      const { data, error } = await sb.rpc('work_task_create', { p_staff:staff, p_title:g('wk_title').trim(), p_description:g('wk_desc'), p_category:g('wk_cat'), p_priority:g('wk_prio'),
+        p_start:g('wk_start')||null, p_deadline:g('wk_deadline')||null, p_target:g('wk_target')!==''?Number(g('wk_target')):null, p_instructions:g('wk_instr') });
+      if(error) throw error;
+      UI.closeModal();
+      UI.toast((data.created||0)+' task(s) assigned'+(data.duplicates_skipped?' · '+data.duplicates_skipped+' skipped (identical active task already exists)':''), 6000);
+      Activity.log('Work task assigned', g('wk_title').trim()+' → '+staff.map(s=>this.staffName(s)).join(', '));
+      this.loadTasks();
+    }catch(e){ callErr('Task NOT created', e); if(b){ b.disabled = false; b.textContent = 'Assign task'; } }
+    this.busy = false;
+  },
+  async openEdit(id){
+    try{
+      const { data: t, error } = await sb.from('work_tasks').select('*').eq('id', id).maybeSingle(); if(error||!t) throw (error||new Error('Task not found'));
+      this._reopen = id;
+      UI.openModal('Edit '+t.task_no, `
+        <div class="field"><label>Title *</label><input id="we_title" value="${Util.escapeHtml(t.title)}" maxlength="200"></div>
+        <div class="form-row"><div class="field"><label>Category</label><select id="we_cat">${WORK_CATS.map(c=>`<option ${c===t.category?'selected':''}>${c}</option>`).join('')}</select></div>
+          <div class="field"><label>Priority</label><select id="we_prio">${WORK_PRIOS.map(c=>`<option ${c===t.priority?'selected':''}>${c}</option>`).join('')}</select></div></div>
+        <div class="form-row"><div class="field"><label>Deadline</label><input type="date" id="we_deadline" min="${t.start_date}" value="${t.deadline||''}"></div>
+          <div class="field"><label>Target</label><input type="number" min="0" id="we_target" value="${t.target_count!=null?t.target_count:''}"></div></div>
+        <div class="field"><label>Description</label><textarea id="we_desc">${Util.escapeHtml(t.description||'')}</textarea></div>
+        <div class="field"><label>Instructions</label><textarea id="we_instr">${Util.escapeHtml(t.instructions||'')}</textarea></div>`,
+        `<button class="btn btn-outline" onclick="Work.closeAsk()">Cancel</button><button class="btn btn-primary" id="we_btn" onclick="Work.saveEdit('${id}')">Save</button>`, true);
+    }catch(e){ callErr('Could not open task', e); }
+  },
+  async saveEdit(id){
+    if(this.busy) return; const g = x => (document.getElementById(x)||{}).value || '';
+    if(!g('we_title').trim()){ UI.toast('Title is required'); return; }
+    this.busy = true; const b = document.getElementById('we_btn'); if(b){ b.disabled = true; b.textContent = 'Saving…'; }
+    try{
+      const { error } = await sb.rpc('work_task_edit', { p_id:id, p_title:g('we_title').trim(), p_description:g('we_desc'), p_category:g('we_cat'), p_priority:g('we_prio'), p_deadline:g('we_deadline')||null, p_target:g('we_target')!==''?Number(g('we_target')):null, p_instructions:g('we_instr') });
+      if(error) throw error; this.afterChange(id, 'Task updated — staff notified');
+    }catch(e){ callErr('Not saved', e); if(b){ b.disabled = false; b.textContent = 'Save'; } }
+    this.busy = false;
+  },
+
+  /* ---------------------------- admin: dashboard ---------------------------- */
+  async renderAdmin(){
+    if(!Auth.isAdmin()){ document.getElementById('content').innerHTML = '<div class="empty-state"><div class="ic">&#128274;</div><div class="t">Admin only</div></div>'; return; }
+    const A = this.A, tabs = [['tasks','Tasks'],['recurring','Recurring'],['perf','Performance'],['load','Staff workload']];
+    document.getElementById('content').innerHTML = `
+      <div class="toolbar" style="flex-wrap:wrap;">${tabs.map(t=>`<button class="btn ${A.tab===t[0]?'btn-primary':'btn-outline'} btn-sm" onclick="Work.A.tab='${t[0]}';Work.renderAdmin()">${t[1]}</button>`).join('')}
+        <div class="toolbar-spacer"></div>
+        <button class="btn btn-outline btn-sm" onclick="Work.dayReportPrompt()">&#128203; End-of-day report</button>
+        <button class="btn btn-primary btn-sm" onclick="Work.openCreate()">&#65291; New task</button></div>
+      <div id="wk_alerts"></div><div id="wk_body"></div>`;
+    try{ await this.ensureStaff(); }catch(e){ callErr('Could not load staff', e); }
+    await this.generate(false);
+    await this.runAlerts(); this.paintAlerts();
+    if(A.tab==='tasks') this.paintTasksShell(); else if(A.tab==='recurring') this.loadTemplates(); else if(A.tab==='perf') this.paintPerf(); else this.loadLoad();
+  },
+  paintTasksShell(){
+    const A = this.A, f = A.f;
+    document.getElementById('wk_body').innerHTML = `
+      <div id="wk_cards"></div>
+      <div class="toolbar" style="flex-wrap:wrap;">
+        <select id="wf_status" autocomplete="off"><option value="">All statuses</option><option value="__open" ${f.status==='__open'?'selected':''}>Open (not finished)</option><option value="__overdue" ${f.status==='__overdue'?'selected':''}>Overdue</option>${WORK_STATUSES.map(s=>`<option ${s===f.status?'selected':''}>${s}</option>`).join('')}</select>
+        <select id="wf_staff" autocomplete="off"><option value="">All staff</option>${this.staff.map(s=>`<option value="${s.id}" ${s.id===f.staff?'selected':''}>${Util.escapeHtml(s.name||s.username)}</option>`).join('')}</select>
+        <select id="wf_cat" autocomplete="off"><option value="">All categories</option>${WORK_CATS.map(c=>`<option ${c===f.cat?'selected':''}>${c}</option>`).join('')}</select>
+        <input type="date" id="wf_from" value="${f.from}" title="Start date from"><input type="date" id="wf_to" value="${f.to}" title="Start date to">
+        <div class="search"><span class="ic">&#128269;</span><input id="wf_q" autocomplete="off" placeholder="Search title..." value="${Util.escapeHtml(f.q)}" onkeydown="if(event.key==='Enter')Work.loadTasks(0)"></div>
+        <button class="btn btn-primary btn-sm" onclick="Work.loadTasks(0)">Apply</button>
+        <button class="btn btn-outline btn-sm" onclick="Work.A.f={staff:'',status:'',cat:'',q:'',from:'',to:''};Work.paintTasksShell()">Reset</button></div>
+      <div class="card"><div class="table-wrap" id="wk_list"></div><div id="wk_pager" style="padding:8px 12px;"></div></div>`;
+    this.loadCards(); this.loadTasks(A.page||0);
+  },
+  async loadCards(){
+    const box = document.getElementById('wk_cards'); if(!box) return; const today = callIstToday();
+    const cnt = (q) => q.then(r=>{ if(r.error) throw r.error; return r.count||0; });
+    const base = () => sb.from('work_tasks').select('id',{count:'exact',head:true});
+    try{
+      const [assignedToday, open, overdue, review, blocked, approvedToday] = await Promise.all([
+        cnt(base().eq('start_date', today)), cnt(base().in('status', WORK_OPEN)), cnt(base().in('status', WORK_OPEN).lt('deadline', today)),
+        cnt(base().eq('status','Submitted')), cnt(base().eq('status','Blocked')), cnt(base().eq('status','Approved').gte('approved_at', callIstStartIso(today)))]);
+      box.innerHTML = dashboardCardsHTML('Work overview', [
+        {label:'Assigned today', value:assignedToday}, {label:'Open tasks', value:open, color:'var(--blue,#2563eb)', onclick:"Work.quickStatus('__open')"},
+        {label:'Overdue', value:overdue, color:'var(--red,#dc2626)', onclick:"Work.quickStatus('__overdue')"}, {label:'Awaiting review', value:review, color:'#7c3aed', onclick:"Work.quickStatus('Submitted')"},
+        {label:'Blocked', value:blocked, color:'var(--amber,#d97706)', onclick:"Work.quickStatus('Blocked')"}, {label:'Approved today', value:approvedToday, color:'var(--green,#16a34a)'}]);
+    }catch(e){ box.innerHTML = '<div class="card card-pad" style="color:var(--red,#dc2626);">Could not load overview: '+Util.escapeHtml(e.message||'error')+'</div>'; }
+  },
+  quickStatus(s){ this.A.f.status = s; this.paintTasksShell(); },
+  async loadTasks(page){
+    const A = this.A; if(page!==undefined) A.page = page; const tk = ++A.tk; const f = A.f;
+    const g = id => { const e = document.getElementById(id); return e ? e.value : undefined; };
+    if(g('wf_status')!==undefined){ f.status = g('wf_status'); f.staff = g('wf_staff'); f.cat = g('wf_cat'); f.from = g('wf_from'); f.to = g('wf_to'); f.q = (g('wf_q')||'').trim(); }
+    const box = document.getElementById('wk_list'); if(!box) return; box.innerHTML = '<div class="empty-state"><div class="t">Loading&hellip;</div></div>';
+    try{
+      let q = sb.from('work_tasks').select('*',{count:'exact'});
+      if(f.status==='__open') q = q.in('status', WORK_OPEN); else if(f.status==='__overdue') q = q.in('status', WORK_OPEN).lt('deadline', callIstToday()); else if(f.status) q = q.eq('status', f.status);
+      if(f.staff) q = q.eq('assigned_to', f.staff); if(f.cat) q = q.eq('category', f.cat);
+      if(f.from) q = q.gte('start_date', f.from); if(f.to) q = q.lte('start_date', f.to);
+      if(f.q) q = q.ilike('title', '%'+f.q.replace(/[%,()*]/g,' ')+'%');
+      const from = A.page*A.per;
+      const { data, error, count } = await q.order('deadline',{ascending:true,nullsFirst:false}).order('created_at',{ascending:false}).range(from, from+A.per-1);
+      if(tk !== A.tk) return; if(error) throw error;
+      A.rows = data || []; A.total = count || 0;
+      box.innerHTML = A.rows.length ? `<table><thead><tr><th class="col-actions">Actions</th><th>Task</th><th>Staff</th><th>Category</th><th>Priority</th><th>Deadline</th><th>Progress</th><th>Status</th></tr></thead><tbody>
+        ${A.rows.map(t=>`<tr><td class="col-actions"><div class="row-action-btns"><button class="icon-btn" title="View / manage" onclick="Work.openTask('${t.id}')">&#128065;</button>${!['Approved','Cancelled'].includes(t.status)?`<button class="icon-btn" title="Edit" onclick="Work.openEdit('${t.id}')">&#9998;</button>`:''}${t.status==='Submitted'?`<button class="icon-btn" title="Review" onclick="Work.openTask('${t.id}')">&#10003;</button>`:''}</div></td>
+          <td class="cell-main" style="white-space:normal;max-width:260px;">${Util.escapeHtml(t.title)}<div class="cell-mute mono" style="font-size:11px;">${Util.escapeHtml(t.task_no)}${t.ext_status==='Requested'?' · <b style="color:var(--amber,#d97706);">extension requested</b>':''}</div></td>
+          <td>${Util.escapeHtml(this.staffName(t.assigned_to))}</td><td class="cell-mute">${Util.escapeHtml(t.category)}</td><td>${workPrioBadge(t.priority)}</td><td class="cell-mute">${Util.fmtDate(t.deadline)}</td>
+          <td style="min-width:90px;">${workBar(t.progress)}<div class="cell-mute" style="font-size:11px;">${t.progress}%</div></td><td>${workStatusBadge(t)}</td></tr>`).join('')}</tbody></table>`
+        : '<div class="empty-state"><div class="ic">&#9989;</div><div class="t">No tasks match</div><div class="d">Use "New task" to assign work.</div></div>';
+      const pages = Math.max(1, Math.ceil(A.total/A.per));
+      document.getElementById('wk_pager').innerHTML = A.total ? `<div class="pager"><span>${from+1}&ndash;${from+A.rows.length} of ${A.total}</span><button class="pg-btn" ${A.page<=0?'disabled':''} onclick="Work.loadTasks(${A.page-1})">&lsaquo; Prev</button><span>Page ${A.page+1} / ${pages}</span><button class="pg-btn" ${A.page+1>=pages?'disabled':''} onclick="Work.loadTasks(${A.page+1})">Next &rsaquo;</button></div>` : '';
+    }catch(e){ if(tk !== A.tk) return; box.innerHTML = `<div class="empty-state"><div class="ic">&#9888;</div><div class="t">Could not load tasks</div><div class="d">${Util.escapeHtml(e.message||'error')}</div></div>`; }
+  },
+
+  /* recurring templates */
+  async loadTemplates(){
+    const box = document.getElementById('wk_body'); box.innerHTML = '<div class="card card-pad cell-mute">Loading&hellip;</div>';
+    try{
+      const { data, error } = await sb.from('work_templates').select('*').order('created_at',{ascending:false}).limit(200); if(error) throw error;
+      this.A.tplRows = data || [];
+      const dow = ['','Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+      box.innerHTML = `<div class="toolbar"><div class="hint" style="flex:1;">Recurring templates create each day's tasks automatically (once per staff per date — never duplicated). Generation runs when anyone opens Work Management or My Work.</div>
+        <button class="btn btn-outline btn-sm" onclick="Work.generate(true).then(()=>Work.loadTemplates())">Generate today's tasks now</button>
+        <button class="btn btn-primary btn-sm" onclick="Work.openTemplate(null)">&#65291; New recurring task</button></div>
+        <div class="card"><div class="table-wrap">${this.A.tplRows.length?`<table><thead><tr><th class="col-actions">Actions</th><th>Task</th><th>Category</th><th>Repeats</th><th>Staff</th><th>Active</th></tr></thead><tbody>
+        ${this.A.tplRows.map((t,i)=>`<tr><td class="col-actions"><div class="row-action-btns"><button class="icon-btn" title="Edit" onclick="Work.openTemplate(${i})">&#9998;</button><button class="icon-btn" title="${t.active?'Pause':'Resume'}" onclick="Work.toggleTemplate(${i})">${t.active?'&#9208;':'&#9654;'}</button></div></td>
+          <td class="cell-main">${Util.escapeHtml(t.title)}<div class="cell-mute" style="font-size:11px;">${t.target_count!=null?'Target '+t.target_count+' · ':''}deadline +${t.deadline_offset_days}d</div></td><td class="cell-mute">${Util.escapeHtml(t.category)}</td>
+          <td>${t.frequency==='daily'?'Daily'+(t.include_sunday?' (incl. Sun)':' (Mon–Sat)'):t.frequency==='weekly'?'Weekly · '+dow[t.weekday]:'Monthly · day '+t.day_of_month}</td>
+          <td class="cell-mute">${Util.escapeHtml((t.assigned_to||[]).map(id=>this.staffName(id)).join(', '))}</td><td>${t.active?'<span class="badge" style="background:#16a34a;color:#fff;">Active</span>':'<span class="badge" style="background:#9ca3af;color:#fff;">Paused</span>'}</td></tr>`).join('')}</tbody></table>`:'<div class="empty-state"><div class="ic">&#128260;</div><div class="t">No recurring tasks yet</div></div>'}</div></div>`;
+    }catch(e){ box.innerHTML = '<div class="card card-pad" style="color:var(--red,#dc2626);">Could not load: '+Util.escapeHtml(e.message||'error')+'</div>'; }
+  },
+  openTemplate(i){
+    const t = i==null ? null : this.A.tplRows[i]; this._tplId = t ? t.id : null; const today = callIstToday();
+    UI.openModal(t?'Edit recurring task':'New recurring task', `
+      <div class="field"><label>Assign to *</label><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:6px;">${this.staff.map(s=>`<label style="font-weight:500;"><input type="checkbox" class="wt_stf" value="${s.id}" ${t&&(t.assigned_to||[]).includes(s.id)?'checked':''}> ${Util.escapeHtml(s.name||s.username)}</label>`).join('')}</div></div>
+      <div class="field"><label>Title *</label><input id="wt_title" value="${Util.escapeHtml(t?t.title:'')}" maxlength="200"></div>
+      <div class="form-row"><div class="field"><label>Category</label><select id="wt_cat">${WORK_CATS.map(c=>`<option ${t&&c===t.category?'selected':''}>${c}</option>`).join('')}</select></div>
+        <div class="field"><label>Priority</label><select id="wt_prio">${WORK_PRIOS.map(c=>`<option ${(t?t.priority:'Medium')===c?'selected':''}>${c}</option>`).join('')}</select></div></div>
+      <div class="form-row"><div class="field"><label>Repeats</label><select id="wt_freq" onchange="Work.tplFreq()"><option value="daily" ${!t||t.frequency==='daily'?'selected':''}>Daily</option><option value="weekly" ${t&&t.frequency==='weekly'?'selected':''}>Weekly</option><option value="monthly" ${t&&t.frequency==='monthly'?'selected':''}>Monthly</option></select></div>
+        <div class="field" id="wt_dowW"><label>Weekday</label><select id="wt_dow">${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map((d,k)=>`<option value="${k+1}" ${t&&t.weekday===k+1?'selected':''}>${d}</option>`).join('')}</select></div>
+        <div class="field" id="wt_domW"><label>Day of month (1-28)</label><input type="number" min="1" max="28" id="wt_dom" value="${t&&t.day_of_month?t.day_of_month:1}"></div>
+        <div class="field" id="wt_sunW"><label><input type="checkbox" id="wt_sun" ${t&&t.include_sunday?'checked':''}> Include Sundays</label></div></div>
+      <div class="form-row"><div class="field"><label>Starts</label><input type="date" id="wt_start" value="${t?t.start_date:today}"></div><div class="field"><label>Ends (optional)</label><input type="date" id="wt_end" value="${t&&t.end_date?t.end_date:''}"></div></div>
+      <div class="form-row"><div class="field"><label>Deadline: days after start</label><input type="number" min="0" max="60" id="wt_off" value="${t?t.deadline_offset_days:0}"></div><div class="field"><label>Target (optional)</label><input type="number" min="0" id="wt_target" value="${t&&t.target_count!=null?t.target_count:''}"></div></div>
+      <div class="field"><label>Description</label><textarea id="wt_desc">${Util.escapeHtml(t?t.description||'':'')}</textarea></div>
+      <div class="field"><label>Instructions</label><textarea id="wt_instr">${Util.escapeHtml(t?t.instructions||'':'')}</textarea></div>`,
+      `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" id="wt_btn" onclick="Work.saveTemplate()">Save</button>`, true);
+    this.tplFreq();
+  },
+  tplFreq(){ const f = (document.getElementById('wt_freq')||{}).value; const show = (id,on)=>{ const e = document.getElementById(id); if(e) e.style.display = on?'':'none'; }; show('wt_dowW', f==='weekly'); show('wt_domW', f==='monthly'); show('wt_sunW', f==='daily'); },
+  async saveTemplate(){
+    if(this.busy) return; const g = x => (document.getElementById(x)||{}).value || '';
+    const staff = [...document.querySelectorAll('.wt_stf:checked')].map(c=>c.value);
+    if(!staff.length){ UI.toast('Tick at least one staff member'); return; } if(!g('wt_title').trim()){ UI.toast('Title is required'); return; }
+    const freq = g('wt_freq');
+    const row = { title:g('wt_title').trim(), description:g('wt_desc').trim()||null, category:g('wt_cat'), priority:g('wt_prio'), instructions:g('wt_instr').trim()||null, target_count:g('wt_target')!==''?Number(g('wt_target')):null,
+      assigned_to:staff, frequency:freq, weekday:freq==='weekly'?Number(g('wt_dow')):null, day_of_month:freq==='monthly'?Number(g('wt_dom')):null, include_sunday:freq==='daily'&&!!document.getElementById('wt_sun').checked,
+      deadline_offset_days:Number(g('wt_off'))||0, start_date:g('wt_start')||callIstToday(), end_date:g('wt_end')||null };
+    this.busy = true; const b = document.getElementById('wt_btn'); if(b){ b.disabled = true; b.textContent = 'Saving…'; }
+    try{
+      const r = this._tplId ? await sb.from('work_templates').update(row).eq('id', this._tplId) : await sb.from('work_templates').insert(row);
+      if(r.error) throw r.error; UI.closeModal(); UI.toast('Recurring task saved'); this.loadTemplates();
+    }catch(e){ callErr('Not saved', e); if(b){ b.disabled = false; b.textContent = 'Save'; } }
+    this.busy = false;
+  },
+  async toggleTemplate(i){
+    const t = this.A.tplRows[i]; if(!t) return;
+    try{ const { error } = await sb.from('work_templates').update({ active: !t.active }).eq('id', t.id); if(error) throw error; UI.toast(t.active?'Paused':'Resumed'); this.loadTemplates(); }catch(e){ callErr('Could not update', e); }
+  },
+
+  /* performance dashboard */
+  paintPerf(){
+    const P = this.A.perf; if(!P.to){ P.to = callIstToday(); P.from = new Date(Date.now()-6*86400000).toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'}); }
+    document.getElementById('wk_body').innerHTML = `
+      <div class="toolbar" style="flex-wrap:wrap;"><label class="cell-mute" style="font-size:12px;">From</label><input type="date" id="wp_from" value="${P.from}"><label class="cell-mute" style="font-size:12px;">To</label><input type="date" id="wp_to" value="${P.to}">
+        <select id="wp_staff" autocomplete="off"><option value="">All staff</option>${this.staff.map(s=>`<option value="${s.id}" ${s.id===P.staff?'selected':''}>${Util.escapeHtml(s.name||s.username)}</option>`).join('')}</select>
+        <select id="wp_cat" autocomplete="off"><option value="">All task categories</option>${WORK_CATS.map(c=>`<option ${c===P.cat?'selected':''}>${c}</option>`).join('')}</select>
+        <button class="btn btn-primary btn-sm" onclick="Work.loadPerf()">Apply</button>
+        ${[['Today',0],['7 days',6],['30 days',29]].map(x=>`<button class="btn btn-outline btn-sm" onclick="Work.perfRange(${x[1]})">${x[0]}</button>`).join('')}
+        <button class="btn btn-outline btn-sm" onclick="Work.exportPerf()">&#128228; Export CSV</button></div>
+      <div id="wp_out"><div class="card card-pad cell-mute">Loading&hellip;</div></div>`;
+    this.loadPerf();
+  },
+  perfRange(days){ const P = this.A.perf; P.to = callIstToday(); P.from = new Date(Date.now()-days*86400000).toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'}); this.paintPerf(); },
+  async loadPerf(){
+    const P = this.A.perf, g = id => (document.getElementById(id)||{}).value || '';
+    P.from = g('wp_from')||P.from; P.to = g('wp_to')||P.to; P.staff = g('wp_staff'); P.cat = g('wp_cat');
+    const out = document.getElementById('wp_out'); if(!out) return;
+    if(P.to < P.from){ out.innerHTML = '<div class="card card-pad" style="color:var(--red,#dc2626);">"To" date is before "From" date.</div>'; return; }
+    out.innerHTML = '<div class="card card-pad cell-mute">Loading&hellip;</div>';
+    try{
+      const days = Math.round((new Date(P.to)-new Date(P.from))/86400000);
+      const [pr, tr] = await Promise.all([ sb.rpc('work_performance', { p_from:P.from, p_to:P.to, p_staff:P.staff||null, p_category:P.cat||null }),
+        days<=92 ? sb.rpc('work_trend', { p_from:P.from, p_to:P.to, p_staff:P.staff||null }) : Promise.resolve({data:null,error:null}) ]);
+      if(pr.error) throw pr.error; if(tr.error) throw tr.error;
+      const rows = pr.data || []; this._perfRows = rows; const S = k => rows.reduce((a,r)=>a+Number(r[k]||0),0);
+      const conn = S('connected'), calls = S('calls');
+      let html = dashboardCardsHTML('Totals for '+Util.escapeHtml(P.from)+' to '+Util.escapeHtml(P.to), [
+        {label:'Tasks assigned', value:S('assigned')}, {label:'Submitted', value:S('submitted'), color:'#7c3aed'}, {label:'Approved', value:S('approved'), color:'var(--green,#16a34a)'},
+        {label:'Approved on time', value:S('approved_on_time')+(S('approved')?' ('+workPct(S('approved_on_time'),S('approved'))+'%)':''), color:'var(--green,#16a34a)'}, {label:'Rejected', value:S('rejected'), color:'var(--red,#dc2626)'},
+        {label:'Open overdue now', value:S('open_overdue'), color:'var(--red,#dc2626)'}, {label:'Calls logged', value:calls}, {label:'Connected', value:conn+(calls?' ('+workPct(conn,calls)+'%)':''), color:'var(--blue,#2563eb)'},
+        {label:'Interested', value:S('interested'), color:'var(--green,#16a34a)'}, {label:'Follow-ups done', value:S('followups_done')}, {label:'Follow-ups overdue now', value:S('followups_overdue'), color:'var(--red,#dc2626)'}, {label:'Leads created', value:S('leads_created')}]);
+      html += `<div class="card" style="margin-bottom:16px;"><div class="table-wrap"><table><thead><tr><th>Staff</th><th>Assigned</th><th>Approved</th><th>Completion</th><th>Overdue</th><th>Calls</th><th>Unique</th><th>Connected</th><th>Conn. rate</th><th>Interested</th><th>Follow-ups done</th><th>FU overdue</th><th>Leads</th></tr></thead><tbody>
+        ${rows.map(r=>{ const comp = workPct(Number(r.approved), Number(r.assigned)); return `<tr><td><a href="#" onclick="Work.drill('${r.staff_id}');return false;"><b>${Util.escapeHtml(r.staff_name||'—')}</b></a></td><td>${r.assigned}</td><td>${r.approved}</td>
+          <td style="min-width:100px;">${workBar(comp, comp>=80?'#16a34a':comp>=50?'#d97706':'#dc2626')}<div class="cell-mute" style="font-size:11px;">${r.assigned?comp+'%':'—'}</div></td>
+          <td style="${Number(r.open_overdue)?'color:var(--red,#dc2626);font-weight:700;':''}">${r.open_overdue}</td><td>${r.calls}</td><td>${r.unique_contacts}</td><td>${r.connected}</td><td>${Number(r.calls)?workPct(Number(r.connected),Number(r.calls))+'%':'—'}</td><td>${r.interested}</td><td>${r.followups_done}</td><td style="${Number(r.followups_overdue)?'color:var(--red,#dc2626);font-weight:700;':''}">${r.followups_overdue}</td><td>${r.leads_created}</td></tr>`; }).join('')}</tbody></table></div></div>`;
+      const tdata = tr.data;
+      if(tdata && tdata.length){
+        const max = Math.max(1, ...tdata.map(d=>Math.max(Number(d.calls), Number(d.assigned), Number(d.approved))));
+        html += `<div class="card card-pad"><h3 style="margin:0 0 4px;font-size:14px;">Daily trend</h3><div class="hint" style="margin-bottom:8px;">Tasks assigned (start date), tasks approved, calls logged and connected calls per day.</div>
+          <div class="table-wrap"><table><thead><tr><th>Date</th><th>Assigned</th><th>Approved</th><th>Calls</th><th>Connected</th><th style="width:40%;">Calls vs approved</th></tr></thead><tbody>
+          ${tdata.map(d=>`<tr><td class="cell-mute">${Util.fmtDate(d.day)}</td><td>${d.assigned}</td><td>${d.approved}</td><td>${d.calls}</td><td>${d.connected}</td><td>${workBar(Number(d.calls)/max*100,'#2563eb')}<div style="height:3px"></div>${workBar(Number(d.approved)/max*100,'#16a34a')}</td></tr>`).join('')}</tbody></table></div></div>`;
+      }
+      out.innerHTML = html;
+    }catch(e){ out.innerHTML = '<div class="card card-pad" style="color:var(--red,#dc2626);">Could not load performance: '+Util.escapeHtml(e.message||'error')+'</div>'; }
+  },
+  exportPerf(){
+    const rows = this._perfRows || []; if(!rows.length){ UI.toast('Nothing to export'); return; }
+    const P = this.A.perf, cols = [['staff_name','Staff'],['assigned','Tasks assigned'],['submitted','Submitted'],['approved','Approved'],['approved_on_time','Approved on time'],['rejected','Rejected'],['open_overdue','Open overdue'],['calls','Calls'],['unique_contacts','Unique contacts'],['connected','Connected'],['interested','Interested'],['followups_done','Follow-ups done'],['followups_overdue','Follow-ups overdue'],['leads_created','Leads created']];
+    const esc = v => '"'+String(v==null?'':v).replace(/"/g,'""')+'"';
+    const csv = '﻿'+[cols.map(c=>esc(c[1])).join(',')].concat(rows.map(r=>cols.map(c=>esc(r[c[0]])).join(','))).join('\r\n');
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})); a.download = 'staff-performance-'+P.from+'_to_'+P.to+'.csv'; document.body.appendChild(a); a.click(); a.remove();
+    UI.toast('Exported');
+  },
+  async drill(staffId){
+    const P = this.A.perf; UI.openModal('Tasks — '+this.staffName(staffId), '<div class="cell-mute">Loading&hellip;</div>', `<button class="btn btn-outline" onclick="UI.closeModal()">Close</button><button class="btn btn-outline" onclick="Calling.A.sumDate='${P.to}';Calling.staffCalls('${staffId}')">View calls (${P.to})</button><button class="btn btn-outline" onclick="Work.dayReport('${staffId}','${P.to}')">Day report</button>`, true);
+    try{
+      let q = sb.from('work_tasks').select('*').eq('assigned_to', staffId).gte('start_date', P.from).lte('start_date', P.to); if(P.cat) q = q.eq('category', P.cat);
+      const { data, error } = await q.order('start_date',{ascending:false}).limit(200); if(error) throw error;
+      document.getElementById('modalBody').innerHTML = (data||[]).length ? `<div class="table-wrap"><table><thead><tr><th class="col-actions">Open</th><th>Task</th><th>Category</th><th>Start</th><th>Deadline</th><th>Status</th></tr></thead><tbody>${data.map(t=>`<tr><td class="col-actions"><button class="icon-btn" onclick="Work.openTask('${t.id}')">&#128065;</button></td><td class="cell-main" style="white-space:normal;">${Util.escapeHtml(t.title)}</td><td class="cell-mute">${Util.escapeHtml(t.category)}</td><td class="cell-mute">${Util.fmtDate(t.start_date)}</td><td class="cell-mute">${Util.fmtDate(t.deadline)}</td><td>${workStatusBadge(t)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-state"><div class="t">No tasks in this range</div></div>';
+    }catch(e){ document.getElementById('modalBody').innerHTML = '<div style="color:var(--red,#dc2626);">Could not load: '+Util.escapeHtml(e.message||'error')+'</div>'; }
+  },
+  async loadLoad(){
+    const box = document.getElementById('wk_body'); box.innerHTML = '<div class="card card-pad cell-mute">Loading&hellip;</div>';
+    try{
+      const { data, error } = await sb.rpc('work_staff_load'); if(error) throw error; const rows = data || []; const max = Math.max(1, ...rows.map(r=>Number(r.open_tasks)));
+      box.innerHTML = `<div class="card card-pad"><h3 style="margin:0 0 8px;font-size:14px;">Staff workload right now</h3><div class="hint" style="margin-bottom:8px;">Open = assigned, in progress, blocked or sent back. Leave/attendance is not included here.</div>
+        <div class="table-wrap"><table><thead><tr><th>Staff</th><th>Open tasks</th><th style="width:25%;">Load</th><th>Overdue</th><th>Awaiting my review</th><th>Active contacts</th><th>Calls today</th></tr></thead><tbody>
+        ${rows.map(r=>`<tr><td><b>${Util.escapeHtml(r.staff_name||'—')}</b></td><td>${r.open_tasks}</td><td>${workBar(Number(r.open_tasks)/max*100,'#2563eb')}</td><td style="${Number(r.overdue)?'color:var(--red,#dc2626);font-weight:700;':''}">${r.overdue}</td><td>${r.awaiting_review}</td><td>${r.active_contacts}</td><td>${r.calls_today}</td></tr>`).join('')}</tbody></table></div></div>`;
+    }catch(e){ box.innerHTML = '<div class="card card-pad" style="color:var(--red,#dc2626);">Could not load: '+Util.escapeHtml(e.message||'error')+'</div>'; }
+  },
+
+  /* end-of-day report */
+  dayReportPrompt(){
+    UI.openModal('End-of-day report', `<div class="form-row"><div class="field"><label>Staff</label><select id="dr_staff">${this.staff.map(s=>`<option value="${s.id}">${Util.escapeHtml(s.name||s.username)}</option>`).join('')}</select></div><div class="field"><label>Date</label><input type="date" id="dr_date" value="${callIstToday()}"></div></div>`,
+      `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="Work.dayReport(document.getElementById('dr_staff').value, document.getElementById('dr_date').value)">Show report</button>`);
+  },
+  async dayReport(staffId, date){
+    UI.openModal('End-of-day report', '<div class="cell-mute">Loading&hellip;</div>', '<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>', true);
+    try{
+      const { data: r, error } = await sb.rpc('work_day_report', { p_date:date||null, p_staff:staffId||null }); if(error) throw error;
+      const me = r.staff_name === (Auth.session&&Auth.session.name); const nm = r.staff_name || '—';
+      const visits = (Store.data.visits||[]).filter(v=>v.staff===nm && v.status==='Completed' && (v.endAt ? new Date(v.endAt).toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'}) : '')===r.date).length;
+      const lines = [`End-of-day report — ${nm} — ${r.date}`, `Tasks assigned today: ${r.tasks_assigned}`, `Tasks submitted: ${r.tasks_submitted}`, `Tasks approved: ${r.tasks_approved}`, `Open tasks: ${r.tasks_pending} (overdue: ${r.tasks_overdue})`,
+        `Calls logged: ${r.calls} (unique contacts ${r.unique_contacts}, connected ${r.connected}, interested ${r.interested})`, `Leads created: ${r.leads_created}`, `Field visits completed: ${visits}`];
+      (r.delayed||[]).forEach(d=>lines.push(`Delayed: ${d.task_no} ${d.title} (due ${d.deadline||'—'}, ${d.status})${d.reason?' — '+d.reason:''}`));
+      this._reportText = lines.join('\n');
+      document.getElementById('modalBody').innerHTML = `<h3 style="margin:0 0 10px;font-size:15px;">${Util.escapeHtml(nm)} &middot; ${Util.fmtDate(r.date)}</h3>
+        ${dashboardCardsHTML('Tasks', [{label:'Assigned today',value:r.tasks_assigned},{label:'Submitted',value:r.tasks_submitted,color:'#7c3aed'},{label:'Approved',value:r.tasks_approved,color:'var(--green,#16a34a)'},{label:'Open now',value:r.tasks_pending},{label:'Overdue',value:r.tasks_overdue,color:'var(--red,#dc2626)'}])}
+        ${dashboardCardsHTML('Activity', [{label:'Calls',value:r.calls},{label:'Unique contacts',value:r.unique_contacts},{label:'Connected',value:r.connected,color:'var(--blue,#2563eb)'},{label:'Interested',value:r.interested,color:'var(--green,#16a34a)'},{label:'Leads created',value:r.leads_created},{label:'Visits completed',value:visits}])}
+        <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:6px 0;">Delayed / blocked work</h4>
+        ${(r.delayed||[]).length?`<div class="table-wrap"><table><thead><tr><th>Task</th><th>Due</th><th>Status</th><th>Reason</th></tr></thead><tbody>${r.delayed.map(d=>`<tr><td>${Util.escapeHtml(d.task_no+' '+d.title)}</td><td class="cell-mute">${Util.fmtDate(d.deadline)}</td><td>${Util.escapeHtml(d.status)}</td><td style="white-space:normal;">${Util.escapeHtml(d.reason||'—')}</td></tr>`).join('')}</tbody></table></div>`:'<div class="cell-mute">Nothing delayed.</div>'}
+        <div class="hint" style="margin-top:8px;">Visits come from the Field module (matched by staff name).</div>`;
+      document.getElementById('modalFoot').innerHTML = `<button class="btn btn-outline" onclick="UI.closeModal()">Close</button><button class="btn btn-primary" onclick="Work.copyReport()">Copy as text</button>`;
+    }catch(e){ document.getElementById('modalBody').innerHTML = '<div style="color:var(--red,#dc2626);">Could not build report: '+Util.escapeHtml(e.message||'error')+'</div>'; }
+  },
+  copyReport(){ try{ navigator.clipboard.writeText(this._reportText||''); UI.toast('Report copied'); }catch(e){ UI.toast('Copy failed'); } },
+
+  /* ---------------------------- staff: My Work ---------------------------- */
+  async renderMy(quiet){
+    const M = this.M;
+    if(!quiet){ document.getElementById('content').innerHTML = '<div class="card card-pad cell-mute">Loading your work&hellip;</div>'; }
+    if(this.genDay !== callIstToday()) await this.generate(false);
+    try{
+      const uid = Auth.session.id, today = callIstToday();
+      const since = callIstStartIso(new Date(Date.now()-30*86400000).toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'}));
+      const [tr, ap, nr, sr] = await Promise.all([
+        sb.from('work_tasks').select('*').eq('assigned_to', uid).in('status', ['Assigned','In Progress','Blocked','Submitted','Rejected']).order('deadline',{ascending:true,nullsFirst:false}).limit(500),
+        sb.from('work_tasks').select('*').eq('assigned_to', uid).eq('status','Approved').gte('approved_at', since).order('approved_at',{ascending:false}).limit(200),
+        sb.from('work_notifications').select('*').eq('user_id', uid).is('read_at', null).order('created_at',{ascending:false}).limit(30),
+        sb.rpc('my_calling_stats') ]);
+      if(ap.error) throw ap.error;
+      if(tr.error) throw tr.error; if(nr.error) throw nr.error;
+      M.tasks = (tr.data || []).concat(ap.data || []); M.notifs = nr.data || []; const cs = (sr.data && sr.data[0]) || null;
+      const T = M.tasks, open = T.filter(t=>WORK_OPEN.includes(t.status));
+      const me = Field.me(); const myVisits = (Store.data.visits||[]).filter(v=>v.staff===me && (v.status==='Planned'||v.status==='Started') && (v.plannedDate===today || (v.startAt||'').slice(0,10)===today)).length;
+      const tgt = cs && cs.daily_target;
+      document.getElementById('content').innerHTML = `
+        ${dashboardCardsHTML('My work today', [
+          {label:"Today's tasks", value:open.filter(t=>t.start_date<=today && (!t.deadline||t.deadline>=today)).length},
+          {label:'Overdue', value:open.filter(workIsOverdue).length, color:'var(--red,#dc2626)', onclick:"Work.M.filter='overdue';Work.renderMy(true)"},
+          {label:'In progress', value:T.filter(t=>t.status==='In Progress').length, color:'var(--blue,#2563eb)'},
+          {label:'Blocked', value:T.filter(t=>t.status==='Blocked').length, color:'var(--amber,#d97706)'},
+          {label:'Submitted', value:T.filter(t=>t.status==='Submitted').length, color:'#7c3aed', onclick:"Work.M.filter='submitted';Work.renderMy(true)"},
+          {label:'Sent back (rework)', value:T.filter(t=>t.status==='Rejected').length, color:'var(--red,#dc2626)'},
+          {label:'Approved (30 days)', value:T.filter(t=>t.status==='Approved').length, color:'var(--green,#16a34a)', onclick:"Work.M.filter='approved';Work.renderMy(true)"}])}
+        ${cs?dashboardCardsHTML('My calling & follow-ups <button class="btn btn-outline btn-sm" style="margin-left:8px;" onclick="go(\'mycalls\')">Open My Calling List</button>', [
+          {label:'Contacts assigned', value:Number(cs.active_assignments)||0}, {label:'Calls today', value:(Number(cs.calls)||0)+(tgt?' / '+tgt:''), color: tgt && Number(cs.calls)>=tgt ? 'var(--green,#16a34a)' : undefined},
+          {label:'Connected', value:Number(cs.connected)||0, color:'var(--blue,#2563eb)'}, {label:'Interested', value:Number(cs.interested)||0, color:'var(--green,#16a34a)'},
+          {label:'Follow-ups due today', value:Number(cs.followups_due_today)||0, color:'var(--amber,#d97706)', onclick:"go('mycalls')"}, {label:'Follow-ups overdue', value:Number(cs.followups_overdue)||0, color:'var(--red,#dc2626)', onclick:"go('mycalls')"},
+          {label:'Field visits today', value:myVisits, onclick:"go('visits')"}]):''}
+        ${M.notifs.length?`<div class="card card-pad" style="margin-bottom:16px;border-left:4px solid var(--orange,#EB5A28);"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><h3 style="margin:0;font-size:14px;">New for you (${M.notifs.length})</h3><button class="btn btn-outline btn-sm" onclick="Work.readAll()">Mark all read</button></div>
+          ${M.notifs.map(n=>`<div style="padding:6px 0;border-top:1px solid var(--border,#e5e7eb);font-size:13px;cursor:${n.task_id?'pointer':'default'};" ${n.task_id?`onclick="Work.openTask('${n.task_id}')"`:''}>${Util.escapeHtml(n.message)} <span class="cell-mute" style="font-size:11px;">${callFmt(n.created_at)}</span></div>`).join('')}</div>`:''}
+        <div class="toolbar" style="flex-wrap:wrap;">${[['active','Active'],['overdue','Overdue'],['submitted','Submitted'],['approved','Approved'],['all','All']].map(f=>`<button class="btn ${M.filter===f[0]?'btn-primary':'btn-outline'} btn-sm" onclick="Work.M.filter='${f[0]}';Work.renderMy(true)">${f[1]}</button>`).join('')}
+          <div class="toolbar-spacer"></div><button class="btn btn-outline btn-sm" onclick="Work.dayReport(null,null)">&#128203; My end-of-day report</button></div>
+        <div class="card"><div class="table-wrap" id="mw_list"></div></div>`;
+      this.paintMyList();
+    }catch(e){ document.getElementById('content').innerHTML = `<div class="empty-state"><div class="ic">&#9888;</div><div class="t">Could not load My Work</div><div class="d">${Util.escapeHtml(e.message||'error')}</div><button class="btn btn-primary btn-sm" onclick="Work.renderMy()">Retry</button></div>`; }
+    this.refreshBadge();
+  },
+  paintMyList(){
+    const M = this.M, f = M.filter; let list = M.tasks.slice();
+    if(f==='active') list = list.filter(t=>WORK_OPEN.includes(t.status)); else if(f==='overdue') list = list.filter(workIsOverdue); else if(f==='submitted') list = list.filter(t=>t.status==='Submitted'); else if(f==='approved') list = list.filter(t=>t.status==='Approved');
+    const rank = {Urgent:0,High:1,Medium:2,Low:3}; list.sort((a,b)=>(rank[a.priority]-rank[b.priority]) || String(a.deadline||'9999').localeCompare(String(b.deadline||'9999')));
+    document.getElementById('mw_list').innerHTML = list.length ? `<table><thead><tr><th class="col-actions">Actions</th><th>Task</th><th>Category</th><th>Priority</th><th>Deadline</th><th>Progress</th><th>Status</th></tr></thead><tbody>
+      ${list.map(t=>`<tr><td class="col-actions"><div class="row-action-btns"><button class="icon-btn" title="Open" onclick="Work.openTask('${t.id}')">&#128065;</button>${['Assigned','Rejected'].includes(t.status)?`<button class="btn btn-primary btn-sm" onclick="Work.openTask('${t.id}');setTimeout(()=>Work.doStart('${t.id}'),250)">Start</button>`:''}</div></td>
+        <td class="cell-main" style="white-space:normal;max-width:280px;">${Util.escapeHtml(t.title)}<div class="cell-mute mono" style="font-size:11px;">${Util.escapeHtml(t.task_no)}${t.target_count!=null?' · target '+t.target_count:''}${t.status==='Rejected'&&t.review_remarks?' · <span style="color:var(--red,#dc2626);">'+Util.escapeHtml(t.review_remarks)+'</span>':''}</div></td>
+        <td class="cell-mute">${Util.escapeHtml(t.category)}</td><td>${workPrioBadge(t.priority)}</td><td class="cell-mute">${Util.fmtDate(t.deadline)}</td><td style="min-width:90px;">${workBar(t.progress)}<div class="cell-mute" style="font-size:11px;">${t.progress}%</div></td><td>${workStatusBadge(t)}</td></tr>`).join('')}</tbody></table>`
+      : `<div class="empty-state"><div class="ic">&#9989;</div><div class="t">${f==='active'?'No active tasks — you are all caught up':'Nothing here'}</div></div>`;
+  },
+  async readAll(){
+    try{ const { error } = await sb.rpc('work_notifications_read', { p_ids:null }); if(error) throw error; this.renderMy(true); }catch(e){ callErr('Could not update', e); }
+  }
+};
+Views.workmgmt = ()=>Work.renderAdmin();
+Views.mywork = ()=>Work.renderMy();
+
+/* =====================================================================
+   COMPANY DOCUMENT VAULT + BID PACK COMPILER
+   Vault: real Supabase table company_documents + PRIVATE storage bucket
+   'company-vault' (Admin uploads/replaces/deletes; signed-in staff read).
+   BidPack: merges selected vault PDFs/images + generated Bid Documents
+   (BidDocs) for one bid into a single numbered PDF using pdf-lib.
+   Nothing is uploaded to GeM / e-Tender portals automatically.
+===================================================================== */
+const VAULT_MAX_BYTES = 10 * 1024 * 1024;
+function vaultTypes(){ return DEFAULT_BID_CHECKLIST.concat(['Other']); }
+function vaultSniff(u8){
+  if(u8.length > 4 && u8[0]===0x25 && u8[1]===0x50 && u8[2]===0x44 && u8[3]===0x46) return 'application/pdf';
+  if(u8.length > 3 && u8[0]===0xFF && u8[1]===0xD8 && u8[2]===0xFF) return 'image/jpeg';
+  if(u8.length > 8 && u8[0]===0x89 && u8[1]===0x50 && u8[2]===0x4E && u8[3]===0x47) return 'image/png';
+  return null;
+}
+function vaultSize(n){ n = Number(n)||0; return n >= 1048576 ? (n/1048576).toFixed(1)+' MB' : Math.max(1,Math.round(n/1024))+' KB'; }
+function vaultExpiry(d){
+  if(!d || !d.expiry_date) return {cls:'', txt:'', days:null};
+  const days = Math.round((new Date(d.expiry_date+'T00:00:00') - new Date(Util.todayISO()+'T00:00:00'))/86400000);
+  if(days < 0) return {cls:'red', txt:'Expired '+Util.fmtDate(d.expiry_date), days};
+  if(days <= 30) return {cls:'amber', txt:'Expires in '+days+'d', days};
+  return {cls:'', txt:'Valid to '+Util.fmtDate(d.expiry_date), days};
+}
+function vaultErr(msg, e){ console.error(msg, e); UI.toast(msg+': '+((e && e.message) || 'unknown error'), 5000); }
+
+const Vault = {
+  list: [], loaded: false, busy: false,
+  async load(force){
+    if(this.loaded && !force) return this.list;
+    const { data, error } = await sb.from('company_documents').select('*').eq('active', true).order('doc_type').order('name');
+    if(error) throw error;
+    this.list = data || []; this.loaded = true; return this.list;
+  },
+  async mount(){
+    const box = document.getElementById('vaultCard'); if(!box) return;
+    box.innerHTML = '<div class="card card-pad" style="max-width:720px;margin-top:16px;"><h3 style="margin:0 0 4px;font-size:14px;">Company Document Vault</h3><div class="hint">Loading...</div></div>';
+    try{ await this.load(true); this.paint(); }
+    catch(e){ box.innerHTML = '<div class="card card-pad" style="max-width:720px;margin-top:16px;"><h3 style="margin:0 0 4px;font-size:14px;">Company Document Vault</h3><div class="hint" style="color:var(--red,#dc2626);">Could not load the vault: '+Util.escapeHtml(e.message||'error')+'. Check that the vault migration (006) has been applied.</div></div>'; }
+  },
+  paint(){
+    const box = document.getElementById('vaultCard'); if(!box) return;
+    const rows = this.list;
+    box.innerHTML = `<div class="card card-pad" style="max-width:720px;margin-top:16px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;"><h3 style="margin:0;font-size:14px;">Company Document Vault</h3><button class="btn btn-primary btn-sm" onclick="Vault.openForm()">&#65291; Add document</button></div>
+      <div class="hint" style="margin:4px 0 10px;">Static certificates (PAN, GST, UDYAM, Turnover, EMD...) stored once and reused when you compile a bid pack. Stored in a private bucket; only Admin can add, replace or delete. PDF, JPG or PNG, max 10 MB each.</div>
+      ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Document</th><th>Type</th><th>Size</th><th>Validity</th><th></th></tr></thead><tbody>${rows.map(d=>{ const x=vaultExpiry(d); return `<tr>
+        <td class="cell-main">${Util.escapeHtml(d.name)}<div class="cell-mute" style="font-size:11px;">${Util.escapeHtml(d.file_name||'')}</div></td>
+        <td>${Util.escapeHtml(d.doc_type)}</td><td>${vaultSize(d.size_bytes)}</td>
+        <td>${x.txt?`<span style="font-size:12px;color:${x.cls==='red'?'var(--red,#dc2626)':x.cls==='amber'?'var(--amber,#d97706)':'inherit'};">${Util.escapeHtml(x.txt)}</span>`:'<span class="cell-mute">—</span>'}</td>
+        <td class="col-actions"><button class="icon-btn" title="Open" onclick="Vault.open('${d.id}')">&#128065;</button><button class="icon-btn" title="Edit / replace file" onclick="Vault.openForm('${d.id}')">&#9998;</button><button class="icon-btn" title="Delete" onclick="Vault.remove('${d.id}')">&#128465;</button></td></tr>`; }).join('')}</tbody></table></div>`
+        : '<div class="hint">No documents yet. Add your PAN, GST, UDYAM and other certificates.</div>'}
+    </div>`;
+  },
+  openForm(id){
+    const d = id ? this.list.find(x=>x.id===id) : null; this._edit = d || null;
+    UI.openModal(d ? 'Edit vault document' : 'Add vault document', `
+      <div class="field"><label>Document name *</label><input id="vd_name" autocomplete="off" value="${Util.escapeHtml(d?d.name:'')}" placeholder="e.g. PAN Card"></div>
+      <div class="form-row">
+        <div class="field"><label>Type (matches bid checklist items)</label><select id="vd_type">${vaultTypes().map(t=>`<option ${d&&d.doc_type===t?'selected':''}>${Util.escapeHtml(t)}</option>`).join('')}</select></div>
+        <div class="field"><label>Valid until (optional)</label><input id="vd_exp" type="date" value="${d&&d.expiry_date?d.expiry_date:''}"></div>
+      </div>
+      <div class="field"><label>${d?'Replace file (optional)':'File *'}</label><input id="vd_file" type="file" accept="application/pdf,image/jpeg,image/png">${d?`<div class="hint">Current: ${Util.escapeHtml(d.file_name||'')} (${vaultSize(d.size_bytes)})</div>`:''}</div>
+      <div class="field"><label>Notes</label><input id="vd_notes" autocomplete="off" value="${Util.escapeHtml(d&&d.notes||'')}"></div>`,
+      `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" id="vd_save" onclick="Vault.save()">Save</button>`);
+  },
+  async save(){
+    if(this.busy) return;
+    if(!Auth.isAdmin()){ UI.toast('Only Admin can change the vault'); return; }
+    const d = this._edit, name = (document.getElementById('vd_name').value||'').trim(), type = document.getElementById('vd_type').value;
+    const exp = document.getElementById('vd_exp').value || null, notes = (document.getElementById('vd_notes').value||'').trim() || null;
+    const f = document.getElementById('vd_file').files[0];
+    if(!name){ UI.toast('Enter a document name'); return; }
+    if(!d && !f){ UI.toast('Choose a file'); return; }
+    if(f && f.size > VAULT_MAX_BYTES){ UI.toast('File is larger than 10 MB'); return; }
+    if(f && f.size === 0){ UI.toast('File is empty'); return; }
+    const btn = document.getElementById('vd_save'); this.busy = true; if(btn){ btn.disabled = true; btn.textContent = 'Saving...'; }
+    let newPath = null;
+    try{
+      const patch = { name, doc_type: type, expiry_date: exp, notes };
+      if(f){
+        const u8 = new Uint8Array(await f.arrayBuffer()); const mime = vaultSniff(u8);
+        if(!mime) throw new Error('Not a valid PDF, JPG or PNG file');
+        newPath = 'vault/' + (crypto.randomUUID ? crypto.randomUUID() : Date.now()+'-'+Math.random().toString(36).slice(2)) + '-' + f.name.replace(/[^a-z0-9._-]+/gi,'_').slice(-80);
+        const up = await sb.storage.from('company-vault').upload(newPath, u8, { contentType: mime, upsert: false });
+        if(up.error) throw up.error;
+        Object.assign(patch, { file_path:newPath, file_name:f.name, mime, size_bytes:f.size });
+      }
+      if(d){
+        const r = await sb.from('company_documents').update(patch).eq('id', d.id); if(r.error) throw r.error;
+        if(newPath && d.file_path){ try{ await sb.storage.from('company-vault').remove([d.file_path]); }catch(e){ console.warn('old file not removed', e); } }
+        await Activity.log('Vault document updated', name);
+      } else {
+        const r = await sb.from('company_documents').insert(patch); if(r.error) throw r.error;
+        await Activity.log('Vault document added', name);
+      }
+      UI.closeModal(); UI.toast('Vault saved'); await this.load(true); this.paint();
+    }catch(e){
+      if(newPath){ try{ await sb.storage.from('company-vault').remove([newPath]); }catch(_){} }
+      vaultErr('Not saved', e);
+      if(btn){ btn.disabled = false; btn.textContent = 'Save'; }
+    }
+    this.busy = false;
+  },
+  async fetchBytes(d){
+    const { data, error } = await sb.storage.from('company-vault').download(d.file_path);
+    if(error) throw error; return new Uint8Array(await data.arrayBuffer());
+  },
+  async open(id){
+    const d = this.list.find(x=>x.id===id); if(!d) return;
+    try{
+      const u8 = await this.fetchBytes(d); const url = URL.createObjectURL(new Blob([u8], { type:d.mime }));
+      if(!window.open(url, '_blank')) UI.toast('Allow pop-ups to open the file');
+      setTimeout(()=>URL.revokeObjectURL(url), 60000);
+    }catch(e){ vaultErr('Could not open', e); }
+  },
+  async remove(id){
+    if(!Auth.isAdmin()) return; const d = this.list.find(x=>x.id===id); if(!d) return;
+    if(!confirm('Delete "'+d.name+'" from the vault? The stored file will be removed. Existing downloaded packs are not affected.')) return;
+    try{
+      const r = await sb.from('company_documents').delete().eq('id', id); if(r.error) throw r.error;
+      try{ await sb.storage.from('company-vault').remove([d.file_path]); }catch(e){ console.warn('file not removed', e); }
+      await Activity.log('Vault document deleted', d.name); UI.toast('Deleted'); await this.load(true); this.paint();
+    }catch(e){ vaultErr('Not deleted', e); }
+  }
+};
+
+const BidPack = {
+  S: null,
+  pdfSafe(t){ return String(t==null?'':t).replace(/[^\x20-\x7E\xA0-\xFF]/g,'?'); },
+  async open(bidId){
+    const b = Store.data.bids.find(x=>x.id===bidId); if(!b) return;
+    UI.openModal('Compile Bid Pack — '+(b.bidNumber||b.id), '<div id="bpBody"><div class="hint">Loading vault...</div></div>', '<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>', true);
+    let vault = [];
+    try{ vault = await Vault.load(true); }catch(e){ document.getElementById('bpBody').innerHTML = '<div class="hint" style="color:var(--red,#dc2626);">Could not load the Company Document Vault: '+Util.escapeHtml(e.message||'error')+'</div>'; return; }
+    const rows = [], missing = [], used = new Set();
+    const bidDocs = (Store.data.bidDocs||[]).filter(d=>d.bid && ((d.bid.bidId && d.bid.bidId===b.id) || (!d.bid.bidId && b.bidNumber && d.bid.bidNumber===b.bidNumber)));
+    const roots = {}; bidDocs.forEach(d=>{ const r = d.parentId || d.id; const cur = roots[r]; if(!cur || (Number(d.revision)||0) > (Number(cur.revision)||0)) roots[r] = d; });
+    bidDocs.forEach(d=>{
+      const latest = roots[d.parentId||d.id] === d, tpl = (BIDDOC_TEMPLATES[d.templateKey]||{});
+      rows.push({ kind:'doc', ref:d.id, label:(tpl.label||d.templateKey||'Bid document')+(d.revision?' (rev '+d.revision+')':''), sub:d.docNumber||'', tag:d.status, warn: d.status!=='Completed' ? 'Draft - not marked Completed' : (latest?'':'older revision'), include: latest && d.status==='Completed' });
+    });
+    (b.checklist||[]).forEach(c=>{
+      const nm = String(c.name||c.text||'').trim(); if(!nm) return;
+      const hits = vault.filter(v=>String(v.doc_type).toLowerCase()===nm.toLowerCase());
+      if(!hits.length){ missing.push(nm); return; }
+      hits.forEach((v,i)=>{ used.add(v.id); const ex = vaultExpiry(v); rows.push({ kind:'vault', ref:v.id, label:v.name, sub:nm, tag:'Vault', warn: ex.cls==='red'?ex.txt:(ex.cls==='amber'?ex.txt:''), expired: ex.cls==='red', include: i===0 }); });
+    });
+    vault.filter(v=>!used.has(v.id)).forEach(v=>{ const ex = vaultExpiry(v); rows.push({ kind:'vault', ref:v.id, label:v.name, sub:v.doc_type, tag:'Vault', warn: ex.cls==='red'||ex.cls==='amber'?ex.txt:'', expired: ex.cls==='red', include:false }); });
+    this.S = { bidId, bid:b, rows, missing, cover:true, stamp:true, warnMB:10, result:null, busy:false };
+    this.paint();
+  },
+  paint(){
+    const S = this.S, box = document.getElementById('bpBody'); if(!S || !box) return;
+    const E = Util.escapeHtml, inc = S.rows.filter(r=>r.include).length;
+    box.innerHTML = `
+      <div class="hint" style="margin-bottom:10px;">Tick the documents to merge, then use the arrows to set their order. Generated letters come from Bid Documents linked to this bid; certificates come from the Company Document Vault (Settings).</div>
+      ${S.missing.length?`<div class="card card-pad" style="border-left:4px solid var(--amber,#d97706);margin-bottom:10px;font-size:13px;"><b>Checklist items with no vault document:</b> ${S.missing.map(E).join(', ')}</div>`:''}
+      ${S.rows.length?`<div class="table-wrap"><table><thead><tr><th style="width:34px;"></th><th>Document</th><th>Source</th><th>Note</th><th style="width:70px;">Order</th></tr></thead><tbody>${S.rows.map((r,i)=>`<tr>
+        <td><input type="checkbox" ${r.include?'checked':''} onchange="BidPack.tog(${i})"></td>
+        <td class="cell-main">${E(r.label)}<div class="cell-mute" style="font-size:11px;">${E(r.sub||'')}</div></td>
+        <td><span class="badge">${E(r.kind==='doc'?'Generated':'Vault')}</span></td>
+        <td style="font-size:12px;${r.expired||/Draft/.test(r.warn||'')?'color:var(--red,#dc2626);':'color:var(--amber,#d97706);'}">${E(r.warn||'')}</td>
+        <td><button class="icon-btn" ${i===0?'disabled':''} onclick="BidPack.move(${i},-1)" title="Move up">&#8593;</button><button class="icon-btn" ${i===S.rows.length-1?'disabled':''} onclick="BidPack.move(${i},1)" title="Move down">&#8595;</button></td></tr>`).join('')}</tbody></table></div>`
+      : '<div class="empty-state"><div class="t">Nothing to merge yet</div><div class="hint">Add certificates in Settings &rarr; Company Document Vault and/or create Bid Documents linked to this bid.</div></div>'}
+      <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin:12px 0;font-size:13px;">
+        <label class="chk"><input type="checkbox" ${S.cover?'checked':''} onchange="BidPack.S.cover=this.checked"> Index / cover page</label>
+        <label class="chk"><input type="checkbox" ${S.stamp?'checked':''} onchange="BidPack.S.stamp=this.checked"> Number every page ("Page X of N")</label>
+        <label>Warn above <input type="number" min="1" step="1" value="${S.warnMB}" style="width:60px;" onchange="BidPack.S.warnMB=Math.max(1,Number(this.value)||10)"> MB</label>
+      </div>
+      <button class="btn btn-primary" id="bpGo" ${S.busy||!inc?'disabled':''} onclick="BidPack.compile()">${S.busy?'Compiling...':'&#128230; Compile '+inc+' document'+(inc===1?'':'s')+' into one PDF'}</button>
+      <div id="bpResult" style="margin-top:12px;">${this.resultHTML()}</div>`;
+  },
+  resultHTML(){
+    const R = this.S && this.S.result; if(!R) return '';
+    const E = Util.escapeHtml, over = R.bytes > this.S.warnMB*1048576;
+    return `<div class="card card-pad" style="border-left:4px solid ${R.skipped.length||over?'var(--amber,#d97706)':'var(--green,#16a34a)'};">
+      <b>${E(R.name)}</b> &middot; ${R.pages} pages &middot; ${vaultSize(R.bytes)}
+      ${over?`<div style="color:var(--amber,#d97706);font-size:13px;margin-top:4px;">Larger than your ${this.S.warnMB} MB warning level. Portals limit file sizes - check the limit on the bid/tender page and compress or split if needed.</div>`:''}
+      ${R.skipped.length?`<div style="color:var(--red,#dc2626);font-size:13px;margin-top:4px;"><b>NOT included (could not be read):</b> ${R.skipped.map(s=>E(s.label+' - '+s.err)).join('; ')}</div>`:''}
+      ${R.unstamped?`<div class="hint" style="margin-top:4px;">${R.unstamped} rotated page(s) were left without a page number.</div>`:''}
+      <div style="margin-top:8px;display:flex;gap:8px;"><button class="btn btn-primary btn-sm" onclick="BidPack.download()">&#11015; Download</button><button class="btn btn-outline btn-sm" onclick="BidPack.openPdf()">&#128065; Open</button></div></div>`;
+  },
+  tog(i){ this.S.rows[i].include = !this.S.rows[i].include; this.S.result = null; this.paint(); },
+  move(i, d){ const r = this.S.rows, j = i + d; if(j < 0 || j >= r.length) return; const t = r[i]; r[i] = r[j]; r[j] = t; this.S.result = null; this.paint(); },
+  async rowBytes(r){
+    if(r.kind === 'vault'){ const v = Vault.list.find(x=>x.id===r.ref); if(!v) throw new Error('not found in vault'); return { bytes: await Vault.fetchBytes(v), mime: v.mime }; }
+    const rec = (Store.data.bidDocs||[]).find(x=>x.id===r.ref); if(!rec) throw new Error('document not found');
+    if(!BidDocs.libsReady()) throw new Error('PDF library not loaded');
+    const kept = BidDocs.draft;
+    try{ BidDocs.draft = JSON.parse(JSON.stringify(rec)); return { bytes: new Uint8Array(BidDocs.buildPDF().output('arraybuffer')), mime:'application/pdf' }; }
+    finally{ BidDocs.draft = kept; }
+  },
+  async compile(){
+    const S = this.S; if(!S || S.busy) return;
+    const sel = S.rows.filter(r=>r.include); if(!sel.length){ UI.toast('Select at least one document'); return; }
+    if(!window.PDFLib){ UI.toast('PDF merge library is not loaded. Check your internet connection and reload.', 5000); return; }
+    const exp = sel.filter(r=>r.expired).map(r=>r.label);
+    if(exp.length && !confirm('These selected documents are past their validity date:\n\n'+exp.join('\n')+'\n\nInclude them anyway?')) return;
+    const { PDFDocument, StandardFonts, rgb } = window.PDFLib;
+    S.busy = true; S.result = null; this.paint();
+    try{
+      const loaded = [], skipped = [];
+      for(const r of sel){
+        try{
+          const { bytes, mime } = await this.rowBytes(r);
+          let pdf;
+          if(mime === 'application/pdf'){ pdf = await PDFDocument.load(bytes); }
+          else {
+            pdf = await PDFDocument.create(); const img = mime === 'image/png' ? await pdf.embedPng(bytes) : await pdf.embedJpg(bytes);
+            const W = 595.28, H = 841.89, M = 28, sc = Math.min((W-2*M)/img.width, (H-2*M)/img.height, 1), w = img.width*sc, h = img.height*sc;
+            const pg = pdf.addPage([W, H]); pg.drawImage(img, { x:(W-w)/2, y:(H-h)/2, width:w, height:h });
+          }
+          if(pdf.getPageCount() < 1) throw new Error('no pages');
+          loaded.push({ r, pdf, n: pdf.getPageCount() });
+        }catch(e){ console.warn('bidpack skip', r.label, e); const m = e && e.message || ''; skipped.push({ label:r.label, err: /encrypt/i.test(m) ? 'password-protected PDF' : (r.kind==='vault' && /not found|Object/i.test(m) ? 'file missing in storage' : (r.kind==='doc' ? m||'could not be generated' : 'damaged or unsupported file')) }); }
+      }
+      if(!loaded.length) throw new Error('None of the selected documents could be read');
+      const out = await PDFDocument.create(), font = await out.embedFont(StandardFonts.Helvetica), bold = await out.embedFont(StandardFonts.HelveticaBold);
+      const FIRST = 24, NEXT = 34, coverPages = S.cover ? (loaded.length <= FIRST ? 1 : 1 + Math.ceil((loaded.length-FIRST)/NEXT)) : 0;
+      let start = coverPages + 1; loaded.forEach(x=>{ x.from = start; start += x.n; });
+      const total = start - 1, bidNo = this.pdfSafe(S.bid.bidNumber || S.bid.id);
+      if(S.cover){
+        let page, y, idx = 0;
+        for(let p = 0; p < coverPages; p++){
+          page = out.addPage([595.28, 841.89]); y = 790;
+          if(p === 0){
+            page.drawText('BID DOCUMENT PACK', { x:50, y, size:18, font:bold, color:rgb(0.04,0.08,0.14) }); y -= 24;
+            page.drawText(this.pdfSafe(((Store.data.settings||{}).companyName)||'Jays Trading and Business Solution'), { x:50, y, size:11, font, color:rgb(0.3,0.3,0.3) }); y -= 16;
+            page.drawText('Bid / Tender No: '+bidNo, { x:50, y, size:11, font:bold }); y -= 15;
+            this.pdfSafe(S.bid.title||'').match(/.{1,90}(\s|$)/g)?.slice(0,2).forEach(l=>{ page.drawText(l.trim(), { x:50, y, size:10, font }); y -= 13; });
+            page.drawText('Compiled '+new Date().toLocaleDateString('en-IN')+' - '+total+' pages', { x:50, y, size:9, font, color:rgb(0.4,0.4,0.4) }); y -= 24;
+            page.drawText('No.', { x:50, y, size:9, font:bold }); page.drawText('Document', { x:85, y, size:9, font:bold }); page.drawText('Pages', { x:470, y, size:9, font:bold }); y -= 6;
+            page.drawLine({ start:{x:50,y}, end:{x:545,y}, thickness:0.7, color:rgb(0.92,0.35,0.16) }); y -= 16;
+          }
+          const cap = p === 0 ? FIRST : NEXT;
+          for(let k = 0; k < cap && idx < loaded.length; k++, idx++){
+            const x = loaded[idx];
+            page.drawText(String(idx+1), { x:50, y, size:10, font });
+            page.drawText(this.pdfSafe(x.r.label).slice(0,70), { x:85, y, size:10, font });
+            page.drawText(x.n === 1 ? String(x.from) : x.from+'-'+(x.from+x.n-1), { x:470, y, size:10, font }); y -= 22;
+          }
+        }
+      }
+      for(const x of loaded){ const pages = await out.copyPages(x.pdf, x.pdf.getPageIndices()); pages.forEach(pg=>out.addPage(pg)); }
+      let unstamped = 0;
+      if(S.stamp){
+        out.getPages().forEach((pg, i)=>{
+          if(((pg.getRotation().angle % 360) + 360) % 360 !== 0){ unstamped++; return; }
+          const t = bidNo+'  |  Page '+(i+1)+' of '+total, w = font.widthOfTextAtSize(t, 8), { width } = pg.getSize();
+          pg.drawText(t, { x: Math.max(8, width - 24 - w), y: 12, size:8, font, color:rgb(0.35,0.35,0.35) });
+        });
+      }
+      const bytes = await out.save(), name = ('BidPack-'+(S.bid.bidNumber||S.bid.id)+'.pdf').replace(/[^a-z0-9.\-]+/gi,'-');
+      S.blob = new Blob([bytes], { type:'application/pdf' });
+      S.result = { name, pages: total, bytes: bytes.length, skipped, unstamped };
+      S.bid.timeline = S.bid.timeline || [];
+      S.bid.timeline.push({ date:new Date().toISOString(), text:'Bid pack compiled: '+loaded.length+' document(s), '+total+' pages'+(skipped.length?' ('+skipped.length+' skipped)':''), by:(Auth.session&&Auth.session.name)||'System' });
+      try{ await Store.save('bids'); await Activity.log('Bid pack compiled', (S.bid.bidNumber||S.bid.id)+' - '+total+' pages'); }catch(e){ console.warn('pack log', e); }
+    }catch(e){ vaultErr('Could not compile', e); }
+    S.busy = false; this.paint();
+  },
+  download(){
+    const S = this.S; if(!S || !S.blob || !S.result) return;
+    const a = document.createElement('a'); a.href = URL.createObjectURL(S.blob); a.download = S.result.name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href), 30000);
+  },
+  openPdf(){
+    const S = this.S; if(!S || !S.blob) return; const u = URL.createObjectURL(S.blob);
+    if(!window.open(u, '_blank')) UI.toast('Allow pop-ups to open the PDF'); setTimeout(()=>URL.revokeObjectURL(u), 60000);
+  }
+};
+
+/* =====================================================================
+   GeM bid PDF text parser (pure functions, unit-tested against real GeM bid PDFs)
+===================================================================== */
+/* ---- GeM bid PDF text parser (pure functions; input = array of text lines in reading order) ---- */
+const GemParse = {
+  STOP: new Set('a an in of to on is as at by or if no we be it he me my so up us do go the and for are was not but all any can may has had her him his how its our out she too two who why yes you per via nor yet one few off own set'.split(' ')),
+  LABELS: [
+    'Bid End Date/Time','Bid Opening Date/Time','Bid Offer Validity (From End Date)','Ministry/State Name','Department Name','Organisation Name','Office Name',
+    'Contact details of Grievance redressal','Total Quantity','Item Category','Minimum Average Annual Turnover of the bidder (For 3 Years)','OEM Average Turnover (Last 3 Years)',
+    'Years of Past Experience Required for same/similar service','Turnover eligibility criteria','MSE Relaxation for Years of Experience and Turnover',
+    'Startup Relaxation for Years of Experience and Turnover','Document required from seller','Do you want to show documents','Minimum number of bids required',
+    'Number of days for which Bid','Number of Auto Extension count','Past Performance','Bid to RA enabled','Type of Bid','Primary product category','Time allowed for Technical',
+    'Inspection Required','Payment Timelines','Evaluation Method','Arbitration Clause','Mediation Clause','EMD Detail','ePBG Detail','Bid splitting','MSE Purchase Preference',
+    'MII Purchase Preference','Bid Number','Dated','Bid Document','Bid Details','Technical Specifications','Consignees/Reporting Officer'
+  ],
+  rx(label){ return new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g,'\\$&').replace(/\s+/g,'\\s*').replace(/\\\//g,'\\s*\\/\\s*'), 'i'); },
+  cleanTokens(s){
+    // drop any token that contains a non-ASCII character (garbled Hindi) and stray separators
+    return String(s||'').split(/\s+/).filter(t=>t && !/[^\x00-\x7F]/.test(t)).join(' ');
+  },
+  trimJunk(s){ return String(s||'').replace(/(?:\s+[%*()]+)+\s*$/,'').replace(/^[\s\/|:;,\-]+|[\s\/|:;,\-]+$/g,'').replace(/\s+/g,' ').trim(); },
+  iso(dmy){ const m = /(\d{2})-(\d{2})-(\d{4})/.exec(dmy||''); return m ? m[3]+'-'+m[2]+'-'+m[1] : ''; },
+  money(txt){
+    const m = /(\d+(?:\.\d+)?)\s*(Lakh|Crore|Cr)/i.exec(txt||''); if(!m) return {text:'', amount:0};
+    const n = Number(m[1]) * (/^l/i.test(m[2]) ? 100000 : 10000000); return { text: m[1]+' '+(/^l/i.test(m[2])?'Lakh':'Crore'), amount:n };
+  },
+  parse(lines){
+    const out = { warnings:[], found:{} };
+    const rawLines = (lines||[]).map(it=>{ const o = Array.isArray(it) ? {items:it} : (it && it.items ? it : {items:[String(it||'')]}); return { items:o.items.map(x=>String(x==null?'':x)), xEnd:o.xEnd, y:o.y }; });
+    const keep = rawLines.filter(o=>!/^\s*\d+\s*\/\s*\d+\s*$/.test(o.items.join('')));
+    const L = keep.map(o=>o.items.join(''));                                              // natural lines (for ATC text)
+    const S = keep.map(o=>o.items.filter(x=>x.trim() && !/[^\x00-\x7F]/.test(x) && !/^\s*[%*()\[\]|:;]+\s*$/.test(x) && !/^\s*\(\d+\s*$/.test(x)).map(x=>x.trim()).join(' ')).join(' ').replace(/\s+/g,' ');   // flat ASCII-only (items with garbled Hindi dropped)
+    if(!/GEM\/\d{4}\/[A-Z]\/\d+/i.test(S)) { out.notGem = true; return out; }
+    // ---- label slicing: value = text between a label and the next known label ----
+    const pos = [];
+    this.LABELS.forEach(l=>{ const re = new RegExp(this.rx(l).source, 'ig'); let m; while((m = re.exec(S))) pos.push({l, i:m.index, e:m.index+m[0].length}); });
+    pos.sort((a,b)=>a.i-b.i);
+    const val = (label, nth)=>{
+      const re = new RegExp(this.rx(label).source,'ig'); let m, k = 0; const list=[]; while((m=re.exec(S))) list.push(m);
+      const hit = list[nth||0]; if(!hit) return '';
+      const e = hit.index + hit[0].length; const nx = pos.find(p=>p.i >= e && p.i > hit.index); const raw = S.slice(e, nx ? nx.i : Math.min(S.length, e+300));
+      return this.trimJunk(raw);
+    };
+    const set = (k, v)=>{ out[k] = v; if(v!=='' && v!=null && v!==0) out.found[k] = true; };
+    const mNo = /Bid\s*Number\s*:\s*(GEM\/\d{4}\/[A-Z]\/\d+)/i.exec(S) || /(GEM\/\d{4}\/[A-Z]\/\d+)/i.exec(S);
+    set('bidNumber', mNo ? mNo[1].toUpperCase() : '');
+    set('bidType', /\/R\//.test(out.bidNumber||'') ? 'RA (Reverse Auction)' : 'Bid');
+    const dated = /Dated\s*:\s*(\d{2}-\d{2}-\d{4})/i.exec(S); set('publishedDate', dated ? this.iso(dated[1]) : '');
+    const e = /Bid\s*End\s*Date\s*\/\s*Time\s*(\d{2}-\d{2}-\d{4})\s*(\d{2}:\d{2})?/i.exec(S); set('endDate', e ? this.iso(e[1]) : ''); set('endTime', e && e[2] || '');
+    const o = /Bid\s*Opening\s*Date\s*\/\s*Time\s*(\d{2}-\d{2}-\d{4})\s*(\d{2}:\d{2})?/i.exec(S); set('openingDate', o ? this.iso(o[1]) : ''); set('openingTime', o && o[2] || '');
+    const v = /Validity\s*\(\s*From\s*End\s*Date\s*\)\s*(\d+)/i.exec(S); set('offerValidity', v ? Number(v[1]) : 0);
+    set('ministry', val('Ministry/State Name')); set('department', val('Department Name'));
+    set('organisation', val('Organisation Name')); set('office', val('Office Name'));
+    const org = (out.organisation||'').trim(); if(/^(n\/?a|na|none|-)$/i.test(org)){ out.organisation = out.office || ''; out.orgFromOffice = true; }
+    const gr = val('Contact details of Grievance redressal');
+    const hod = /HOD\s*Email\s*id\s*:?\s*([^\s]+@[^\s]+)/i.exec(gr), buy = /Buyer\s*Email\s*id\s*:?\s*([^\s]+@[^\s]+)/i.exec(gr);
+    set('hodEmail', hod ? hod[1] : ''); set('buyerEmail', buy ? buy[1] : '');
+    const q = /(\d[\d,]*)/.exec(val('Total Quantity')); set('quantity', q ? Number(q[1].replace(/,/g,'')) : 0);
+    const catRaw = val('Item Category'); out.itemCategoryRaw = catRaw;
+    out.itemCategories = catRaw.split(/\(\s*Q\d+\s*\)\s*,?/i).map(x=>this.trimJunk(x)).filter(Boolean);
+    if(!out.itemCategories.length && catRaw) out.itemCategories = [catRaw];
+    set('itemCategory', out.itemCategories.join(', '));
+    const t1 = this.money(val('Minimum Average Annual Turnover of the bidder (For 3 Years)')), t2 = this.money(val('OEM Average Turnover (Last 3 Years)'));
+    set('minTurnover', t1.text); out.minTurnoverAmount = t1.amount; set('oemTurnover', t2.text); out.oemTurnoverAmount = t2.amount;
+    const ex = /(\d+)\s*Year/i.exec(val('Years of Past Experience Required for same/similar service')); set('experienceYears', ex ? Number(ex[1]) : 0);
+    const yn = (s)=>{ const m = /^\s*(Yes|No)\b/i.exec(s||''); return m ? (m[1][0].toUpperCase()+m[1].slice(1).toLowerCase()) : ''; };
+    set('mseRelaxation', yn(val('MSE Relaxation for Years of Experience and Turnover'))); set('startupRelaxation', yn(val('Startup Relaxation for Years of Experience and Turnover')));
+    const dm = /Document\s*required\s*from\s*seller\s*([\s\S]*?)(?=\*\s*In case any bidder|Do you want to show documents|Bid\s*Number\s*:)/i.exec(S); const docs = this.trimJunk(dm ? dm[1] : '');
+    set('docsRequired', docs);
+    const pp = /Past\s*Performance\s+(\d+)\s*%/i.exec(S); set('pastPerformancePct', pp ? Number(pp[1]) : 0);
+    set('gemBidType', val('Type of Bid')); set('raEnabled', yn(val('Bid to RA enabled'))); set('primaryCategory', val('Primary product category'));
+    set('evaluationMethod', val('Evaluation Method')); set('paymentTimeline', val('Payment Timelines'));
+    const em = /EMD\s*Detail[\s\S]{0,80}?Required\s*(Yes|No)\b/i.exec(S); set('emdRequired', em ? /yes/i.test(em[1]) : null); if(em) out.found.emdRequired = true;
+    const emAmt = /EMD\s*Amount[^\d]{0,40}([\d,]+(?:\.\d+)?)/i.exec(S); set('emdAmount', emAmt ? Number(emAmt[1].replace(/,/g,'')) : 0);
+    const pb = /ePBG\s*Detail[\s\S]{0,80}?Required\s*(Yes|No)\b/i.exec(S); set('epbgRequired', pb ? /yes/i.test(pb[1]) : null); if(pb) out.found.epbgRequired = true;
+    const pbp = /ePBG\s*Percentage[^\d]{0,30}(\d+(?:\.\d+)?)/i.exec(S); set('epbgPercent', pbp ? Number(pbp[1]) : 0);
+    const ev = /Estimated\s*Bid\s*Value\s*[:\-]?\s*(?:Rs\.?|INR)?\s*([\d,]{4,}(?:\.\d+)?)/i.exec(S); set('estimatedValue', ev ? Number(ev[1].replace(/,/g,'')) : 0);
+    const mp = (name)=>{ const m = new RegExp(name+'\\s*Purchase\\s*Preference(?:\\s*\\/?\\s*'+name+'\\s*Purchase\\s*Preference)?\\s*(Yes|No)\\b','i').exec(S); return m ? (m[1][0].toUpperCase()+m[1].slice(1).toLowerCase()) : ''; };
+    set('msePreference', mp('MSE')); set('miiPreference', mp('MII'));
+
+    // ---- items + consignees ----
+    const items = []; const esc = (x)=>x.replace(/[.*+?^${}()|[\]\\\/]/g,'\\$&').replace(/\s+/g,'\\s*');
+    (out.itemCategories||[]).forEach(c=>{ const m = new RegExp(esc(c)+'\\s*\\(\\s*(\\d[\\d,]*)\\s*([A-Za-z]+)\\s*\\)','i').exec(S); if(m) items.push({name:c, qty:Number(m[1].replace(/,/g,'')), unit:m[2], at:m.index}); });
+    out.items = items.map(({name,qty,unit})=>({name,qty,unit}));
+    if(!out.quantity && items.length) set('quantity', items.reduce((a,x)=>a+x.qty,0));
+    const cons = []; const cre = /Consignees\s*\/\s*Reporting\s*Officer\s*and\s*Quantity/ig; let cm;
+    while((cm = cre.exec(S))){
+      const start = cm.index + cm[0].length; const rest = S.slice(start, start+2500);
+      const hd = /Delivery\s*Days/i.exec(rest); if(!hd) continue;
+      let blk = rest.slice(hd.index + hd[0].length);
+      const cut = [/Special terms and conditions/i, /Technical\s*Specifications/i, /Additional Specification/i, /Buyer Added/i, /Consignees\s*\/\s*Reporting/i, /\(\s*\d[\d,]*\s*[A-Za-z]+\s*\)/]
+        .concat(items.map(it=>new RegExp(esc(it.name),'i'))).map(r=>{ const m = r.exec(blk); return m ? m.index : -1; }).filter(i=>i>=0);
+      if(cut.length) blk = blk.slice(0, Math.min(...cut));
+      blk = blk.trim();
+      const item = [...items].reverse().find(x=>x.at < cm.index);
+      const starts = []; const sre = /(?:^|\s)(\d{1,2})\s+(?=[A-Za-z][^\d,]*?\s+\d{6},)/g; let sm;
+      while((sm = sre.exec(blk))) starts.push(sm.index + (sm[0].startsWith(' ')?1:0));
+      starts.forEach((p,i)=>{ const seg = blk.slice(p, i+1<starts.length ? starts[i+1] : undefined).trim();
+        const rm = /^(\d{1,2})\s+([^\d,]*?)\s+(\d{6}),([\s\S]*)\s(\d{1,7})\s(\d{1,3})$/.exec(seg);
+        if(rm) cons.push({ item: item?item.name:'', officer:this.trimJunk(rm[2]), pincode:rm[3], address:this.trimJunk(rm[3]+','+rm[4]), qty:Number(rm[5]), days:Number(rm[6]) }); });
+    }
+    out.consignees = cons;
+    if(!cons.length) out.warnings.push('Consignee / delivery details were not found');
+
+    // ---- Buyer added ATC (kept as text; the PDF itself is never stored) ----
+    const iS = L.findIndex(x=>/Buyer\s*Added\s*Bid\s*Specific\s*Terms\s*and\s*Conditions/i.test(x));
+    let iE = L.findIndex((x,i)=>i>iS && /\/\s*Disclaimer/i.test(x)); if(iE < 0) iE = L.length;
+    out.atcText = ''; out.atcClauses = []; out.atcGeneric = '';
+    if(iS >= 0){
+      const seg = keep.slice(iS+1, iE).map(o=>({ text:o.items.join('').replace(/[^\x00-\x7F]+/g,' '), xEnd:o.xEnd, y:o.y })).filter(o=>o.text.trim());
+      const gaps = []; for(let i=1;i<seg.length;i++){ if(seg[i].y!=null && seg[i-1].y!=null){ const g = Math.abs(seg[i-1].y - seg[i].y); if(g > 0.5 && g < 60) gaps.push(g); } }
+      gaps.sort((a,b)=>a-b); const med = gaps.length ? gaps[Math.floor(gaps.length*0.1)] : 0;
+      const xs = seg.map(o=>o.xEnd).filter(x=>x!=null).sort((a,b)=>a-b), maxX = xs.length ? xs[Math.floor(xs.length*0.95)] : null;
+      let buf = '', nextNo = 0, prev = null;
+      seg.forEach(o=>{
+        const t = o.text.trim(), trail = /\s$/.test(o.text);
+        const para = prev && med && prev.y!=null && o.y!=null && Math.abs(prev.y - o.y) > med * 1.5;
+        const full = prev && ((maxX!=null && prev.xEnd!=null) ? prev.xEnd >= maxX - 12 : prev.text.replace(/\s+$/,'').length >= 100) && !prev.trail;
+        if(!buf) buf = t;
+        else if(/^Buyer Added text based ATC/i.test(t)){ buf += '\n' + t; nextNo = 1; }
+        else if(/^\d{1,2}\s*\.\s*(Generic|Buyer Added)/i.test(t)) buf += '\n' + t;
+        else if(nextNo && (()=>{ const m = /^(\d{1,2})(?:\s*\.\s*|\s+)\S/.exec(t); return m && Number(m[1]) === nextNo; })()){ buf += '\n' + t; nextNo++; }
+        else if(para) buf += '\n' + t;
+        else { const lastTok = (/([A-Za-z]+)$/.exec(buf) || [])[1] || ''; const nxt = (/^([a-z]+)/.exec(t) || [])[1] || ''; const cut = full && /^[a-z]/.test(t) && ((lastTok && lastTok.length <= 3 && !this.STOP.has(lastTok.toLowerCase())) || (nxt && nxt.length <= 2 && !this.STOP.has(nxt) && /^[a-z]+(?![a-z])/.test(t) && t.length >= 1 && /^[a-z]{1,2}(\W|$)/.test(t))); buf += (cut ? '' : ' ') + t; }
+        prev = { text:o.text, xEnd:o.xEnd, y:o.y, trail };
+      });
+       const rows = buf.split('\n'); const k = rows.findIndex(r=>/Buyer Added text based ATC/i.test(r));
+      const head = (k >= 0 ? rows.slice(0,k) : rows).filter(r=>!/^\d{1,2}\s*\.\s*(Generic|Buyer Added Bid Specific ATC)\s*$/i.test(r));
+      out.atcGeneric = head.join('\n').trim();
+      const after = (k >= 0 ? rows.slice(k+1) : []).filter(r=>!/^Additional Terms and Conditions\s*$/i.test(r.trim()));
+      const numbered = after.length && (m1=>m1 && Number(m1[1])===1)(/^(\d{1,2})(?:\s*\.\s*|\s+)\S/.exec(after[0].trim()));
+      after.forEach(r=>{ const m = /^(\d{1,2})(?:\s*\.\s*|\s+)(\S[\s\S]*)$/.exec(r.trim());
+        if(numbered){ if(m && Number(m[1]) === out.atcClauses.length+1) out.atcClauses.push(m[2].trim()); else if(r.trim() && out.atcClauses.length) out.atcClauses[out.atcClauses.length-1] += ' ' + r.trim(); }
+        else if(r.trim()) out.atcClauses.push(r.trim().replace(/^\.+\s*/,'')); });
+      out.atcText = (out.atcGeneric ? out.atcGeneric + '\n' : '') + out.atcClauses.map((c,i)=>(numbered?(i+1)+'. ':'')+c).join('\n');
+    }
+    // MII / MSE related sentences found in the buyer ATC (never invented)
+    const sentences = (out.atcText||'').split(/(?<=[.;])\s+|\n/).map(x=>x.trim()).filter(Boolean);
+    out.miiClauses = sentences.filter(x=>/make in india|\bMII\b|local content|class[- ]?I\b/i.test(x)).slice(0,6).map(x=>x.slice(0,400));
+    out.mseClauses = sentences.filter(x=>/\bMSE\b|micro and small|startup/i.test(x)).slice(0,6).map(x=>x.slice(0,400));
+    const lc = /local\s*content[^\d]{0,60}(\d{2,3})\s*%/i.exec(out.atcText||''); out.localContentPct = lc ? Number(lc[1]) : 0;
+    if(out.atcText.length > 12000) out.atcText = out.atcText.slice(0,12000) + ' ...[truncated]';
+    ['bidNumber','endDate','organisation','itemCategory','quantity'].forEach(k=>{ if(!out.found[k]) out.warnings.push('Not found: '+k); });
+    if(out.emdRequired && !out.emdAmount) out.warnings.push('EMD is required but the amount could not be read - enter it manually');
+    return out;
+  }
+};
+
+
+/* =====================================================================
+   GeM BID PDF IMPORT (drag & drop)
+   Reads a downloaded GeM "Bid Document" PDF entirely in the browser with
+   pdf.js, extracts the bid details as text and creates/updates the bid in
+   GeM Bid Search plus draft Bid Document letters (BD-). The PDF itself is
+   NEVER uploaded or stored - only the extracted text fields are saved.
+===================================================================== */
+const GEMPDF_MAX_BYTES = 15 * 1024 * 1024, GEMPDF_MAX_PAGES = 80;
+const GemPdf = {
+  S: null,
+  dropHTML(){
+    return `<div class="card card-pad" id="gemDrop" style="margin-bottom:16px;border:2px dashed var(--border,#cbd5e1);text-align:center;cursor:pointer;"
+        ondragover="event.preventDefault();this.style.borderColor='var(--orange,#EB5A28)';" ondragleave="this.style.borderColor='';"
+        ondrop="GemPdf.onDrop(event)" onclick="document.getElementById('gemPdfInput').click()">
+      <div style="font-size:14px;font-weight:600;">&#128196; Drop GeM Bid PDF(s) here, or click to choose</div>
+      <div class="hint" style="margin-top:4px;">Reads the downloaded GeM bid document in your browser and fills the bid details and bid letters for you. The PDF is not uploaded or stored - only the extracted details are saved.</div>
+      <input id="gemPdfInput" type="file" accept="application/pdf,.pdf" multiple style="display:none;" onclick="event.stopPropagation()" onchange="GemPdf.onFiles(this.files); this.value='';">
+    </div>`;
+  },
+  onDrop(ev){ ev.preventDefault(); const z = document.getElementById('gemDrop'); if(z) z.style.borderColor=''; GemPdf.onFiles(ev.dataTransfer && ev.dataTransfer.files); },
+  ensureLib(){
+    if(!window.pdfjsLib) throw new Error('PDF reader library is not loaded. Check your internet connection and reload.');
+    if(!pdfjsLib.GlobalWorkerOptions.workerSrc) pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  },
+  async readFile(file){
+    if(file.size > GEMPDF_MAX_BYTES) throw new Error('file is larger than 15 MB');
+    if(!file.size) throw new Error('file is empty');
+    const buf = new Uint8Array(await file.arrayBuffer());
+    if(!(buf[0]===0x25 && buf[1]===0x50 && buf[2]===0x44 && buf[3]===0x46)) throw new Error('not a PDF file');
+    this.ensureLib();
+    let doc;
+    try{ doc = await pdfjsLib.getDocument({ data: buf }).promise; }
+    catch(e){ throw new Error(/password/i.test(e && (e.name||e.message)||'') ? 'password-protected PDF' : 'could not open this PDF'); }
+    if(doc.numPages > GEMPDF_MAX_PAGES) throw new Error('PDF has too many pages for a GeM bid document');
+    const lines = [];
+    for(let p = 1; p <= doc.numPages; p++){
+      const tc = await (await doc.getPage(p)).getTextContent(); let cur = [], xe = 0, yy = 0;
+      for(const it of tc.items){
+        cur.push(it.str); if(it.str && it.str.trim()){ xe = Math.max(xe, it.transform[4] + it.width); yy = it.transform[5]; }
+        if(it.hasEOL){ lines.push({ items:cur, xEnd:xe, y:yy }); cur = []; xe = 0; }
+      }
+      if(cur.length) lines.push({ items:cur, xEnd:xe, y:yy });
+    }
+    try{ doc.destroy(); }catch(e){}
+    const r = GemParse.parse(lines);
+    if(r.notGem) throw new Error('this does not look like a GeM bid document (no GEM bid number found)');
+    return r;
+  },
+  norm(n){ return String(n||'').replace(/\s+/g,'').toUpperCase(); },
+  letterPlan(p){
+    const docs = String(p.docsRequired||'').toLowerCase(), atc = String(p.atcText||'').toLowerCase();
+    return { atc:true, covering:true, boi:true,
+      finstanding: /turnover|financial/.test(docs) || Number(p.minTurnoverAmount)>0,
+      oemauth: /oem\s*authori/.test(docs) || /oem\s*authori/.test(atc),
+      mii: p.miiPreference==='Yes' || (p.miiClauses||[]).length>0 };
+  },
+  async onFiles(fl){
+    const files = Array.from(fl||[]).filter(f=>/pdf$/i.test(f.type||'') || /\.pdf$/i.test(f.name||''));
+    if(!files.length){ UI.toast('Drop one or more GeM bid PDF files'); return; }
+    if(files.length > 20){ UI.toast('Please drop at most 20 PDFs at a time'); return; }
+    UI.openModal('Import GeM bid PDF', '<div id="gpBody"><div class="hint">Reading '+files.length+' PDF file(s) in your browser...</div></div>', '<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>', true);
+    const S = this.S = { items:[], busy:false, done:null };
+    for(const f of files){
+      const it = { name:f.name, size:f.size, p:null, err:'', include:true, letters:{}, existing:null, dupInBatch:false };
+      try{
+        it.p = await this.readFile(f);
+        it.existing = Store.data.bids.find(b=>this.norm(b.bidNumber)===this.norm(it.p.bidNumber)) || null;
+        if(S.items.some(x=>x.p && this.norm(x.p.bidNumber)===this.norm(it.p.bidNumber))){ it.dupInBatch = true; it.include = false; }
+        const plan = this.letterPlan(it.p);
+        Object.keys(plan).forEach(k=>{ const has = it.existing && Store.data.bidDocs.some(d=>d.bid && d.bid.bidId===it.existing.id && d.templateKey===k); it.letters[k] = { on: plan[k] && !has, has }; });
+      }catch(e){ console.warn('gem pdf', f.name, e); it.err = e.message || 'could not read'; it.include = false; }
+      S.items.push(it);
+    }
+    this.paint();
+  },
+  statusOf(it){
+    if(it.err) return { t:'Cannot read', c:'var(--red,#dc2626)' };
+    if(it.dupInBatch) return { t:'Duplicate in this batch', c:'var(--amber,#d97706)' };
+    if(it.existing) return { t:'Already saved ('+it.existing.id+') - empty fields will be filled', c:'var(--blue,#2563eb)' };
+    return { t:'New bid', c:'var(--green,#16a34a)' };
+  },
+  paint(){
+    const S = this.S, box = document.getElementById('gpBody'); if(!S || !box) return;
+    const E = Util.escapeHtml, fd = (d)=> d ? Util.fmtDate(d) : '—';
+    const n = S.items.filter(i=>i.include && i.p).length;
+    box.innerHTML = (S.done ? this.doneHTML() : '') + S.items.map((it,i)=>{
+      const st = this.statusOf(it), p = it.p;
+      if(!p) return `<div class="card card-pad" style="margin-bottom:10px;border-left:4px solid ${st.c};"><b>${E(it.name)}</b> <span style="color:${st.c};font-size:12px;">${E(st.t)}: ${E(it.err)}</span></div>`;
+      return `<div class="card card-pad" style="margin-bottom:10px;border-left:4px solid ${st.c};">
+        <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;"><label class="chk"><input type="checkbox" ${it.include?'checked':''} ${it.dupInBatch?'disabled':''} onchange="GemPdf.S.items[${i}].include=this.checked;GemPdf.paint()"> <b>${E(p.bidNumber)}</b></label><span style="color:${st.c};font-size:12px;">${E(st.t)}</span></div>
+        <div class="cell-mute" style="font-size:11px;margin-bottom:6px;">${E(it.name)}</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:4px 16px;font-size:12.5px;">
+          <div><span class="cell-mute">Organisation:</span> ${E(p.organisation||'—')}</div><div><span class="cell-mute">Office:</span> ${E(p.office||'—')}</div>
+          <div><span class="cell-mute">Item:</span> ${E(p.itemCategory||'—')}</div><div><span class="cell-mute">Quantity:</span> ${p.quantity||'—'}</div>
+          <div><span class="cell-mute">End:</span> ${fd(p.endDate)} ${E(p.endTime||'')}</div><div><span class="cell-mute">Opening:</span> ${fd(p.openingDate)}</div>
+          <div><span class="cell-mute">EMD:</span> ${p.emdRequired===true?('Required'+(p.emdAmount?' '+Util.fmtMoney(p.emdAmount):' (amount not read)')):(p.emdRequired===false?'Not required':'—')}</div>
+          <div><span class="cell-mute">MII / MSE preference:</span> ${E(p.miiPreference||'—')} / ${E(p.msePreference||'—')}</div>
+          <div><span class="cell-mute">Turnover (bidder / OEM):</span> ${E(p.minTurnover||'—')} / ${E(p.oemTurnover||'—')}</div>
+          <div><span class="cell-mute">Buyer ATC:</span> ${p.atcClauses && p.atcClauses.length ? p.atcClauses.length+' paragraph(s)' : (p.atcGeneric?'standard clause only':'none found')}</div>
+        </div>
+        ${p.warnings && p.warnings.length ? `<div style="font-size:12px;color:var(--amber,#d97706);margin-top:6px;">${p.warnings.map(E).join(' &middot; ')}</div>` : ''}
+        <div style="margin-top:8px;font-size:12.5px;"><b>Bid letters to create (Draft):</b> ${Object.keys(it.letters).map(k=>{ const L = it.letters[k], lab = (BIDDOC_TEMPLATES[k]||{}).short || k;
+          return L.has ? `<span class="badge" style="margin-right:6px;" title="Already exists for this bid">${E(lab)} &#10003; exists</span>` : `<label class="chk" style="margin-right:10px;"><input type="checkbox" ${L.on?'checked':''} onchange="GemPdf.S.items[${i}].letters['${k}'].on=this.checked"> ${E((BIDDOC_TEMPLATES[k]||{}).label||k)}</label>`; }).join('')}</div>
+      </div>`; }).join('') +
+      `<div style="margin-top:8px;position:sticky;bottom:0;background:var(--card,#fff);padding:8px 0;"><button class="btn btn-primary" id="gpGo" ${S.busy||!n?'disabled':''} onclick="GemPdf.createAll()">${S.busy?'Saving...':'Create / update '+n+' bid'+(n===1?'':'s')+' and letters'}</button></div>`;
+  },
+  doneHTML(){
+    const D = this.S.done, E = Util.escapeHtml;
+    return `<div class="card card-pad" style="margin-bottom:10px;border-left:4px solid var(--green,#16a34a);"><b>Done:</b> ${D.created} bid(s) created, ${D.updated} updated, ${D.letters} letter(s) created.
+      ${D.bids.map(b=>`<div style="font-size:12.5px;margin-top:4px;"><a href="#" onclick="UI.closeModal();BidSearch.openDetail('${E(b.id)}');return false;">${E(b.id)} &mdash; ${E(b.bidNumber)}</a></div>`).join('')}
+      ${D.errors.length?`<div style="color:var(--red,#dc2626);font-size:12.5px;margin-top:6px;">${D.errors.map(E).join('<br>')}</div>`:''}</div>`;
+  },
+  empty(v){ return v === '' || v == null || v === 0 || (Array.isArray(v) && !v.length); },
+  gemBlock(p, fileName){
+    const g = {}; ['publishedDate','endDate','endTime','openingDate','openingTime','offerValidity','ministry','department','organisation','office','hodEmail','buyerEmail','quantity','itemCategory','items','consignees',
+      'minTurnover','oemTurnover','experienceYears','mseRelaxation','startupRelaxation','docsRequired','pastPerformancePct','gemBidType','raEnabled','primaryCategory','evaluationMethod','paymentTimeline',
+      'emdRequired','emdAmount','epbgRequired','epbgPercent','msePreference','miiPreference','miiClauses','mseClauses','localContentPct','atcText','atcGeneric','atcClauses'].forEach(k=>{ if(p[k] !== undefined) g[k] = p[k]; });
+    g.sourceFile = fileName; g.importedAt = new Date().toISOString(); g.importedBy = (typeof bidUserName==='function' ? bidUserName() : ((Auth.session&&Auth.session.name)||'System')); return g;
+  },
+  bidRecord(p, fileName){
+    const items = (p.items||[]).map(i=>i.name+' ('+i.qty+')').join(' + ') || p.itemCategory || 'GeM bid';
+    const cap = (s)=>String(s||'').replace(/^./, c=>c.toUpperCase());
+    const c0 = (p.consignees||[])[0];
+    return {
+      bidNumber:p.bidNumber, raNumber:'', title: cap(items) + (p.organisation ? ' — '+p.organisation : ''), bidType:p.bidType||'Bid',
+      category: cap((p.itemCategories||[])[0]||''), boqTitle: p.itemCategory||'', description: 'Imported from GeM bid PDF. '+(p.docsRequired?('Documents required: '+p.docsRequired+'.'):''),
+      ministry:p.ministry||'', department:p.department||'', organisation:p.organisation||'', buyerName:'', consignee: c0 ? (c0.officer+', '+c0.address) : '',
+      state:'', district:'', location: (p.office && p.office !== p.organisation) ? p.office : '',
+      estimatedValue:p.estimatedValue||0, emdAmount:p.emdAmount||0, emdRequired:p.emdRequired===true, tenderFee:0, securityDeposit:0, expectedMargin:0, ourQuote:0,
+      publishedDate:p.publishedDate||'', startDate:p.publishedDate||'', endDate:p.endDate||'', openingDate:p.openingDate||'', offerValidity:p.offerValidity||'',
+      status:'New', assignedTo:'', sourceUrl:'', quantity:p.quantity||0
+    };
+  },
+  async createAll(){
+    const S = this.S; if(!S || S.busy) return; S.busy = true; this.paint();
+    const D = { created:0, updated:0, letters:0, bids:[], errors:[] };
+    const who = (Auth.session && Auth.session.name) || 'System', nowIso = new Date().toISOString();
+    try{
+      for(const it of S.items.filter(x=>x.include && x.p)){
+        try{
+          const p = it.p, fresh = this.bidRecord(p, it.name); let rec = it.existing || null;
+          if(rec){
+            Object.keys(fresh).forEach(k=>{ if(['status','title','bidType'].includes(k)) return; if(this.empty(rec[k]) && !this.empty(fresh[k])) rec[k] = fresh[k]; });
+            rec.gem = this.gemBlock(p, it.name); rec.updatedBy = (typeof bidUserName==='function'?bidUserName():who); rec.updatedAt = nowIso;
+            rec.timeline = rec.timeline||[]; rec.timeline.push({ date:nowIso, text:'GeM bid PDF imported - empty fields filled, saved details kept ('+it.name+')', by:who });
+            D.updated++;
+          } else {
+            while(Store.data.bids.some(b=>b.id===(Store.data.settings.bidPrefix||'BID-')+String(Store.data.counters.bidNext||1).padStart(4,'0'))) Store.data.counters.bidNext = (Store.data.counters.bidNext||1)+1;
+            rec = Object.assign({ id:(Store.data.settings.bidPrefix||'BID-')+String(Store.data.counters.bidNext||1).padStart(4,'0'), checklist:DEFAULT_BID_CHECKLIST.map(name=>({name, done:false})), timeline:[], createdDate:Util.todayISO() }, fresh);
+            rec.gem = this.gemBlock(p, it.name); rec.savedBy = (typeof bidUserName==='function'?bidUserName():who); rec.savedAt = nowIso; rec.updatedBy = rec.savedBy; rec.updatedAt = nowIso;
+            rec.timeline.push({ date:nowIso, text:'Bid created from GeM bid PDF ('+it.name+')', by:who });
+            Store.data.bids.unshift(rec); Store.data.counters.bidNext = (Store.data.counters.bidNext||1)+1; D.created++;
+          }
+          for(const k of Object.keys(it.letters).filter(k=>it.letters[k].on && !it.letters[k].has)){
+            const d = BidDocs.blankDoc(k); if(!d) continue;
+            while(Store.data.bidDocs.some(x=>x.id===(Store.data.settings.bidDocPrefix||'BD-') + String(Store.data.counters.bidDocNext||1).padStart(4,'0'))) Store.data.counters.bidDocNext = (Store.data.counters.bidDocNext||1)+1;
+            d.id = (Store.data.settings.bidDocPrefix||'BD-') + String(Store.data.counters.bidDocNext||1).padStart(4,'0'); Store.data.counters.bidDocNext = (Store.data.counters.bidDocNext||1)+1;
+            d.docNumber = d.id; d.createdAt = nowIso; d.updatedAt = nowIso; d.status = 'Draft';
+            Object.assign(d.bid, { bidId:rec.id, bidNumber:rec.bidNumber, raNumber:rec.raNumber||'', bidTitle:rec.title, organisation:rec.organisation, department:rec.department||'',
+              date:rec.publishedDate||'', closingDate:rec.endDate||'', productItem:rec.boqTitle||rec.category||'', location:rec.location||rec.organisation||'' });
+            if(k==='mii' && p.localContentPct){ const cf = (d.bid.customFields||[]).find(f=>/local content/i.test(f.label)); if(cf) cf.value = p.localContentPct+'%'; }
+            Store.data.bidDocs.unshift(d); D.letters++;
+          }
+          D.bids.push({ id:rec.id, bidNumber:rec.bidNumber });
+          await Activity.log(it.existing ? 'Bid updated from GeM PDF' : 'Bid created from GeM PDF', rec.bidNumber);
+        }catch(e){ console.error('gem create', e); D.errors.push((it.p.bidNumber||it.name)+': '+(e.message||'failed')); }
+      }
+      const r1 = await Store.save('bids'), r2 = await Store.save('bidDocs'), r3 = await Store.save('counters');
+      if(r1===false || r2===false || r3===false) D.errors.push('Some data could not be saved to the server - check your connection and try again.');
+    }catch(e){ D.errors.push(e.message||'failed'); }
+    S.busy = false; S.done = D; S.items = S.items.filter(i=>!(i.include && i.p)); this.paint();
+    if(UI.currentView === 'bidsearch'){ try{ BidSearch.render(); }catch(e){} } else if(UI.currentView === 'biddocs'){ try{ Router.render('biddocs'); }catch(e){} }
+  },
+  fmtList(a){ return (a||[]).filter(Boolean).join(', '); },
+  detailHTML(b){
+    const g = b && b.gem; if(!g) return '';
+    const E = Util.escapeHtml, row = (l,v)=> (v===''||v==null||v===0) ? '' : `<tr><td class="cell-mute" style="width:42%;padding:3px 8px 3px 0;vertical-align:top;">${E(l)}</td><td style="padding:3px 0;">${E(String(v))}</td></tr>`;
+    const dt = (d,t)=> d ? Util.fmtDate(d)+(t?' '+t:'') : '';
+    const letters = (Store.data.bidDocs||[]).filter(d=>d.bid && d.bid.bidId===b.id);
+    return `<h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:16px 0 6px;">GeM Bid Details (from PDF)</h4>
+      <div class="card card-pad" style="font-size:12.5px;"><table style="width:100%;border-collapse:collapse;"><tbody>
+        ${row('Bid dated', g.publishedDate?Util.fmtDate(g.publishedDate):'')}${row('Bid end', dt(g.endDate,g.endTime))}${row('Bid opening', dt(g.openingDate,g.openingTime))}${row('Offer validity', g.offerValidity?g.offerValidity+' days':'')}
+        ${row('Ministry / State', g.ministry)}${row('Department', g.department)}${row('Organisation', g.organisation)}${row('Office', g.office)}
+        ${row('Item category', g.itemCategory)}${row('Total quantity', g.quantity)}${(g.items||[]).map(i=>row('  Item', i.name+' - '+i.qty+' '+i.unit)).join('')}
+        ${row('Min. bidder turnover (3 yrs)', g.minTurnover)}${row('OEM turnover (3 yrs)', g.oemTurnover)}${row('Experience required', g.experienceYears?g.experienceYears+' year(s)':'')}${row('Past performance', g.pastPerformancePct?g.pastPerformancePct+'%':'')}
+        ${row('MSE relaxation', g.mseRelaxation)}${row('Startup relaxation', g.startupRelaxation)}${row('MSE purchase preference', g.msePreference)}${row('MII purchase preference', g.miiPreference)}
+        ${row('EMD', g.emdRequired===true?('Required'+(g.emdAmount?' - '+Util.fmtMoney(g.emdAmount):'')):(g.emdRequired===false?'Not required':''))}${row('ePBG', g.epbgRequired===true?('Required'+(g.epbgPercent?' - '+g.epbgPercent+'%':'')):(g.epbgRequired===false?'Not required':''))}
+        ${row('Bid type', g.gemBidType)}${row('Evaluation method', g.evaluationMethod)}${row('Payment timeline', g.paymentTimeline)}${row('Documents required from seller', g.docsRequired)}
+        ${row('Buyer email', g.buyerEmail)}${row('HOD email', g.hodEmail)}
+      </tbody></table>
+      ${(g.consignees||[]).length ? `<div style="margin-top:8px;"><b>Consignees / delivery</b><table style="width:100%;margin-top:4px;font-size:12px;"><thead><tr><th align="left">Item</th><th align="left">Officer</th><th align="left">Address</th><th>Qty</th><th>Days</th></tr></thead><tbody>${g.consignees.map(c=>`<tr><td>${E(c.item||'')}</td><td>${E(c.officer||'')}</td><td>${E(c.address||'')}</td><td align="center">${E(String(c.qty))}</td><td align="center">${E(String(c.days))}</td></tr>`).join('')}</tbody></table></div>` : ''}
+      ${(g.miiClauses||[]).length||(g.mseClauses||[]).length ? `<div style="margin-top:8px;"><b>MII / MSE clauses found in buyer ATC</b><ul style="margin:4px 0 0 18px;">${(g.miiClauses||[]).concat(g.mseClauses||[]).map(c=>`<li>${E(c)}</li>`).join('')}</ul></div>` : ''}
+      ${g.atcText ? `<details style="margin-top:8px;"><summary style="cursor:pointer;"><b>Buyer ATC text</b></summary><div style="white-space:pre-wrap;margin-top:6px;max-height:260px;overflow:auto;font-size:12px;">${E(g.atcText)}</div></details>` : ''}
+      <div style="margin-top:8px;"><b>Bid letters (Bid Documents)</b> ${letters.length ? letters.map(d=>`<a href="#" class="badge" style="margin:0 6px 4px 0;" onclick="UI.closeModal();go('biddocs');setTimeout(()=>BidDocs.edit('${E(d.id)}'),80);return false;">${E(d.docNumber||d.id)} ${E((BIDDOC_TEMPLATES[d.templateKey]||{}).short||'')} &middot; ${E(d.status)}</a>`).join('') : '<span class="cell-mute">none yet</span>'}</div>
+      <div class="hint" style="margin-top:6px;">Imported ${g.importedAt?E(new Date(g.importedAt).toLocaleString('en-IN')):''} by ${E(g.importedBy||'')} from ${E(g.sourceFile||'a GeM PDF')}. The PDF file itself is not stored.</div></div>`;
+  }
+};
+
 const Notifications = {
   render(){
     const today = Util.todayISO();
@@ -6723,33 +8309,34 @@ const BidSearch = {
           <button class="btn btn-outline btn-sm" id="btnETender" onclick="window.open('https://etenders.kerala.gov.in/nicgep/app?page=FrontEndAdvancedSearch&amp;service=page','_blank','noopener')">e-Tender &#8599;</button>
         </div>
       </div>
+      ${GemPdf.dropHTML()}
       <div class="toolbar">
-        <div class="search"><span class="ic">&#128269;</span><input id="bidSearch" placeholder="Search bid number, title, category, organisation, department..." oninput="BidSearch.render()" value="${Util.escapeHtml(q)}"></div>
+        <div class="search"><span class="ic">&#128269;</span><input id="bidSearch" autocomplete="off" placeholder="Search bid number, title, category, organisation, department..." oninput="BidSearch.render()" value="${Util.escapeHtml(q)}"></div>
         <div class="toolbar-spacer"></div>
         <button class="btn btn-outline btn-sm" onclick="BidSearch.exportExcel()">&#128228; Export Bid Register</button>
         <button class="btn btn-primary btn-sm" onclick="BidSearch.openForm(null)">&#65291; Add Bid</button>
       </div>
       <div class="toolbar">
-        <select id="bidStatusFilter" onchange="BidSearch.render()">
+        <select id="bidStatusFilter" autocomplete="off" onchange="BidSearch.render()">
           <option value="">All Statuses</option>
           ${DROPDOWNS.bidStatus.map(s=>`<option ${s===fStatus?'selected':''}>${s}</option>`).join('')}
         </select>
-        <select id="bidTypeFilter" onchange="BidSearch.render()">
-          <option value="">All Bid Types</option>
+        <select id="bidTypeFilter" autocomplete="off" onchange="BidSearch.render()">
+          <option value="" ${!fType?'selected':''}>All Bid Types</option>
           ${DROPDOWNS.bidType.map(s=>`<option ${s===fType?'selected':''}>${s}</option>`).join('')}
         </select>
-        <select id="bidUserFilter" onchange="BidSearch.render()">
-          <option value="">All Users (Saved By)</option>
-          ${[...new Set(Store.data.bids.map(bidSavedByOf).filter(Boolean))].sort().map(u=>`<option value="${Util.escapeHtml(u)}" ${u===fUser?'selected':''}>${Util.escapeHtml(u)}</option>`).join('')}
+        <select id="bidUserFilter" autocomplete="off" onchange="BidSearch.render()">
+          <option value="" ${!fUser?'selected':''}>All Users (Saved By)</option>
+          ${[...new Set(Store.data.bids.map(bidSavedByOf).filter(Boolean))].sort().map(u=>`<option value="${Util.escapeHtml(u)}" ${u===fUser?'selected':''}>Saved by: ${Util.escapeHtml(u)}</option>`).join('')}
           <option value="__none" ${fUser==='__none'?'selected':''}>Not recorded</option>
         </select>
-        <select id="bidMatchFilter" onchange="BidSearch.render()">
+        <select id="bidMatchFilter" autocomplete="off" onchange="BidSearch.render()">
           <option value="">All Match Scores</option>
           <option value="high" ${fMatch==='high'?'selected':''}>&#128293; High Match (80%+)</option>
           <option value="medium" ${fMatch==='medium'?'selected':''}>Medium Match (50-79%)</option>
           <option value="low" ${fMatch==='low'?'selected':''}>Low Match (&lt;50%)</option>
         </select>
-        <select id="bidClosingFilter" onchange="BidSearch.render()">
+        <select id="bidClosingFilter" autocomplete="off" onchange="BidSearch.render()">
           <option value="">Quick Filter</option>
           <option value="today" ${fClosing==='today'?'selected':''}>&#9200; Closing Today</option>
           <option value="week" ${fClosing==='week'?'selected':''}>&#128197; Closing This Week</option>
@@ -6760,6 +8347,10 @@ const BidSearch = {
         </select>
         ${(q||fStatus||fType||fUser||fMatch||fClosing) ? `<button class="btn btn-outline btn-sm" onclick="document.getElementById('bidSearch').value='';document.getElementById('bidStatusFilter').value='';document.getElementById('bidTypeFilter').value='';document.getElementById('bidUserFilter').value='';document.getElementById('bidMatchFilter').value='';document.getElementById('bidClosingFilter').value='';BidSearch.render();">&#8635; Reset</button>` : ''}
       </div>
+      ${(q||fStatus||fType||fUser||fMatch||fClosing) ? `<div class="card card-pad" style="margin-bottom:12px;border-left:4px solid var(--amber,#d97706);display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+        <b>Filters are on &mdash; showing ${list.length} of ${all.length} bids.</b>
+        <span class="cell-mute" style="font-size:12px;">${[q?'Search: "'+Util.escapeHtml(q)+'"':'',fStatus?'Status: '+Util.escapeHtml(fStatus):'',fType?'Type: '+Util.escapeHtml(fType):'',fUser?'Saved by: '+Util.escapeHtml(fUser==='__none'?'not recorded':fUser):'',fMatch?'Match: '+Util.escapeHtml(fMatch):'',fClosing?'Quick: '+Util.escapeHtml(fClosing):''].filter(Boolean).join(' · ')}</span>
+        <button class="btn btn-outline btn-sm" onclick="BidSearch.clearFilters()">Show all bids</button></div>` : ''}
       <div class="card"><div class="table-wrap">
       ${list.length ? `<table><thead><tr>
         <th class="col-actions">Actions</th>
@@ -7028,6 +8619,7 @@ const BidSearch = {
         ${bidDeadlineBadgeHTML(b.endDate)}
         <span class="badge" style="background:${bidStatusColor(b.status)};color:#fff;">${Util.escapeHtml(b.status||'New')}</span>
         ${b.sourceUrl? `<a class="btn btn-outline btn-sm" href="${Util.escapeHtml(b.sourceUrl)}" target="_blank">&#128279; Open Source</a>` : ''}
+        <button class="btn btn-primary btn-sm" onclick="BidPack.open('${id}')">&#128230; Compile Bid Pack</button>
         ${b.status==='Won'? `<button class="btn btn-primary btn-sm" onclick="BidSearch.convertToOrder('${id}')">&#8594; Convert to Order</button><button class="btn btn-outline btn-sm" onclick="BidSearch.recordEmd('${id}','PBG')">&#128274; Record PBG</button>` : ''}
       </div>
       <div class="hint" style="margin-bottom:10px;">Saved by <b>${Util.escapeHtml(bidSavedByOf(b)||'not recorded')}</b>${b.savedAt?' on '+Util.escapeHtml(new Date(b.savedAt).toLocaleString('en-IN')):''}${b.updatedBy&&b.updatedBy!==b.savedBy?' &middot; last updated by <b>'+Util.escapeHtml(b.updatedBy)+'</b>':''}</div>
@@ -7044,6 +8636,7 @@ const BidSearch = {
         </div>
       </div>
 
+      ${GemPdf.detailHTML(b)}
       ${(()=>{ const r=bidReadiness(b); return `<div class="card card-pad" style="margin:14px 0 0;"><b>Bid Readiness: ${bidReadinessBadge(b)}</b> <span class="cell-mute" style="font-size:12px;">${r.missing.length?'Missing: '+Util.escapeHtml(r.missing.join(' · ')):'Everything in place — ready to submit.'}</span>${r.needsEmd&&!r.emdRec?` <button class="btn btn-outline btn-sm" style="margin-left:8px;" onclick="BidSearch.recordEmd('${id}')">Record EMD</button>`:''}</div>`; })()}
       <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:16px 0 6px;">Document Checklist — ${doneCount}/${b.checklist.length}</h4>
       <div class="doc-progress"><div style="width:${pct}%;"></div></div>
@@ -7068,6 +8661,10 @@ const BidSearch = {
         <button class="btn btn-outline btn-sm" onclick="BidSearch.addNote('${id}')">&#65291; Add</button>
       </div>
     `, `<button class="btn btn-outline" onclick="UI.closeModal()">Close</button><button class="btn btn-primary" onclick="BidSearch.openForm('${id}')">Edit Full Details</button>`, true);
+  },
+  clearFilters(){
+    ['bidSearch','bidStatusFilter','bidTypeFilter','bidUserFilter','bidMatchFilter','bidClosingFilter'].forEach(id=>{ const e=document.getElementById(id); if(e) e.value=''; });
+    Paginate.get('bids').page = 1; BidSearch.render();
   },
   // Adapt number/title labels to the selected Bid Type (values are never cleared)
   onTypeChange(){
@@ -13995,6 +15592,7 @@ const BidDocs = {
         '<div class="card card-pad" style="text-align:center;"><div style="font-size:22px;font-weight:700;color:var(--accent-dark);">'+Store.data.bidDocs.filter(d=>d.status==='Completed').length+'</div><div class="cell-mute" style="font-size:11.5px;">Completed</div></div>' +
         '<div class="card card-pad" style="text-align:center;"><div style="font-size:22px;font-weight:700;">'+Object.keys(BIDDOC_TEMPLATES).length+'</div><div class="cell-mute" style="font-size:11.5px;">Templates</div></div>' +
       '</div>' +
+      GemPdf.dropHTML() +
       '<div class="tabs">' + tabs.map(t=>'<button class="tab-btn '+(this.dashTab===t[0]?'active':'')+'" onclick="BidDocs.setTab(\''+t[0]+'\')">'+t[1]+'</button>').join('') + '</div>' +
       '<div id="bdTabBody"></div>';
     if(this.dashTab==='templates') this.renderTemplateGrid();
@@ -14248,6 +15846,7 @@ Views.settings = function(){
       </div>
       <button class="btn btn-primary" onclick="SettingsView.saveBidPrefs()">Save Bid Preferences</button>
     </div>
+    <div id="vaultCard"></div>
     <div class="card card-pad" style="max-width:520px;margin-top:16px;">
       <h3 style="margin:0 0 4px;font-size:14px;">Office Location Data</h3>
       <div class="hint" style="margin-bottom:12px;">${Object.keys(Store.data.lsgOfficeGeo||{}).length} of ${LSG_OFFICES_RAW.length} Kerala LSG office locations are located so far, for the "Nearby Offices" field feature. A few ways to fill in the rest — use whichever suits you, or combine them. For the odd office the free OpenStreetMap lookup can't find (but Google Maps shows correctly), open that office's details in Find Location and use "Set from Google Maps" to paste its coordinates in directly — no key or bulk run needed.</div>
@@ -14278,6 +15877,7 @@ Views.settings = function(){
       <button class="btn btn-outline" style="color:var(--red,#dc2626);border-color:var(--red,#dc2626);" onclick="SettingsView.deleteAllProjectRecords()">&#128465; Delete All Saved Project Records</button>
     </div>
   `;
+  try{ Vault.mount(); }catch(e){ console.error('vault', e); }
 };
 const SettingsView = {
   async deleteAllProjectRecords(){
