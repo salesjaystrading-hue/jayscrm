@@ -1169,20 +1169,114 @@ const Store = {
      that failed to load, so a temporary read failure can never
      silently overwrite real cloud data with blank/default data. */
   loadFailed: {},
+  /* Lost-update protection: ver[key] is the server version this browser last
+     loaded or saved, baseStr[key] a copy of that content. saveKey() only
+     overwrites if the server still has that version; otherwise it merges the
+     teammate's newer changes with ours (see mergeStore) instead of replacing them. */
+  ver: {}, baseStr: {}, forceOverwrite: false,
   async loadKey(key, fallback){
     try{
-      const { data, error } = await sb.from('jays_crm_store').select('value').eq('key', key).maybeSingle();
+      const { data, error } = await sb.from('jays_crm_store').select('value, version').eq('key', key).maybeSingle();
       if(error) throw error;
       this.loadFailed[key] = false;
-      if(data && data.value !== null && data.value !== undefined) return data.value;
+      if(data && data.value !== null && data.value !== undefined){
+        if(data.version != null){ this.ver[key] = Number(data.version); try{ this.baseStr[key] = JSON.stringify(data.value); }catch(e){} }
+        return data.value;
+      }
       return fallback;
     }catch(e){ console.error('storage load failed', key, e); this.loadFailed[key] = true; return fallback; }
   },
+  /* Three-way merge of one store key: base = what we loaded, mine = what we want
+     to save, theirs = what the server has now. Records are matched by id; fields
+     we changed win, fields a teammate changed are kept. Returns null if it cannot
+     be merged safely (then nothing is overwritten). */
+  mergeStore(key, base, mine, theirs){
+    const J = JSON.stringify, same = (a,b)=>J(a)===J(b), isObj = v=>v && typeof v==='object' && !Array.isArray(v);
+    if(Array.isArray(mine) && Array.isArray(theirs) && Array.isArray(base)){
+      const hasId = a=>a.every(x=>isObj(x) && x.id!==undefined && x.id!==null && x.id!=='');
+      if(!(hasId(mine) && hasId(theirs) && hasId(base))) return null;
+      const bm = new Map(base.map(x=>[String(x.id), x])), mm = new Map(mine.map(x=>[String(x.id), x])), tm = new Map(theirs.map(x=>[String(x.id), x]));
+      const out = [];
+      theirs.forEach(t=>{
+        const id = String(t.id), b = bm.get(id), m = mm.get(id);
+        if(!b){ out.push(t); return; }                                   // added by a teammate
+        if(!m){ if(same(t,b)) return; out.push(t); return; }              // I deleted it: drop unless a teammate changed it meanwhile
+        if(same(m,b)){ out.push(t); return; }                             // I did not touch it
+        if(same(t,b)){ out.push(m); return; }                             // only I changed it
+        const merged = Object.assign({}, t);                              // both changed: field-level merge, my fields win
+        new Set([...Object.keys(b), ...Object.keys(m)]).forEach(k=>{ if(!same(m[k], b[k])){ if(m[k]===undefined) delete merged[k]; else merged[k] = m[k]; } });
+        out.push(merged);
+      });
+      const mine_new = mine.filter(m=>!bm.has(String(m.id)) && !tm.has(String(m.id)));
+      const firstBaseIdx = mine.findIndex(m=>bm.has(String(m.id)));
+      const front = [], back = [];
+      mine_new.forEach(m=>{ (firstBaseIdx<0 || mine.indexOf(m) < firstBaseIdx ? front : back).push(m); });
+      mine.forEach(m=>{ const id = String(m.id); if(bm.has(id) && !tm.has(id) && !same(m, bm.get(id))) back.push(m); });   // I edited something a teammate deleted: keep my edit
+      let res = front.concat(out, back);
+      if(key==='jays_activitylog' && res.length > 500) res.length = 500;
+      return res;
+    }
+    if(isObj(mine) && isObj(theirs) && isObj(base)){
+      const res = Object.assign({}, theirs);
+      new Set([...Object.keys(base), ...Object.keys(mine)]).forEach(k=>{
+        if(same(mine[k], base[k])) return;
+        if(key==='jays_counters' && typeof mine[k]==='number' && typeof theirs[k]==='number'){ res[k] = Math.max(mine[k], theirs[k]); return; }
+        if(mine[k]===undefined) delete res[k]; else res[k] = mine[k];
+      });
+      return res;
+    }
+    return null;
+  },
+  /* Put a merged value back into the live in-memory collection WITHOUT replacing
+     the array/object itself, so modules that hold a reference keep working. */
+  applyMerged(key, val){
+    const name = Object.keys(this.data).find(k=>'jays_'+k.toLowerCase()===key); if(!name) return;
+    const cur = this.data[name];
+    if(Array.isArray(cur) && Array.isArray(val)){ cur.length = 0; val.forEach(x=>cur.push(x)); }
+    else if(cur && typeof cur==='object' && val && typeof val==='object' && !Array.isArray(val)){ Object.keys(cur).forEach(k=>delete cur[k]); Object.assign(cur, val); }
+    else this.data[name] = val;
+  },
   async saveKey(key, value){
     try{
-      const { error } = await sb.from('jays_crm_store').upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: 'key' });
-      if(error) throw error;
-      return true;
+      if(Access.level(key) !== 'edit'){
+        UI.toast("You have "+(Access.level(key)==='view'?'view-only':'no')+" access to this section, so this change was not saved. Ask an Admin if you need edit access.", 7000);
+        this.conflictShown = true; return false;
+      }
+      if(this.ver[key] === undefined){      // never loaded in this session (rare): legacy behaviour
+        const { error } = await sb.from('jays_crm_store').upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+        if(error) throw error;
+        return true;
+      }
+      let mine = value, merged = false;
+      for(let attempt = 0; attempt < 4; attempt++){
+        const { data, error } = await sb.rpc('store_cas', { p_key:key, p_value:mine, p_expected:this.ver[key] });
+        if(error) throw error;
+        if(data && data.denied){
+          UI.toast("You don't have permission to change this section, so it was not saved. Ask an Admin.", 7000);
+          this.conflictShown = true;
+          const fresh = await this.loadKey(key, null); if(fresh!==null) this.applyMerged(key, fresh);
+          return false;
+        }
+        if(data && data.ok){
+          this.ver[key] = Number(data.version); try{ this.baseStr[key] = JSON.stringify(mine); }catch(e){}
+          if(merged){ this.applyMerged(key, mine); this.lastMerge = { key, at: Date.now() }; UI.toast('Saved. A teammate changed the same list at the same time, so both sets of changes were combined.', 6000); }
+          return true;
+        }
+        // someone else saved first: merge their version with ours
+        if(this.forceOverwrite && data){ this.ver[key] = Number(data.version) || this.ver[key]; continue; }   // admin restore: replace on purpose
+        let base = null; try{ base = this.baseStr[key]!==undefined ? JSON.parse(this.baseStr[key]) : null; }catch(e){}
+        const m = (base!==null && data && data.value!==undefined) ? this.mergeStore(key, base, mine, data.value) : null;
+        if(m === null){
+          this.ver[key] = Number(data && data.version) || this.ver[key];
+          console.error('storage conflict, cannot merge', key);
+          UI.toast('Not saved: someone else changed this at the same time and the two versions could not be combined. Refresh the page and repeat your change.', 8000);
+          this.conflictShown = true; return false;
+        }
+        this.ver[key] = Number(data.version); try{ this.baseStr[key] = JSON.stringify(data.value); }catch(e){}
+        mine = m; merged = true;
+      }
+      UI.toast('Not saved: this data is being changed by several people right now. Try again in a moment.', 8000);
+      this.conflictShown = true; return false;
     }catch(e){ console.error('storage save failed', key, e); return false; }
   },
   /* Project Opportunity's oppProjects collection is a single JSON blob
@@ -1660,8 +1754,9 @@ const Store = {
       console.error('Store.save blocked: '+key+' had a failed load, refusing to overwrite cloud data.');
       return false;
     }
+    this.conflictShown = false;
     const ok = await this.saveKey(key, this.data[collection]);
-    if(!ok) UI.toast('⚠ Save failed — check your connection and try again.');
+    if(!ok && !this.conflictShown) UI.toast('⚠ Save failed — check your connection and try again.');
     return ok;
   },
 };
@@ -2090,6 +2185,7 @@ const Auth = {
        enforced by the session's own JWT - so run them together instead of
        back-to-back. Saves one full network round-trip off sign-in time. */
     const [ok] = await Promise.all([ this.loadProfile(data.session.user.id), Store.loadAll() ]);
+    if(ok) await Access.load();
     if(!ok){
       err.textContent = 'Your account has no CRM profile yet. Contact an admin.';
       err.style.display='block';
@@ -2116,6 +2212,7 @@ const Auth = {
       // Same parallelization as login() - see the comment there.
       const [ok] = await Promise.all([ this.loadProfile(session.user.id), Store.loadAll() ]);
       if(!ok){ await sb.auth.signOut(); return false; }
+      await Access.load();
       return true;
     }catch(e){ console.error('tryRestore failed', e); return false; }
   },
@@ -2319,6 +2416,7 @@ function assignableMenus(){
 function hasMenuAccess(viewId){
   if(!Auth.session) return false;
   if(Auth.session.role==='Admin') return true;
+  if(Access.menuHidden(viewId)) return false;
   const perms = Auth.session.permissions;
   if(!perms) return true;
   return perms.includes(viewId);
@@ -2817,6 +2915,14 @@ Views.dashboard = function(){
   bidsClosingSoon.forEach(b=>actionItems.push({icon:'&#127963;', color:'var(--red,#dc2626)', text:'GeM bid closing soon: '+(b.title||b.bidNumber||''), view:'bidsearch'}));
   oppNeedingAction.forEach(r=>actionItems.push({icon:'&#128269;', color:'var(--blue,#2563eb)', text:'High-match project opportunity: '+(r['Project Name Eng']||r['LB Name']||''), view:'oppfinder'}));
   Alerts.collect().forEach(a=>actionItems.push({icon:a.icon, color:a.color, text:a.type+': '+a.text, view:a.view}));
+  if(Auth.isAdmin()){
+    const esc = fuEscalations(), l3 = esc.reduce((a,r)=>a+r.l3,0);
+    if(l3) actionItems.push({icon:'&#128680;', color:'var(--red,#dc2626)', text:'Escalation: '+l3+' follow-up(s) overdue 7+ days ('+esc.filter(r=>r.l3).map(r=>r.owner+' '+r.l3).join(', ')+')', view:'followupcentre'});
+    const old = (Store.data.payments||[]).filter(p=>{ const due=Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0); const b=p.invoiceDate; return due>0 && b && Math.floor((Date.now()-new Date(b).getTime())/86400000)>90; });
+    if(old.length) actionItems.push({icon:'&#128176;', color:'var(--red,#dc2626)', text:'Collections: '+old.length+' invoice(s) unpaid for 90+ days ('+Util.fmtMoney(old.reduce((a,p)=>a+Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0),0))+')', view:'outstanding'});
+    const nogo = (Store.data.bids||[]).filter(b=>!BID_TERMINAL_STATUSES.includes(b.status) && ['New','Saved','Under Review','Go / No-Go Decision'].includes(b.status) && !['Go','No-Go'].includes(bidGoState(b)) && (bidDeadlineInfo(b.endDate).days!==null && bidDeadlineInfo(b.endDate).days<=3 && bidDeadlineInfo(b.endDate).days>=0));
+    if(nogo.length) actionItems.push({icon:'&#9878;', color:'var(--amber,#d97706)', text:'Go / No-Go needed: '+nogo.length+' bid(s) closing within 3 days with no decision', view:'bidsearch'});
+  }
   if(Auth.isAdmin()) pendingLeave.forEach(l=>actionItems.push({icon:'&#128197;', color:'var(--violet,#7c3aed)', text:'Leave approval pending: '+(l.name||l.username||''), view:'attendance'}));
 
   const byStatus = {};
@@ -3674,8 +3780,50 @@ Views.leads = ()=>{ Customers.filterMode='leads'; Customers.render(); };
 /* =====================================================================
    FOLLOW-UP CENTRE
 ===================================================================== */
+/* Follow-up escalation: how late a follow-up is decides who needs to
+   see it. Level 1 = reminder for the owner (1 to 2 days late), level 2 =
+   Manager attention (3+ days), level 3 = Admin attention (7+ days).
+   Limits can be changed with settings escL2Days / escL3Days. */
+function fuDaysOver(f){
+  if(!f || f.status==='Done' || !f.date) return 0;
+  const d = Math.floor((new Date(Util.todayISO()) - new Date(f.date))/86400000);
+  return isNaN(d) ? 0 : Math.max(0,d);
+}
+function fuEscLevel(f){
+  const d = fuDaysOver(f); if(d<=0) return 0;
+  const st = Store.data.settings||{}, l2 = Number(st.escL2Days)||3, l3 = Number(st.escL3Days)||7;
+  return d>=l3 ? 3 : d>=l2 ? 2 : 1;
+}
+function fuEscBadge(f){
+  const l = fuEscLevel(f); if(!l) return '';
+  const col = l===3?'var(--red,#dc2626)':l===2?'var(--orange,#ea580c)':'var(--amber,#d97706)';
+  return '<span class="badge fu-esc" style="margin-left:6px;background:'+col+';color:#fff;" title="Level '+l+' escalation">Overdue '+fuDaysOver(f)+'d &middot; L'+l+'</span>';
+}
+function fuEscalations(){
+  const out = {};
+  (Store.data.followups||[]).forEach(f=>{
+    const l = fuEscLevel(f); if(!l) return;
+    const cust = Store.data.customers.find(c=>c.id===f.customerId);
+    const owner = (cust && cust.assignedTo) || 'Unassigned';
+    const o = out[owner] || (out[owner] = {owner, l1:0, l2:0, l3:0, oldest:0, total:0});
+    o['l'+l]++; o.total++; o.oldest = Math.max(o.oldest, fuDaysOver(f));
+  });
+  return Object.values(out).sort((a,b)=>(b.l3-a.l3)||(b.l2-a.l2)||(b.total-a.total));
+}
 const Followups = {
   centreTab: 'today',
+  escalationHTML(){
+    const role = Auth.session && Auth.session.role;
+    if(role!=='Admin' && role!=='Manager') return '';
+    const rows = fuEscalations(); if(!rows.length) return '';
+    const sum = k=>rows.reduce((a,r)=>a+r[k],0);
+    return '<div class="card card-pad" id="fuEscalation" style="margin:0 0 14px;border-left:4px solid var(--red,#dc2626);">' +
+      '<b>Escalations</b> <span class="hint">Late follow-ups by owner. L1 = 1-2 days, L2 = 3+ days (Manager), L3 = 7+ days (Admin).</span>' +
+      '<div style="margin:6px 0;"><span class="badge" style="background:var(--amber,#d97706);color:#fff;">L1: '+sum('l1')+'</span> <span class="badge" style="background:var(--orange,#ea580c);color:#fff;">L2: '+sum('l2')+'</span> <span class="badge" style="background:var(--red,#dc2626);color:#fff;">L3: '+sum('l3')+'</span></div>' +
+      '<div class="table-wrap"><table><thead><tr><th>Owner</th><th>L1</th><th>L2</th><th>L3</th><th>Oldest (days)</th></tr></thead><tbody>' +
+      rows.map(r=>'<tr><td class="cell-main">'+Util.escapeHtml(r.owner)+'</td><td>'+r.l1+'</td><td>'+r.l2+'</td><td style="'+(r.l3?'color:var(--red,#dc2626);font-weight:700;':'')+'">'+r.l3+'</td><td>'+r.oldest+'</td></tr>').join('') +
+      '</tbody></table></div></div>';
+  },
   render(){
     const today = Util.todayISO();
     const tomorrow = new Date(Date.now()+86400000).toISOString().slice(0,10);
@@ -3706,6 +3854,7 @@ const Followups = {
         <button class="btn btn-primary btn-sm" onclick="Followups.openForm(null,null)">&#65291; Schedule Follow-up</button>
       </div>
 
+      ${this.escalationHTML()}
       <div id="fuList">
         ${active.length ? active.map(f=>this.cardHtml(f, today)).join('') : `<div class="empty-state"><div class="ic">&#9200;</div><div class="t">Nothing here</div><div class="d">No follow-ups in this list right now.</div></div>`}
       </div>
@@ -3719,7 +3868,7 @@ const Followups = {
     const email = cust ? cust.email : '';
     return `<div class="fu-card ${cls}">
       <div class="info">
-        <div class="nm">${Util.escapeHtml(f.customerName)} ${overdue?'<span class="badge badge-red" style="margin-left:6px;">Overdue</span>':''}${isToday&&f.status!=='Done'?'<span class="badge badge-amber" style="margin-left:6px;">Today</span>':''}${f.status==='Done'?'<span class="badge badge-green" style="margin-left:6px;">Done</span>':''}</div>
+        <div class="nm">${Util.escapeHtml(f.customerName)} ${overdue?fuEscBadge(f):''}${isToday&&f.status!=='Done'?'<span class="badge badge-amber" style="margin-left:6px;">Today</span>':''}${f.status==='Done'?'<span class="badge badge-green" style="margin-left:6px;">Done</span>':''}</div>
         <div class="pp">${Util.escapeHtml(f.purpose||'Follow-up call')}</div>
         <div class="dt">&#128197; ${Util.fmtDate(f.date)} &middot; <span class="mono">${Util.escapeHtml(f.phone||'')}</span></div>
       </div>
@@ -5506,6 +5655,167 @@ Views.amc = ()=>Amc.render();
    20 pts EMD arranged (full marks when the bid needs no EMD), 10 pts
    bid basics filled (title, organisation, closing date). Returns the
    parts too so the detail view can say exactly what is missing. */
+/* =====================================================================
+   BID GO / NO-GO + LIFECYCLE
+   A structured, recorded decision before the team spends time on a bid.
+   Eight criteria are rated Yes / Partly / No; the score is a weighted
+   percentage. A "No" on a deal-breaker (product fit, eligibility)
+   always recommends No-Go. Anyone can fill the assessment; only an
+   Admin or Manager records the final decision. Nothing here blocks
+   existing bids - bids with no assessment simply show "Not assessed".
+   ===================================================================== */
+const GO_CRITERIA = [
+  {key:'fit',   label:'Product fit - we can supply what is asked', w:3, ko:true},
+  {key:'elig',  label:'Eligibility met (turnover, experience, OEM/MAF, relaxations)', w:3, ko:true},
+  {key:'margin',label:'Margin is acceptable', w:2},
+  {key:'docs',  label:'Documents can be ready in time', w:2},
+  {key:'emd',   label:'EMD / security deposit is affordable', w:1},
+  {key:'time',  label:'Enough time before closing', w:1},
+  {key:'deliv', label:'Delivery location and terms are feasible', w:1},
+  {key:'buyer', label:'Buyer / competition is acceptable', w:1}
+];
+const BID_STAGES = ['New','Saved','Under Review','Go / No-Go Decision','Documents Pending','Under Preparation','Ready for Submission','Submitted','Technical Evaluation','Financial Evaluation'];
+const BID_STAGE_GROUPS = {
+  'Opportunity': ['New','Saved','Under Review'],
+  'Decision': ['Go / No-Go Decision'],
+  'Preparing': ['Documents Pending','Under Preparation','Ready for Submission'],
+  'Submitted / Evaluation': ['Submitted','Technical Evaluation','Financial Evaluation'],
+  'Closed': ['Won','Lost','Cancelled','Not Participating']
+};
+function bidGoState(b){ const g = b && b.goNoGo; return (g && g.decision) ? g.decision : 'none'; }
+function bidDaysInStage(b){
+  const tl = (b.timeline||[]).filter(t=>/^Status changed to /.test(t.text||'') || /^Go \/ No-Go/.test(t.text||''));
+  const last = tl.length ? tl[tl.length-1].date : (b.savedAt || b.createdDate);
+  if(!last) return null;
+  const d = Math.floor((Date.now() - new Date(last).getTime())/86400000);
+  return isNaN(d) ? null : Math.max(0,d);
+}
+const GoNoGo = {
+  isDecider(){ const r = Auth.session && Auth.session.role; return r==='Admin' || r==='Manager'; },
+  suggest(b){
+    const out = {}, m = bidMatch(b).score;
+    out.fit = m>=50?2:m>=20?1:0;
+    const mg = Number(b.expectedMargin)||0, minM = Number((Store.data.settings||{}).goMinMargin)||8;
+    if(mg>0) out.margin = mg>=minM?2:mg>=minM/2?1:0;
+    const cl = b.checklist||[]; if(cl.length){ const p = cl.filter(c=>c.done).length/cl.length*100; out.docs = p>=80?2:p>=40?1:0; }
+    const d = bidDeadlineInfo(b.endDate).days; if(d!==null) out.time = d>=5?2:d>=2?1:0;
+    return out;
+  },
+  score(r){
+    let got=0, max=0, rated=0;
+    GO_CRITERIA.forEach(c=>{ const v=r[c.key]; if(v===0||v===1||v===2){ got+=c.w*v; max+=c.w*2; rated++; } });
+    return { pct: max?Math.round(got/max*100):null, rated, total:GO_CRITERIA.length, complete: rated===GO_CRITERIA.length };
+  },
+  recommend(r){
+    const sc = this.score(r);
+    const ko = GO_CRITERIA.filter(c=>c.ko && r[c.key]===0).map(c=>c.label.split(' - ')[0].split(' (')[0]);
+    if(ko.length) return { rec:'No-Go', why:'Deal-breaker rated No: '+ko.join(', '), sc };
+    if(!sc.complete) return { rec:'Incomplete', why:'Rate all '+sc.total+' criteria to get a recommendation ('+sc.rated+' done).', sc };
+    if(sc.pct>=70) return { rec:'Go', why:'Score '+sc.pct+'% is 70% or more.', sc };
+    if(sc.pct>=45) return { rec:'Review', why:'Score '+sc.pct+'% is borderline (45-69%) - discuss before deciding.', sc };
+    return { rec:'No-Go', why:'Score '+sc.pct+'% is below 45%.', sc };
+  },
+  badge(b){
+    const st = bidGoState(b);
+    const col = st==='Go'?'var(--green,#16a34a)':st==='No-Go'?'var(--red,#dc2626)':st==='Hold'?'var(--amber,#d97706)':'var(--text-mute,#6b7280)';
+    return '<span class="badge" style="background:'+col+';color:#fff;white-space:nowrap;">'+(st==='none'?'Not assessed':st)+'</span>';
+  },
+  cardHTML(b){
+    const g = b.goNoGo || {}, E = Util.escapeHtml;
+    return '<div class="card card-pad" id="goCard" style="margin:14px 0 0;"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">' +
+      '<div><b>Go / No-Go:</b> '+this.badge(b)+(g.score!=null?' <span class="cell-mute" style="font-size:12px;">score '+g.score+'%'+(g.rec?' &middot; recommended '+E(g.rec):'')+'</span>':'') +
+      (g.decision && g.by ? '<div class="cell-mute" style="font-size:12px;margin-top:3px;">Decided by '+E(g.by)+(g.at?' on '+E(new Date(g.at).toLocaleString('en-IN')):'')+(g.reason?' &middot; Reason: '+E(g.reason):'')+'</div>' : '') + '</div>' +
+      '<button class="btn btn-outline btn-sm" onclick="GoNoGo.open(\''+b.id+'\')">&#9878; '+(g.decision?'Review':'Assess')+' Go / No-Go</button></div></div>';
+  },
+  stagesHTML(b){
+    const cur = b.status||'New', idx = BID_STAGES.indexOf(cur), closed = BID_TERMINAL_STATUSES.includes(cur);
+    const days = bidDaysInStage(b);
+    return '<div id="stageTracker" style="display:flex;gap:4px;flex-wrap:wrap;margin:10px 0 4px;">' +
+      BID_STAGES.map((st,i)=>{
+        const done = closed ? true : (idx>=0 && i<idx), now = !closed && i===idx;
+        return '<span class="badge" style="'+(now?'background:var(--orange,#ea580c);color:#fff;':done?'background:var(--green-soft,#dcfce7);color:#166534;':'background:var(--bg-soft,#f3f4f6);color:var(--text-mute,#6b7280);')+'font-size:11px;">'+(done&&!now?'&#10003; ':'')+st+'</span>';
+      }).join('') + (closed ? '<span class="badge" style="background:'+bidStatusColor(cur)+';color:#fff;font-size:11px;">'+cur+'</span>' : '') +
+      '</div>' + (days!==null && !closed ? '<div class="hint">In this stage for <b>'+days+'</b> day(s)'+(days>=7?' &mdash; consider moving it forward or closing it.':'.')+'</div>' : '');
+  },
+  open(id){
+    const b = Store.data.bids.find(x=>x.id===id); if(!b) return;
+    const g = b.goNoGo || {}, r = g.ratings || {}, sug = this.suggest(b), E = Util.escapeHtml;
+    const opt = (v,cur)=>'<option value="'+v+'" '+(String(cur)===String(v)?'selected':'')+'>'+({'':'Not rated','2':'Yes','1':'Partly','0':'No'}[v])+'</option>';
+    const sugTxt = k=> (sug[k]===undefined) ? '' : ' <span class="hint">(suggested: '+({2:'Yes',1:'Partly',0:'No'}[sug[k]])+')</span>';
+    UI.openModal('Go / No-Go - '+(b.bidNumber||b.id),
+      '<div class="hint" style="margin-bottom:10px;">'+E(b.title||'')+'. Rate each point honestly; the recommendation updates as you go. Suggestions come from the bid\'s match score, margin, document checklist and closing date.</div>' +
+      '<div style="display:grid;grid-template-columns:1fr 130px;gap:8px 12px;align-items:center;">' +
+      GO_CRITERIA.map(c=>'<label for="gn_'+c.key+'">'+E(c.label)+(c.ko?' <span class="badge badge-red" title="A No here recommends No-Go">deal-breaker</span>':'')+sugTxt(c.key)+'</label>' +
+        '<select id="gn_'+c.key+'" onchange="GoNoGo.refresh()">'+['','2','1','0'].map(v=>opt(v, r[c.key]===undefined?'':r[c.key])).join('')+'</select>').join('') +
+      '</div>' +
+      '<div class="toolbar" style="margin-top:8px;"><button class="btn btn-outline btn-sm" onclick="GoNoGo.useSuggestions()">Fill unrated from suggestions</button></div>' +
+      '<div id="gn_rec" class="card card-pad" style="margin:10px 0;"></div>' +
+      '<div class="field"><label>Notes</label><textarea id="gn_notes" rows="2">'+E(g.notes||'')+'</textarea></div>' +
+      '<div class="field"><label>Reason for decision <span class="hint">(required for No-Go, and for Go against a No-Go recommendation)</span></label><input id="gn_reason" value="'+E(g.reason||'')+'"></div>' +
+      (this.isDecider() ? '' : '<div class="hint">Only an Admin or Manager can record the final decision. You can save the assessment for them to review.</div>'),
+      '<button class="btn btn-outline" onclick="BidSearch.openDetail(\''+id+'\')">Back</button>' +
+      '<button class="btn btn-outline" onclick="GoNoGo.save(\''+id+'\',\'\')">Save assessment</button>' +
+      (this.isDecider() ? '<button class="btn btn-outline" onclick="GoNoGo.save(\''+id+'\',\'Hold\')">Hold</button><button class="btn btn-outline" style="color:var(--red,#dc2626);" onclick="GoNoGo.save(\''+id+'\',\'No-Go\')">No-Go</button><button class="btn btn-primary" onclick="GoNoGo.save(\''+id+'\',\'Go\')">Go</button>' : ''), true);
+    this.refresh();
+  },
+  read(){
+    const r = {};
+    GO_CRITERIA.forEach(c=>{ const v = document.getElementById('gn_'+c.key).value; if(v!=='') r[c.key] = Number(v); });
+    return r;
+  },
+  refresh(){
+    const rec = this.recommend(this.read()), el = document.getElementById('gn_rec'); if(!el) return;
+    const col = rec.rec==='Go'?'var(--green,#16a34a)':rec.rec==='No-Go'?'var(--red,#dc2626)':rec.rec==='Review'?'var(--amber,#d97706)':'var(--text-mute,#6b7280)';
+    el.innerHTML = '<b>Recommendation: <span id="gn_recText" style="color:'+col+';">'+rec.rec+'</span></b>'+(rec.sc.pct!==null?' &middot; score <b id="gn_score">'+rec.sc.pct+'%</b>':'')+'<div class="hint">'+Util.escapeHtml(rec.why)+'</div>';
+  },
+  useSuggestions(){
+    // suggestions are read back from the visible hints
+    GO_CRITERIA.forEach(c=>{
+      const sel = document.getElementById('gn_'+c.key); if(!sel || sel.value!=='') return;
+      const lab = document.querySelector('label[for="gn_'+c.key+'"] .hint'); if(!lab) return;
+      const m = /suggested: (Yes|Partly|No)/.exec(lab.textContent); if(m) sel.value = {Yes:'2',Partly:'1',No:'0'}[m[1]];
+    });
+    this.refresh();
+  },
+  async save(id, decision){
+    const b = Store.data.bids.find(x=>x.id===id); if(!b) return;
+    if(decision && !this.isDecider()){ UI.toast('Only an Admin or Manager can record the decision'); return; }
+    const ratings = this.read(), rec = this.recommend(ratings);
+    const reason = document.getElementById('gn_reason').value.trim(), notes = document.getElementById('gn_notes').value.trim();
+    if(decision==='No-Go' && !reason){ UI.toast('Please give a reason for No-Go'); return; }
+    if(decision==='Go' && rec.rec==='No-Go' && !reason){ UI.toast('The recommendation is No-Go - give a reason to override it'); return; }
+    if(decision==='Go' && rec.rec==='Incomplete' && !confirm('Not all points are rated. Record Go anyway?')) return;
+    const prev = b.goNoGo || {};
+    b.goNoGo = Object.assign({}, prev, { ratings, notes, reason, score: rec.sc.pct, rec: rec.rec });
+    const who = bidUserName(), now = new Date().toISOString();
+    b.timeline = b.timeline||[];
+    if(decision){
+      b.goNoGo.decision = decision; b.goNoGo.by = who; b.goNoGo.at = now;
+      b.timeline.push({date:now, text:'Go / No-Go: '+decision+(rec.sc.pct!==null?' (score '+rec.sc.pct+'%)':'')+(reason?' - '+reason:''), by:who});
+      const early = ['New','Saved','Under Review','Go / No-Go Decision'];
+      let to = null;
+      if(decision==='Go' && early.includes(b.status)) to = 'Documents Pending';
+      else if(decision==='No-Go' && !BID_TERMINAL_STATUSES.includes(b.status)) to = 'Not Participating';
+      else if(decision==='Hold' && ['New','Saved','Under Review'].includes(b.status)) to = 'Go / No-Go Decision';
+      if(to && to!==b.status){ b.status = to; b.timeline.push({date:now, text:'Status changed to '+to, by:who}); }
+    } else {
+      b.timeline.push({date:now, text:'Go / No-Go assessment saved'+(rec.sc.pct!==null?' (score '+rec.sc.pct+'%, '+rec.rec+')':''), by:who});
+    }
+    b.updatedBy = who; b.updatedAt = now;
+    const ok = await Store.save('bids');
+    if(ok!==false) await Activity.log(decision?('Bid Go/No-Go: '+decision):'Bid Go/No-Go assessed', (b.bidNumber||b.title));
+    UI.toast(decision?('Recorded: '+decision):'Assessment saved');
+    BidSearch.openDetail(id);
+  },
+  /* Soft gate: warns (never blocks) when a bid moves toward submission without a Go. */
+  gate(b, status){
+    if(!['Ready for Submission','Submitted'].includes(status)) return true;
+    const st = bidGoState(b);
+    if(st==='Go') return true;
+    return confirm(st==='none' ? 'No Go / No-Go decision is recorded for this bid. Move to "'+status+'" anyway?' : 'The Go / No-Go decision for this bid is "'+st+'". Move to "'+status+'" anyway?');
+  }
+};
+
 function bidReadiness(b){
   const cl = Array.isArray(b.checklist) ? b.checklist : [];
   const docDone = cl.filter(c=>c.done).length;
@@ -5710,7 +6020,36 @@ Views.notes = ()=>Notes.render();
 /* =====================================================================
    SALES PIPELINE  (cross-entity funnel dashboard: leads -> quotes -> orders)
 ===================================================================== */
+/* Weighted forecast: value x chance of winning at its stage. The chances
+   below are starting estimates, NOT measured from your history (the
+   card also shows your real bid win rate so you can compare). Change
+   them with settings.forecastProb if you want your own numbers. */
+const FORECAST_PROB = { 'New':0.03,'Saved':0.05,'Under Review':0.08,'Go / No-Go Decision':0.10,'Documents Pending':0.15,'Under Preparation':0.20,
+  'Ready for Submission':0.25,'Submitted':0.30,'Technical Evaluation':0.40,'Financial Evaluation':0.50, 'Quotation Draft':0.10, 'Quotation Sent':0.30 };
+function forecastProb(stage){ const o = (Store.data.settings||{}).forecastProb || {}; const v = Number(o[stage]); return (v>=0 && v<=1 && o[stage]!==undefined) ? v : (FORECAST_PROB[stage]||0); }
 const SalesPipeline = {
+  forecast(){
+    const rows = []; const add = (src,stage,count,value)=>{ if(!count) return; const pr = forecastProb(stage); rows.push({src,stage,count,value,pr,w:Math.round(value*pr)}); };
+    const stageSum = {};
+    (Store.data.bids||[]).filter(b=>!BID_TERMINAL_STATUSES.includes(b.status)).forEach(b=>{
+      const v = Number(b.ourQuote)||Number(b.estimatedValue)||0; const o = stageSum[b.status||'New'] || (stageSum[b.status||'New']={c:0,v:0}); o.c++; o.v+=v;
+    });
+    BID_STAGES.forEach(st=>{ if(stageSum[st]) add('GeM bids', st, stageSum[st].c, stageSum[st].v); });
+    const q = (Store.data.quotations||[]);
+    [['Draft','Quotation Draft'],['Sent','Quotation Sent']].forEach(([stt,label])=>{ const l=q.filter(x=>x.status===stt); add('Quotations', label, l.length, l.reduce((a,x)=>a+(Number(x.total)||0),0)); });
+    const won = (Store.data.bids||[]).filter(b=>b.status==='Won').length, lost = (Store.data.bids||[]).filter(b=>b.status==='Lost').length;
+    return { rows, total:rows.reduce((a,r)=>a+r.value,0), weighted:rows.reduce((a,r)=>a+r.w,0), won, lost, winRate: (won+lost)? Math.round(won/(won+lost)*100) : null };
+  },
+  forecastHTML(){
+    const f = this.forecast();
+    return '<div class="card card-pad" id="forecastCard" style="margin-top:16px;"><h3 style="margin:0 0 4px;font-size:14px;">Weighted Pipeline Forecast</h3>' +
+      '<div class="hint" style="margin-bottom:8px;">Value x chance of winning at each stage. Chances are default estimates, not measured from your history.' +
+      (f.winRate!==null ? ' Your recorded bid win rate: <b>'+f.winRate+'%</b> ('+f.won+' won, '+f.lost+' lost).' : ' No won/lost bids recorded yet, so a real win rate cannot be shown.') + '</div>' +
+      (f.rows.length ? '<div class="table-wrap"><table><thead><tr><th>Source</th><th>Stage</th><th>Count</th><th>Value</th><th>Chance</th><th>Weighted</th></tr></thead><tbody>' +
+        f.rows.map(r=>'<tr><td>'+Util.escapeHtml(r.src)+'</td><td>'+Util.escapeHtml(r.stage)+'</td><td>'+r.count+'</td><td class="mono">'+Util.fmtMoney(r.value)+'</td><td>'+Math.round(r.pr*100)+'%</td><td class="mono">'+Util.fmtMoney(r.w)+'</td></tr>').join('') +
+        '<tr><td colspan="3"><b>Total</b></td><td class="mono"><b>'+Util.fmtMoney(f.total)+'</b></td><td></td><td class="mono" id="forecastWeighted"><b>'+Util.fmtMoney(f.weighted)+'</b></td></tr></tbody></table></div>'
+        : '<div class="hint">No open bids or quotations to forecast yet.</div>') + '</div>';
+  },
   render(){
     const custs = Store.data.customers;
     const leads = custs.filter(x=>['New Lead','First Contact','Call Not Taken'].includes(x.status)).length;
@@ -5755,6 +6094,7 @@ const SalesPipeline = {
           ${Object.entries(quoStats).map(([k,v])=>funnelStage(k, v, Math.max(...Object.values(quoStats),1), 'var(--violet,#7c3aed)')).join('')}
         </div>
       </div>
+      ${this.forecastHTML()}
       <div class="card card-pad" style="margin-top:16px;">
         <h3 style="margin:0 0 12px;font-size:14px;">Order Status</h3>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;">
@@ -5774,7 +6114,7 @@ const Outstanding = {
     const pays = Store.data.payments;
     const today = Util.todayISO();
     const byParty = {};
-    const aging = {b0_30:0, b31_60:0, b61_90:0, b90plus:0};
+    const aging = {b0_30:0, b31_60:0, b61_90:0, b90plus:0, noDate:0};
     pays.forEach(p=>{
       const due = Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0), 0);
       if(due<=0) return;
@@ -5784,9 +6124,11 @@ const Outstanding = {
       byParty[key].due += due;
       byParty[key].invoices += 1;
       if(p.followupDate && p.followupDate < today) byParty[key].overdue += due;
-      if(p.followupDate){
-        const days = Math.floor((new Date(today) - new Date(p.followupDate))/86400000);
-        if(days>=0 && days<=30){ byParty[key].b0_30+=due; aging.b0_30+=due; }
+      const basis = p.invoiceDate || p.followupDate;
+      if(!basis){ aging.noDate += due; }
+      else {
+        const days = Math.floor((new Date(today) - new Date(basis))/86400000);
+        if(days<=30){ byParty[key].b0_30+=due; aging.b0_30+=due; }
         else if(days>30 && days<=60){ byParty[key].b31_60+=due; aging.b31_60+=due; }
         else if(days>60 && days<=90){ byParty[key].b61_90+=due; aging.b61_90+=due; }
         else if(days>90){ byParty[key].b90plus+=due; aging.b90plus+=due; }
@@ -5799,14 +6141,15 @@ const Outstanding = {
     document.getElementById('content').innerHTML = `
       ${dashboardCardsHTML('Outstanding Overview', [
         {label:'Total Outstanding', value:Util.fmtMoney(totalOutstanding), color:'var(--amber,#d97706)'},
-        {label:'Overdue', value:Util.fmtMoney(totalOverdue), color:'var(--red,#dc2626)'},
+        {label:'Follow-up overdue', value:Util.fmtMoney(totalOverdue), color:'var(--red,#dc2626)'},
         {label:'Parties with Dues', value:rows.length}
       ])}
-      ${dashboardCardsHTML('Ageing (based on payment due date)', [
+      ${dashboardCardsHTML('Ageing (days since invoice date; follow-up date if no invoice date)', [
         {label:'0-30 Days', value:Util.fmtMoney(aging.b0_30), color:'var(--blue,#2563eb)'},
         {label:'31-60 Days', value:Util.fmtMoney(aging.b31_60), color:'var(--amber,#d97706)'},
         {label:'61-90 Days', value:Util.fmtMoney(aging.b61_90), color:'var(--orange,#ea580c)'},
-        {label:'90+ Days', value:Util.fmtMoney(aging.b90plus), color:'var(--red,#dc2626)'}
+        {label:'90+ Days', value:Util.fmtMoney(aging.b90plus), color:'var(--red,#dc2626)'},
+        {label:'No date recorded', value:Util.fmtMoney(aging.noDate), color:aging.noDate?'var(--amber,#d97706)':undefined}
       ])}
       <div class="card"><div class="table-wrap">
       ${rows.length ? `<table><thead><tr><th>Party</th><th>Phone</th><th>Open Invoices</th><th>Amount Due</th><th>0-30d</th><th>31-60d</th><th>61-90d</th><th>90+d</th><th></th></tr></thead><tbody>
@@ -6896,20 +7239,22 @@ const Calling = {
   },
 
   /* ------------------------------ STAFF: my calling list ------------------------------ */
-  M: { tab:'list', page:0, per:25, q:'', todayOnly:true, tk:0 },
+  M: { tab:'list', page:0, per:25, q:'', todayOnly:true, tk:0, oc:'' },
   async renderMy(){
     const M = this.M;
     document.getElementById('content').innerHTML = `
       <div id="cl_cards"><div class="card card-pad cell-mute">Loading your day&hellip;</div></div>
       <div class="toolbar" style="flex-wrap:wrap;">
-        <button class="btn ${M.tab==='list'?'btn-primary':'btn-outline'} btn-sm" onclick="Calling.setTab('list')">&#128222; Calling list</button>
+        <button class="btn ${M.tab==='list'?'btn-primary':'btn-outline'} btn-sm" id="cl_tab_list" onclick="Calling.setTab('list')">&#128222; Call pending</button>
+        <button class="btn ${M.tab==='called'?'btn-primary':'btn-outline'} btn-sm" id="cl_tab_called" onclick="Calling.setTab('called')">&#9989; Called</button>
         <button class="btn ${M.tab==='fu'?'btn-primary':'btn-outline'} btn-sm" onclick="Calling.setTab('fu')">&#9200; Follow-ups</button>
         <button class="btn ${M.tab==='hist'?'btn-primary':'btn-outline'} btn-sm" onclick="Calling.setTab('hist')">&#128337; My call history</button>
       </div>
       <div id="cl_body"></div>`;
     this.loadStats(); this.loadTab();
   },
-  setTab(t){ this.M.tab = t; this.M.page = 0; this.renderMy(); },
+  setTab(t){ this.M.tab = t; this.M.page = 0; if(t!=='called') this.M.oc = ''; this.renderMy(); },
+  setOutcomeFilter(o){ this.M.oc = o; this.M.page = 0; this.loadList(); },
   async loadStats(){
     const box = document.getElementById('cl_cards'); if(!box) return;
     try{
@@ -6928,23 +7273,44 @@ const Calling = {
     }catch(e){ box.innerHTML = '<div class="card card-pad" style="color:var(--red,#dc2626);">Could not load your numbers: '+Util.escapeHtml(e.message||'error')+'</div>'; }
   },
   loadTab(){ const t = this.M.tab; return t==='fu' ? this.loadFollowups() : t==='hist' ? this.loadHistory() : this.loadList(); },
+  /* all of my active contacts (the server returns at most 200 per call, so page through) */
+  async fetchAllMine(){
+    const M = this.M, all = []; let total = Infinity;
+    for(let off = 0; off < 5000 && all.length < total; off += 200){
+      const { data, error } = await sb.rpc('my_calls_list', { p_q:M.q||null, p_today_only:M.todayOnly, p_limit:200, p_offset:off }); if(error) throw error;
+      const rows = data || []; if(!rows.length) break; all.push(...rows); total = Number(rows[0].total_count) || all.length; if(rows.length < 200) break;
+    }
+    return all;
+  },
   async loadList(){
-    const M = this.M, box = document.getElementById('cl_body'); if(!box) return; const tk = ++M.tk;
+    const M = this.M, box = document.getElementById('cl_body'); if(!box) return; const tk = ++M.tk; const called = M.tab==='called';
     box.innerHTML = `<div class="toolbar"><div class="search"><span class="ic">&#128269;</span><input id="cl_q" placeholder="Name, phone, local body, district..." value="${Util.escapeHtml(M.q)}" onkeydown="if(event.key==='Enter'){Calling.M.q=this.value.trim();Calling.M.page=0;Calling.loadList();}"></div>
-      <label style="font-size:13px;"><input type="checkbox" ${M.todayOnly?'checked':''} onchange="Calling.M.todayOnly=this.checked;Calling.M.page=0;Calling.loadList()"> Today's list only</label></div><div class="card"><div class="table-wrap" id="cl_list"><div class="empty-state"><div class="t">Loading&hellip;</div></div></div><div id="cl_pager" style="padding:8px 12px;"></div></div>`;
+      <label style="font-size:13px;"><input type="checkbox" ${M.todayOnly?'checked':''} onchange="Calling.M.todayOnly=this.checked;Calling.M.page=0;Calling.loadList()"> Today's list only</label></div>
+      <div id="cl_oc"></div><div class="card"><div class="table-wrap" id="cl_list"><div class="empty-state"><div class="t">Loading&hellip;</div></div></div><div id="cl_pager" style="padding:8px 12px;"></div></div>`;
     try{
-      const { data, error } = await sb.rpc('my_calls_list', { p_q:M.q||null, p_today_only:M.todayOnly, p_limit:M.per, p_offset:M.page*M.per });
-      if(tk !== M.tk) return; if(error) throw error;
-      const rows = data || []; this.cacheRows = rows; const total = rows.length ? Number(rows[0].total_count) : 0;
-      document.getElementById('cl_list').innerHTML = rows.length ? `<table><thead><tr><th class="col-actions">Action</th><th>Contact</th><th>Phone</th><th>Local body</th><th>Priority</th><th>Due</th><th>Calls</th><th>Last outcome</th><th>Next follow-up</th></tr></thead><tbody>
-        ${rows.map((r,i)=>`<tr><td class="col-actions"><div class="row-action-btns"><button class="btn btn-primary btn-sm" onclick="Calling.openLog(${i})">&#9742; Call / Log</button></div></td>
+      const all = await this.fetchAllMine();
+      if(tk !== M.tk) return;
+      const isCalled = r=>Number(r.calls_total) > 0;
+      const pend = all.filter(r=>!isCalled(r)), done = all.filter(isCalled);
+      const tp = document.getElementById('cl_tab_list'), tc = document.getElementById('cl_tab_called');
+      if(tp) tp.innerHTML = '&#128222; Call pending ('+pend.length+')'; if(tc) tc.innerHTML = '&#9989; Called ('+done.length+')';
+      let base = called ? done : pend;
+      if(called){
+        const cnt = {}; done.forEach(r=>{ cnt[r.last_outcome||'—'] = (cnt[r.last_outcome||'—']||0)+1; });
+        const chip = (o,label,n)=>`<button type="button" class="btn ${M.oc===o?'btn-primary':'btn-outline'} btn-sm" onclick="Calling.setOutcomeFilter('${o}')">${Util.escapeHtml(label)} (${n})</button>`;
+        document.getElementById('cl_oc').innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px;">${chip('','All called',done.length)}${CALL_OUTCOMES.map(o=>chip(o,o,cnt[o]||0)).join('')}</div>`;
+        if(M.oc) base = done.filter(r=>r.last_outcome===M.oc);
+      }
+      const total = base.length, rows = base.slice(M.page*M.per, M.page*M.per + M.per); this.cacheRows = rows;
+      document.getElementById('cl_list').innerHTML = rows.length ? `<table><thead><tr><th class="col-actions">Action</th><th>Contact</th><th>Phone</th><th>Local body</th><th>Priority</th><th>Due</th>${called?'<th>Calls</th><th>Last outcome</th><th>Next follow-up</th>':''}</tr></thead><tbody>
+        ${rows.map((r,i)=>`<tr><td class="col-actions"><div class="row-action-btns"><button class="btn btn-primary btn-sm" onclick="Calling.openLog(${i})">&#9742; ${called?'Call again / Log':'Call / Log'}</button></div></td>
           <td class="cell-main">${Util.escapeHtml(r.name||'—')}<div class="cell-mute" style="font-size:11px;">${Util.escapeHtml(r.lead_status||'')}${r.reassign_requested_at?' · reassignment requested':''}</div></td>
           <td class="mono">${r.phone?`<a href="tel:${Util.escapeHtml(String(r.phone).replace(/[^\d+]/g,''))}">${Util.escapeHtml(r.phone)}</a>`:'—'}</td>
           <td class="cell-mute">${Util.escapeHtml([r.panchayath,r.district].filter(Boolean).join(', ')||'—')}</td>
-          <td>${Util.escapeHtml(r.priority||'')}</td><td class="cell-mute">${Util.fmtDate(r.due_date)}</td><td>${r.calls_total}</td>
-          <td>${callOutcomeBadge(r.last_outcome)}<div class="cell-mute" style="font-size:11px;">${callFmt(r.last_call_at)}</div></td>
-          <td class="cell-mute">${r.next_follow_up_at?callFmt(r.next_follow_up_at):'—'}</td></tr>`).join('')}</tbody></table>`
-        : `<div class="empty-state"><div class="ic">&#128222;</div><div class="t">${M.q?'No matches':'Nothing assigned to you right now'}</div><div class="d">${M.todayOnly?'Untick "Today\'s list only" to see all your active contacts.':'Your manager will allocate contacts to you.'}</div></div>`;
+          <td>${Util.escapeHtml(r.priority||'')}</td><td class="cell-mute">${Util.fmtDate(r.due_date)}</td>
+          ${called?`<td>${r.calls_total}</td><td>${callOutcomeBadge(r.last_outcome)}<div class="cell-mute" style="font-size:11px;">${callFmt(r.last_call_at)}</div></td>
+          <td class="cell-mute">${r.next_follow_up_at?callFmt(r.next_follow_up_at):'—'}</td>`:''}</tr>`).join('')}</tbody></table>`
+        : `<div class="empty-state"><div class="ic">${called?'&#9989;':'&#128222;'}</div><div class="t">${M.q?'No matches':(called?(M.oc?'No contacts with this outcome':'You have not called anyone yet'):(all.length?'All your contacts have been called':'Nothing assigned to you right now'))}</div><div class="d">${M.todayOnly?'Untick "Today\'s list only" to see all your active contacts.':(all.length?'':'Your manager will allocate contacts to you.')}</div></div>`;
       const pages = Math.max(1, Math.ceil(total/M.per));
       document.getElementById('cl_pager').innerHTML = total ? `<div class="pager"><span>${M.page*M.per+1}&ndash;${M.page*M.per+rows.length} of ${total}</span><button class="pg-btn" ${M.page<=0?'disabled':''} onclick="Calling.M.page--;Calling.loadList()">&lsaquo; Prev</button><span>Page ${M.page+1} / ${pages}</span><button class="pg-btn" ${M.page+1>=pages?'disabled':''} onclick="Calling.M.page++;Calling.loadList()">Next &rsaquo;</button></div>` : '';
     }catch(e){ if(tk !== M.tk) return; document.getElementById('cl_list').innerHTML = `<div class="empty-state"><div class="ic">&#9888;</div><div class="t">Could not load your list</div><div class="d">${Util.escapeHtml(e.message||'error')}</div></div>`; }
@@ -8402,6 +8768,8 @@ const BidSearch = {
     const fCat = document.getElementById('bidCatFilter')?document.getElementById('bidCatFilter').value:'';
     const fOrg = document.getElementById('bidOrgFilter')?document.getElementById('bidOrgFilter').value:'';
     const fLoc = document.getElementById('bidLocFilter')?document.getElementById('bidLocFilter').value:'';
+    const fGo = document.getElementById('bidGoFilter')?document.getElementById('bidGoFilter').value:'';
+    const fStage = document.getElementById('bidStageFilter')?document.getElementById('bidStageFilter').value:'';
     const nrm = (v)=>String(v||'').trim().replace(/\s+/g,' '), locOf = (b)=>nrm(b.location||b.district||'');
     const distinct = (fn)=>{ const m = new Map(); Store.data.bids.forEach(b=>{ const v = fn(b); if(v && !m.has(v.toLowerCase())) m.set(v.toLowerCase(), v); }); return [...m.values()].sort((x,y)=>x.localeCompare(y)); };
     const optsFor = (vals, cur, label)=>`<option value="">${label}</option>` + vals.map(v=>`<option value="${Util.escapeHtml(v)}" ${v.toLowerCase()===String(cur).toLowerCase()?'selected':''}>${Util.escapeHtml(v.length>38?v.slice(0,36)+'…':v)}</option>`).join('');
@@ -8409,6 +8777,8 @@ const BidSearch = {
     let list = Store.data.bids.map(b=>({...b, _match: bidMatch(b).score}));
     if(q) list = list.filter(b=>[b.bidNumber,b.raNumber,b.title,b.boqTitle,b.category,b.organisation,b.department,b.ministry,b.location,b.savedBy].some(v=>(v||'').toLowerCase().includes(q)));
     if(fStatus) list = list.filter(b=>b.status===fStatus);
+    if(fStage && BID_STAGE_GROUPS[fStage]) list = list.filter(b=>BID_STAGE_GROUPS[fStage].includes(b.status));
+    if(fGo) list = list.filter(b=>bidGoState(b)===fGo);
     if(fType) list = list.filter(b=>bidTypeOf(b)===fType);
     if(fUser) list = list.filter(b=>fUser==='__none'?!bidSavedByOf(b):bidSavedByOf(b)===fUser);
     if(fCat) list = list.filter(b=>nrm(b.category).toLowerCase()===fCat.toLowerCase());
@@ -8437,6 +8807,7 @@ const BidSearch = {
       ${dashboardCardsHTML('GeM Bid Dashboard', [
         {label:'Saved Bids', value:all.filter(b=>b.status==='Saved').length},
         {label:'Active Opportunities', value:active.length},
+        {label:'Awaiting Go / No-Go', value:active.filter(b=>['New','Saved','Under Review','Go / No-Go Decision'].includes(b.status) && !['Go','No-Go'].includes(bidGoState(b))).length, color:'var(--amber,#d97706)'},
         {label:'Under Preparation', value:all.filter(b=>['Under Preparation','Documents Pending','Ready for Submission'].includes(b.status)).length, color:'var(--amber,#d97706)'},
         {label:'Submitted', value:all.filter(b=>b.status==='Submitted').length, color:'var(--blue,#2563eb)'},
         {label:'Won', value:all.filter(b=>b.status==='Won').length, color:'var(--green,#16a34a)'},
@@ -8479,6 +8850,14 @@ const BidSearch = {
         <select id="bidCatFilter" autocomplete="off" onchange="BidSearch.render()">${optsFor(distinct(b=>nrm(b.category)), fCat, 'All Categories')}</select>
         <select id="bidOrgFilter" autocomplete="off" onchange="BidSearch.render()">${optsFor(distinct(b=>nrm(b.organisation)), fOrg, 'All Organisations')}</select>
         <select id="bidLocFilter" autocomplete="off" onchange="BidSearch.render()">${optsFor(distinct(locOf), fLoc, 'All Locations')}</select>
+        <select id="bidStageFilter" autocomplete="off" onchange="BidSearch.render()">
+          <option value="">All Stages</option>
+          ${Object.keys(BID_STAGE_GROUPS).map(g=>`<option value="${g}" ${g===fStage?'selected':''}>Stage: ${g}</option>`).join('')}
+        </select>
+        <select id="bidGoFilter" autocomplete="off" onchange="BidSearch.render()">
+          <option value="">Any Go / No-Go</option>
+          ${[['none','Not assessed'],['Go','Go'],['No-Go','No-Go'],['Hold','Hold']].map(([v,l])=>`<option value="${v}" ${v===fGo?'selected':''}>Go / No-Go: ${l}</option>`).join('')}
+        </select>
         <select id="bidMatchFilter" autocomplete="off" onchange="BidSearch.render()">
           <option value="">All Match Scores</option>
           <option value="high" ${fMatch==='high'?'selected':''}>&#128293; High Match (80%+)</option>
@@ -8515,6 +8894,7 @@ const BidSearch = {
         <th>End Date</th>
         <th>Time Left</th>
         <th>Status</th>
+        <th>Go / No-Go</th>
         <th>Saved By</th>
       </tr></thead><tbody>
         ${pg.pageItems.map(b=>`<tr>
@@ -8536,6 +8916,7 @@ const BidSearch = {
           <td class="cell-mute">${Util.fmtDate(b.endDate)}</td>
           <td>${bidDeadlineBadgeHTML(b.endDate)}</td>
           <td><span class="badge" style="background:${bidStatusColor(b.status)};color:#fff;">${Util.escapeHtml(b.status||'New')}</span></td>
+          <td>${GoNoGo.badge(b)}</td>
           <td class="cell-mute" title="${b.savedAt?Util.escapeHtml(new Date(b.savedAt).toLocaleString('en-IN')):''}">${Util.escapeHtml(bidSavedByOf(b)||'—')}</td>
         </tr>`).join('')}
       </tbody></table>
@@ -8643,6 +9024,11 @@ const BidSearch = {
     if(isNew){ rec.savedBy = bidUserName(); rec.savedAt = nowIso; }
     rec.updatedBy = bidUserName(); rec.updatedAt = nowIso;
     const prevStatus = id ? (Store.data.bids.find(x=>x.id===id)||{}).status : null;
+    if(id && prevStatus!==rec.status){
+      if(!GoNoGo.gate(rec, rec.status)) return;
+      rec.timeline = rec.timeline||[];
+      rec.timeline.push({date:nowIso, text:'Status changed to '+rec.status, by:bidUserName()});
+    }
     if(id){ const i=Store.data.bids.findIndex(x=>x.id===id); Store.data.bids[i]=rec; }
     else{
       rec.timeline.push({date:new Date().toISOString(), text:'Bid created', by:(Auth.session&&Auth.session.name)||'System'});
@@ -8665,6 +9051,7 @@ const BidSearch = {
   },
   async setStatus(id, status){
     const b = Store.data.bids.find(x=>x.id===id); if(!b) return;
+    if(!GoNoGo.gate(b, status)){ BidSearch.openDetail(id); return; }
     b.status = status;
     b.timeline = b.timeline||[];
     b.timeline.push({date:new Date().toISOString(), text:'Status changed to '+status, by:(Auth.session&&Auth.session.name)||'System'});
@@ -8773,6 +9160,7 @@ const BidSearch = {
         ${b.status==='Won'? `<button class="btn btn-primary btn-sm" onclick="BidSearch.convertToOrder('${id}')">&#8594; Convert to Order</button><button class="btn btn-outline btn-sm" onclick="BidSearch.recordEmd('${id}','PBG')">&#128274; Record PBG</button>` : ''}
       </div>
       <div class="hint" style="margin-bottom:10px;">Saved by <b>${Util.escapeHtml(bidSavedByOf(b)||'not recorded')}</b>${b.savedAt?' on '+Util.escapeHtml(new Date(b.savedAt).toLocaleString('en-IN')):''}${b.updatedBy&&b.updatedBy!==b.savedBy?' &middot; last updated by <b>'+Util.escapeHtml(b.updatedBy)+'</b>':''}</div>
+      ${GoNoGo.stagesHTML(b)}
       <div class="field"><label>Update Status</label><select onchange="BidSearch.setStatus('${id}', this.value)">${DROPDOWNS.bidStatus.map(s=>`<option ${s===b.status?'selected':''}>${s}</option>`).join('')}</select></div>
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:16px 0;">
@@ -8788,6 +9176,7 @@ const BidSearch = {
 
       ${GemPdf.specsHTML(b)}
       ${GemPdf.detailHTML(b)}
+      ${GoNoGo.cardHTML(b)}
       ${(()=>{ const r=bidReadiness(b); return `<div class="card card-pad" style="margin:14px 0 0;"><b>Bid Readiness: ${bidReadinessBadge(b)}</b> <span class="cell-mute" style="font-size:12px;">${r.missing.length?'Missing: '+Util.escapeHtml(r.missing.join(' · ')):'Everything in place — ready to submit.'}</span>${r.needsEmd&&!r.emdRec?` <button class="btn btn-outline btn-sm" style="margin-left:8px;" onclick="BidSearch.recordEmd('${id}')">Record EMD</button>`:''}</div>`; })()}
       <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:16px 0 6px;">Document Checklist — ${doneCount}/${b.checklist.length}</h4>
       <div class="doc-progress"><div style="width:${pct}%;"></div></div>
@@ -8814,7 +9203,7 @@ const BidSearch = {
     `, `<button class="btn btn-outline" onclick="UI.closeModal()">Close</button><button class="btn btn-primary" onclick="BidSearch.openForm('${id}')">Edit Full Details</button>`, true);
   },
   clearFilters(){
-    ['bidSearch','bidStatusFilter','bidTypeFilter','bidUserFilter','bidCatFilter','bidOrgFilter','bidLocFilter','bidMatchFilter','bidClosingFilter'].forEach(id=>{ const e=document.getElementById(id); if(e) e.value=''; });
+    ['bidSearch','bidStatusFilter','bidTypeFilter','bidUserFilter','bidCatFilter','bidOrgFilter','bidLocFilter','bidStageFilter','bidGoFilter','bidMatchFilter','bidClosingFilter'].forEach(id=>{ const e=document.getElementById(id); if(e) e.value=''; });
     Paginate.get('bids').page = 1; BidSearch.render();
   },
   // Adapt number/title labels to the selected Bid Type (values are never cleared)
@@ -13634,6 +14023,83 @@ const OPP_TEMPLATE_COLUMNS = ['Project No','Project Name Mal','Project Name Eng'
   'Fund Description','FundTotal','Expenditure Description','Expenditure','Balance'];
 
 function oppNorm(v){ return String(v==null?'':v).toLowerCase().replace(/\s+/g,' ').trim(); }
+/* Malayalam-safe text for MATCHING ONLY (never used for record keys, so
+   existing tracking keys stay valid). Real Kerala data mixes encodings of
+   the same word: old-style chillu (consonant + virama + ZWJ) vs the
+   atomic chillu letters, plus stray zero-width joiners. Without this a
+   keyword typed one way silently fails against data typed the other. */
+const OPP_CHILLU = [['ണ്‍','ൺ'],['ന്‍','ൻ'],['ര്‍','ർ'],['ല്‍','ൽ'],['ള്‍','ൾ']];
+function oppNormMl(v){
+  let t = String(v==null?'':v);
+  try{ t = t.normalize('NFC'); }catch(e){}
+  OPP_CHILLU.forEach(([a,b])=>{ t = t.split(a).join(b); });
+  t = t.replace(/[‌‍]/g,'');
+  return oppNorm(t);
+}
+/* Synonyms: Settings text, one line per set, "word = alt1, alt2".
+   Every member of a line is treated as the same term when matching, and
+   is counted ONCE (a project is never scored twice for saying both). */
+let _oppSynKey = null, _oppSynMap = {};
+function oppSynonymMap(){
+  const txt = String((Store.data.settings||{}).oppSynonyms||'');
+  if(txt === _oppSynKey) return _oppSynMap;
+  const map = {};
+  txt.split(/\r?\n/).forEach(line=>{
+    const parts = line.split('=');
+    if(parts.length < 2) return;
+    const set = [parts[0]].concat(parts.slice(1).join('=').split(',')).map(oppNormMl).filter(Boolean);
+    const uniq = [...new Set(set)];
+    if(uniq.length < 2) return;
+    uniq.forEach(w=>{ map[w] = [...new Set((map[w]||[]).concat(uniq))]; });
+  });
+  _oppSynKey = txt; _oppSynMap = map; return map;
+}
+function oppVariants(word){
+  const w = oppNormMl(word);
+  if(!w) return [];
+  return oppSynonymMap()[w] || [w];
+}
+function oppTextHas(textNorm, word){
+  const vs = oppVariants(word);
+  for(let i=0;i<vs.length;i++){ if(textNorm.includes(vs[i])) return true; }
+  return false;
+}
+/* Match bands. Score distribution is skewed (almost nothing reaches 80),
+   so the old "80%+" High Priority card was nearly always empty. Bands are
+   admin-adjustable in Products > Match Bands. */
+const OPP_BAND_DEFAULTS = { excellent:60, good:45, possible:30 };
+function oppBands(){
+  const b = (Store.data.settings||{}).oppBands || {};
+  const n = (k)=>{ const v = Number(b[k]); return (v>0 && v<=100) ? v : OPP_BAND_DEFAULTS[k]; };
+  return { excellent:n('excellent'), good:n('good'), possible:n('possible') };
+}
+function oppBandOf(score){
+  const b = oppBands(), sc = Number(score)||0;
+  if(sc >= b.excellent) return 'Excellent';
+  if(sc >= b.good) return 'Good';
+  if(sc >= b.possible) return 'Possible';
+  return sc > 0 ? 'Low' : 'No match';
+}
+const OPP_BAND_COLORS = { 'Excellent':'var(--green,#16a34a)', 'Good':'var(--blue,#2563eb)', 'Possible':'var(--amber,#d97706)', 'Low':'var(--text-mute,#6b7280)', 'No match':'var(--text-mute,#6b7280)' };
+/* Plain-language reasons, derived on the fly from the stored breakdown
+   (nothing extra is stored per row). */
+function oppReasons(r){
+  const out = [], b = r.scoreBreakdown;
+  if(!b) return ['Score breakdown not stored - run Import > Recalculate All Scores.'];
+  const hits = (r.hits||[]);
+  if(!hits.length) return ['No keyword from the library or your products matched this project, so nothing else is scored.'];
+  out.push('Matched: ' + hits.slice(0,8).join(', ') + (hits.length>8?' (+'+(hits.length-8)+' more)':''));
+  if(b.product) out.push('Product/keyword strength +'+b.product+' of 30');
+  if(b.sector) out.push('Waste-type sector +'+b.sector); else out.push('Sector is not a waste sector (0 of 15)');
+  if(b.subSector) out.push('Waste-type sub-sector +'+b.subSector);
+  if(b.procurement) out.push('Purchase wording found +'+b.procurement); else out.push('No purchase wording such as supply/purchase/procurement (0 of 10)');
+  if(b.location>=5) out.push('Preferred district +5'); else if(b.location) out.push('District present, not a preferred one +'+b.location);
+  if(b.fund) out.push('Fund value +'+b.fund+' of 10');
+  if(b.deadline) out.push('Date proximity +'+b.deadline); else out.push('No project/closing date in the data, so freshness cannot be scored (0 of 10)');
+  if(b.history) out.push('Past win with this local body +'+b.history);
+  if(b.zeroExpenditure) out.push('Zero expenditure so far +'+b.zeroExpenditure);
+  return out;
+}
 function oppMoney(v){ const n = Number(String(v==null?'':v).replace(/[,\u20B9\s]/g,'')); return isNaN(n)?0:n; }
 /* Finds a value on a row by trying several likely header names, first
    as an exact match, then case/punctuation-insensitively against the
@@ -13659,7 +14125,12 @@ const OPP_LB_NAME_ALIASES = ['LB Name','LB','Local Body','Local Body Name','Loca
    UI - table columns, filters, CSV export, scoring - keeps working
    unchanged regardless of what the source file actually called them. */
 function oppNormalizeRow(r){
-  const out = Object.assign({}, r);
+  const out = {};
+  Object.keys(r).forEach(k=>{
+    // Unlabelled spreadsheet columns ('' / __EMPTY_n) that are blank carry nothing - drop them on NEW imports only.
+    if((k==='' || /^__EMPTY/.test(k)) && !String(r[k]==null?'':r[k]).trim()) return;
+    out[k] = r[k];
+  });
   if(!String(out['Project No']||'').trim()){
     const v = oppFindField(r, OPP_PROJECT_NO_ALIASES);
     if(v) out['Project No'] = v;
@@ -13708,15 +14179,15 @@ function oppKeyOf(r){
 const OPP_NON_CONTENT_FIELDS = new Set(['id','score','type','hits','scoreBreakdown','opportunity_score','opportunity_type',
   'matched_keywords','raw_data','updated_at','created_at','source_status']);
 function oppClassify(r){
-  const text = Object.entries(r).filter(([k])=>!OPP_NON_CONTENT_FIELDS.has(k)).map(([,v])=>oppNorm(v)).join(' ');
+  const text = Object.entries(r).filter(([k])=>!OPP_NON_CONTENT_FIELDS.has(k)).map(([,v])=>oppNormMl(v)).join(' ');
   const groups = (Store.data.oppKeywordGroups && Store.data.oppKeywordGroups.length) ? Store.data.oppKeywordGroups : OPP_DEFAULT_KEYWORD_GROUPS;
 
   const matched = [];               // [{word, weight, tier, category}]
   const categoryWeights = {};       // category -> summed weight, to pick the dominant type
   groups.forEach(g=>{
     (g.words||[]).forEach(w=>{
-      const wn = oppNorm(w);
-      if(wn && text.includes(wn)){
+      const wn = oppNormMl(w);
+      if(wn && oppTextHas(text, w)){
         matched.push({word:w, weight:g.weight, tier:g.tier, category:g.category});
         categoryWeights[g.category] = (categoryWeights[g.category]||0) + g.weight;
       }
@@ -13725,8 +14196,8 @@ function oppClassify(r){
   // Your own added keywords (Products tab) count too, at Product-Synonym weight.
   (Store.data.oppProducts||[]).forEach(p=>{
     String(p.keywords||'').split(',').forEach(k=>{
-      const wn = oppNorm(k);
-      if(wn && text.includes(wn)){
+      const wn = oppNormMl(k);
+      if(wn && oppTextHas(text, k)){
         matched.push({word:k.trim(), weight:18, tier:'Your Product Keywords', category:'PRODUCT'});
         categoryWeights.PRODUCT = (categoryWeights.PRODUCT||0) + 18;
       }
@@ -13837,7 +14308,7 @@ const OPP_PDF_FONT_MEERA_B64 = 'AAEAAAALAIAAAwAwT1MvMmZPHKkAAFecAAAAYGNtYXDFCmUs
 const OppFinder = {
   tab: 'dashboard',
   filtered: [],
-  filters: { q:'', type:'ALL', district:'', localbody:'', minscore:0, status:'', from:'', to:'' },
+  filters: { q:'', type:'ALL', district:'', localbody:'', minscore:0, status:'', from:'', to:'', band:'' },
 
   setTab(t){ this.tab = t; this.render(); },
 
@@ -13850,34 +14321,65 @@ const OppFinder = {
      every record ever imported before it - fine at a few hundred rows,
      but it made saves progressively larger (and eventually unreliable)
      as the collection grew into the tens of thousands. */
-  async importIncoming(incoming, source){
-    const msg = document.getElementById('oppMsg');
-    if(!incoming.length){ if(msg) msg.textContent = 'No rows detected.'; return false; }
-    if(msg) msg.textContent = 'Saving to database\u2026';
-    const result = await Store.mergeOppBatch(incoming);
-    if(!result){
-      if(msg) msg.textContent = 'Save failed \u2014 check your connection and try again.';
+  /* Sends rows in chunks of 1,000 (each chunk is one server-side merge),
+     retries a failed chunk once, and reports exactly which rows did not
+     save so nothing is silently lost. */
+  setMsg(t){ const m=document.getElementById('oppMsg'); if(m) m.textContent=t; },
+  async mergeChunked(rows, label){
+    const SIZE = 1000; let n=0, u=0; const failed=[];
+    for(let i=0;i<rows.length;i+=SIZE){
+      const part = rows.slice(i,i+SIZE);
+      let res = await Store.mergeOppBatch(part);
+      if(!res) res = await Store.mergeOppBatch(part);
+      if(res){ n += res.newCount||0; u += res.updatedCount||0; } else failed.push.apply(failed, part);
+      this.setMsg(label+' '+Math.min(i+SIZE,rows.length)+' / '+rows.length+(failed.length?' ('+failed.length+' failed)':'')+'\u2026');
+    }
+    return { newCount:n, updatedCount:u, failed };
+  },
+  failedRows: [],
+  async importIncoming(incoming, source, skipped){
+    if(!incoming.length){ this.setMsg('No rows detected.'); return false; }
+    skipped = skipped||0;
+    this.setMsg('Saving to database\u2026');
+    const res = await this.mergeChunked(incoming, 'Saving');
+    const failedN = res.failed.length;
+    if(failedN === incoming.length){
+      this.setMsg('Save failed \u2014 nothing was saved. Check your connection and try again.');
       UI.toast('Save failed \u2014 check your connection and try again.');
       return false;
     }
-    // Re-pull the merged collection so the dashboard/table reflect the
-    // save immediately (a cheap read from opp_projects_rows).
+    // Re-pull the merged collection so the dashboard/table reflect the save.
     Store.data.oppProjects = await Store.loadOppProjects();
-    const added = result.newCount||0, updated = result.updatedCount||0;
+    this.health = null;
+    const added = res.newCount, updated = res.updatedCount;
     Store.data.oppImportHistory.unshift({date:new Date().toISOString(), source:source||'Excel Import',
-      records:incoming.length, newCount:added, updated, duplicates:updated});
+      records:incoming.length, newCount:added, updated, duplicates:updated, skipped, failed:failedN});
     Store.data.oppImportHistory = Store.data.oppImportHistory.slice(0,30);
     const ok2 = await Store.save('oppImportHistory');
-    if(ok2) await Activity.log('Project opportunity data imported', incoming.length+' row(s), '+added+' new, '+updated+' updated');
-    if(msg) msg.textContent = `Imported ${incoming.length} rows \u2022 ${added} new \u2022 ${updated} updated (merged server-side).`;
+    if(ok2) await Activity.log('Project opportunity data imported', incoming.length+' row(s), '+added+' new, '+updated+' updated'+(skipped?', '+skipped+' skipped':'')+(failedN?', '+failedN+' FAILED':''));
+    if(failedN){
+      // Keep only the failed rows pending so "Retry" resends just those.
+      this.pendingImport = res.failed; this.pendingInvalid = []; this.pendingSevereCollision = false;
+      this.setMsg('Partly saved: '+(incoming.length-failedN)+' of '+incoming.length+' rows saved ('+added+' new, '+updated+' updated). '+failedN+' rows failed - press Retry.');
+      const box = document.getElementById('oppPreviewBox');
+      if(box) box.innerHTML = '<div class="card card-pad" style="margin-top:12px;border-left:4px solid var(--red,#dc2626);"><b>'+failedN+' row(s) did not save.</b> The rest are safely stored.' +
+        '<div class="toolbar" style="margin-top:8px;"><button class="btn btn-primary btn-sm" onclick="OppFinder.confirmImportSave()">&#8635; Retry '+failedN+' failed row(s)</button></div></div>';
+      UI.toast(failedN+' row(s) failed to save - use Retry');
+      this.render2keep();
+      return false;
+    }
     this.render();
+    this.setMsg('Imported '+incoming.length+' rows \u2022 '+added+' new \u2022 '+updated+' updated'+(skipped?' \u2022 '+skipped+' skipped (no ID)':'')+' (merged server-side).');
     return true;
   },
+  /* Re-render dashboards without wiping the retry box */
+  render2keep(){ const keepBox=document.getElementById('oppPreviewBox'); const html=keepBox?keepBox.innerHTML:''; const m=document.getElementById('oppMsg'); const mt=m?m.textContent:''; this.render(); const b2=document.getElementById('oppPreviewBox'); if(b2) b2.innerHTML=html; const m2=document.getElementById('oppMsg'); if(m2) m2.textContent=mt; },
   /* Preview-before-save: nothing touches the database until the user
      explicitly clicks "Import & Save Projects" on the summary shown
      here. this.pendingImport / this.pendingSource hold the parsed rows
      in memory between preview and save. */
   pendingImport: null,
+  pendingInvalid: [],
   pendingSource: '',
   previewImport(){
     const ta = document.getElementById('oppPaste');
@@ -13909,10 +14411,22 @@ const OppFinder = {
     const collisionRatio = incoming.length>10 ? 1 - (uniqueBatchKeys/incoming.length) : 0;
     const severeCollision = collisionRatio > 0.5;
     this.pendingImport = incoming;
+    this.pendingInvalid = invalid;
     this.pendingSource = source;
     this.pendingSevereCollision = severeCollision;
 
     const headerSample = Object.keys(rawIn[0]||{}).slice(0,10);
+    const hdrs = Object.keys(rawIn[0]||{});
+    const detect = (aliases)=>{
+      const exact = hdrs.find(h=>aliases.includes(h)); if(exact) return exact;
+      const na = aliases.map(x=>x.toLowerCase().replace(/[^a-z0-9]/g,''));
+      return hdrs.find(h=>{ const n=h.toLowerCase().replace(/[^a-z0-9]/g,''); return na.some(a=>n===a||n.includes(a)); }) || '';
+    };
+    const colPN = detect(OPP_PROJECT_NO_ALIASES), colLB = detect(OPP_LB_NAME_ALIASES);
+    const known = new Set(OPP_FIELDS);
+    const extraCols = hdrs.filter(h=>!known.has(h) && h!==colPN && h!==colLB && h!=='' && !/^__EMPTY/.test(h));
+    const mapHTML = '<div class="hint" style="margin-top:10px;"><b>Detected columns:</b> Project No ← <b>'+(colPN?Util.escapeHtml(colPN):'not found')+'</b> • Local Body ← <b>'+(colLB?Util.escapeHtml(colLB):'not found')+'</b>' +
+      (extraCols.length ? ' • Extra columns kept as-is: '+extraCols.slice(0,8).map(Util.escapeHtml).join(', ')+(extraCols.length>8?' (+'+(extraCols.length-8)+')':'') : '') + '</div>';
     if(box) box.innerHTML =
       '<div class="card card-pad" style="margin-top:12px;background:var(--bg-soft,#faf9f7);">' +
         '<h4 style="margin:0 0 10px;">Import Preview</h4>' +
@@ -13923,7 +14437,8 @@ const OppFinder = {
           '<div><div style="font-size:19px;font-weight:700;">'+uniqueBatchKeys+'</div><div class="hint">Unique Records Detected</div></div>' +
           '<div><div style="font-size:19px;font-weight:700;'+(invalid.length?'color:var(--red,#dc2626);':'')+'">'+invalid.length+'</div><div class="hint">Invalid (no ID)</div></div>' +
         '</div>' +
-        (invalid.length ? '<div class="hint" style="margin-top:8px;">Invalid rows have neither a Project No nor an LB Name, so they can\'t be safely matched against existing records \u2014 they will be skipped.</div>' : '') +
+        mapHTML +
+        (invalid.length ? '<div class="hint" style="margin-top:8px;">Invalid rows have neither a Project No nor an LB Name, so they can\'t be safely matched against existing records \u2014 they will be skipped. <a href="#" onclick="OppFinder.downloadInvalid();return false;">Download these '+invalid.length+' skipped row(s) as CSV</a></div>' : '') +
         (severeCollision ? '<div class="card card-pad" style="margin-top:10px;border-left:4px solid var(--red,#dc2626);">' +
           '<b style="color:var(--red,#dc2626);">&#9888; '+incoming.length+' rows only produced '+uniqueBatchKeys+' unique record(s).</b>' +
           '<div class="hint" style="margin-top:4px;">This usually means your file\'s Project No / Local Body columns use different header names than expected, so rows are being treated as the same record. Detected columns in your file: <b>'+headerSample.map(h=>Util.escapeHtml(h)).join(', ')+'</b>. Check these match an actual project/local-body identifier before saving \u2014 otherwise most of your rows will overwrite each other.</div>' +
@@ -13934,8 +14449,16 @@ const OppFinder = {
         '</div>' +
       '</div>';
   },
+  downloadInvalid(){
+    const rows = this.pendingInvalid||[]; if(!rows.length){ UI.toast('No skipped rows'); return; }
+    const cols = [...new Set(rows.flatMap(r=>Object.keys(r)))];
+    const q = v=>'"'+String(v==null?'':v).replace(/"/g,'""')+'"';
+    const csv = [cols.map(q).join(',')].concat(rows.map(r=>cols.map(c=>q(r[c])).join(','))).join('\r\n');
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['\ufeff'+csv],{type:'text/csv'}));
+    a.download = 'skipped_project_rows.csv'; document.body.appendChild(a); a.click(); a.remove();
+  },
   cancelPreview(){
-    this.pendingImport = null;
+    this.pendingImport = null; this.pendingInvalid = [];
     this.pendingSevereCollision = false;
     const box = document.getElementById('oppPreviewBox'); if(box) box.innerHTML='';
   },
@@ -13944,10 +14467,10 @@ const OppFinder = {
     if(this.pendingSevereCollision && !confirm('Most of these rows share the same detected Project No / Local Body, which usually means they will overwrite each other and you\'ll end up with far fewer saved records than you expect. Save anyway?')) return;
     const box = document.getElementById('oppPreviewBox');
     if(box) box.innerHTML = '<div class="hint" style="margin-top:12px;">Saving to database\u2026</div>';
-    const ok = await this.importIncoming(this.pendingImport, this.pendingSource);
+    const ok = await this.importIncoming(this.pendingImport, this.pendingSource, (this.pendingInvalid||[]).length);
     if(ok){
       const ta = document.getElementById('oppPaste'); if(ta) ta.value='';
-      this.pendingImport = null;
+      this.pendingImport = null; this.pendingInvalid = [];
       this.pendingSevereCollision = false;
     }
   },
@@ -13993,11 +14516,22 @@ const OppFinder = {
     await Store.save('oppKeywordGroups');
   },
   async recalculateScores(){
-    if(!Store.data.oppProjects.length){ UI.toast('No projects to recalculate'); return; }
-    Store.data.oppProjects = Store.data.oppProjects.map(r=>Object.assign({}, r, oppClassify(r)));
-    const ok = await Store.replaceAllOppProjects(Store.data.oppProjects);
-    if(ok){ await Activity.log('Project opportunity scores recalculated', Store.data.oppProjects.length+' project(s)'); UI.toast('Scores updated'); }
-    else UI.toast('Save failed — check your connection and try again.');
+    const rows = Store.data.oppProjects;
+    if(!rows.length){ UI.toast('No projects to recalculate'); return; }
+    if(!confirm('Re-score '+rows.length+' projects with the current keywords, synonyms and settings? Only the scores are updated; no project is deleted.')) return;
+    UI.toast('Recalculating '+rows.length+' projects\u2026');
+    const updated = rows.map(r=>Object.assign({}, r, oppClassify(r)));
+    const res = await this.mergeChunked(updated, 'Recalculating');
+    if(res.failed.length){
+      Store.data.oppProjects = await Store.loadOppProjects();
+      this.setMsg('Recalculated '+(updated.length-res.failed.length)+' of '+updated.length+'; '+res.failed.length+' could not be saved. Run it again.');
+      UI.toast(res.failed.length+' project(s) not re-scored - run Recalculate again.');
+    } else {
+      Store.data.oppProjects = updated;
+      await Activity.log('Project opportunity scores recalculated', updated.length+' project(s)');
+      UI.toast('Scores updated for '+updated.length+' projects');
+    }
+    this.health = null;
     this.render();
   },
   /* Forces a fresh fetch straight from Supabase, bypassing whatever is
@@ -14005,6 +14539,7 @@ const OppFinder = {
      records are really in the database right now" without trusting
      in-memory state. */
   async reloadFromDatabase(){
+    this.health = null;
     UI.toast('Reloading from database\u2026');
     // Fetched in pages now (see Store.loadOppProjects) instead of one
     // giant ~44MB response, so a flaky mobile connection no longer fails
@@ -14031,7 +14566,7 @@ const OppFinder = {
   readFilters(){
     const g = id => { const el = document.getElementById(id); return el ? el.value : ''; };
     this.filters = {
-      q: oppNorm(g('oppSearch')), type: g('oppType')||'ALL', district: g('oppDistrict'),
+      q: oppNormMl(g('oppSearch')), band: g('oppBand'), type: g('oppType')||'ALL', district: g('oppDistrict'),
       localbody: g('oppLocalBody'), minscore: Number(g('oppMinScore')||0),
       status: g('oppStatus'), from: g('oppFrom'), to: g('oppTo')
     };
@@ -14040,18 +14575,18 @@ const OppFinder = {
     this.readFilters();
     const f = this.filters;
     this.filtered = Store.data.oppProjects.filter(r=>{
-      const blob = oppNorm(Object.entries(r).filter(([k])=>!['score','type','hits'].includes(k)).map(([,v])=>v).join(' '));
+      const blob = f.q ? oppNormMl(Object.entries(r).filter(([k])=>!['score','type','hits','scoreBreakdown'].includes(k)).map(([,v])=>v).join(' ')) : '';
       const tr = Store.data.oppTracking[oppKeyOf(r)] || {};
       const st = tr.status || 'New';
       const dateVal = r['Project Date'] || r['Date'] || r['Created Date'] || r['Closing Date'] || '';
       return r.score >= f.minscore && (f.type==='ALL' || r.type===f.type) &&
         (!f.district || r['District']===f.district) && (!f.localbody || r['LB Name']===f.localbody) &&
-        (!f.q || blob.includes(f.q)) && (!f.status || st===f.status) &&
+        (!f.q || oppTextHas(blob, f.q)) && (!f.band || oppBandOf(r.score)===f.band) && (!f.status || st===f.status) &&
         (!f.from || String(dateVal).slice(0,10) >= f.from) && (!f.to || String(dateVal).slice(0,10) <= f.to);
     }).sort((a,b)=>b.score-a.score);
   },
   resetFilters(){
-    this.filters = { q:'', type:'ALL', district:'', localbody:'', minscore:0, status:'', from:'', to:'' };
+    this.filters = { q:'', type:'ALL', district:'', localbody:'', minscore:0, status:'', from:'', to:'', band:'' };
     this.render();
   },
   districtOptions(){ return [...new Set(Store.data.oppProjects.map(r=>r['District']).filter(Boolean))].sort(); },
@@ -14097,18 +14632,20 @@ const OppFinder = {
     if(!r) return;
     const tr = Store.data.oppTracking[key] || {};
     const productMatches = Store.data.oppProducts.filter(p=>
-      (p.keywords||'').split(',').some(x=>x.trim() && oppNorm(Object.values(r).join(' ')).includes(oppNorm(x)))
+      (p.keywords||'').split(',').some(x=>x.trim() && oppTextHas(oppNormMl(Object.values(r).join(' ')), x))
     ).map(p=>p.name);
     const E = Util.escapeHtml;
     UI.openModal(r['Project Name Eng'] || 'Project Details',
       '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;">' +
         OPP_FIELDS.filter(f=>r[f]!==undefined && r[f]!=='').map(f=>
           '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">'+E(f)+'</div>'+E(r[f])+'</div>').join('') +
-        '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">Opportunity Score</div><b>'+r.score+'%</b></div>' +
+        '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">Opportunity Score</div><b>'+r.score+'%</b> <span class="badge badge-gray">'+oppBandOf(r.score)+'</span></div>' +
         '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">Category</div>'+E(OPP_CATEGORY_NAMES[r.type])+'</div>' +
         '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">Matched Keywords</div>'+r.hits.map(x=>'<span class="badge badge-gray">'+E(x)+'</span>').join(' ')+'</div>' +
       '</div>' +
-      (r.scoreBreakdown ? '<h4 style="margin:14px 0 6px;">Why this scored '+r.score+'%</h4>' +
+      '<h4 style="margin:14px 0 6px;">Why this scored '+r.score+'% ('+oppBandOf(r.score)+')</h4>' +
+      '<ul id="oppReasonList" style="margin:0 0 10px 18px;font-size:12.5px;">'+oppReasons(r).map(x=>'<li>'+E(x)+'</li>').join('')+'</ul>' +
+      (r.scoreBreakdown ? 
         '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;font-size:12px;">' +
           [['Product Match',r.scoreBreakdown.product,30],['Sector',r.scoreBreakdown.sector,15],
            ['Sub-sector',r.scoreBreakdown.subSector,10],['Procurement Wording',r.scoreBreakdown.procurement,10],
@@ -14324,7 +14861,9 @@ const OppFinder = {
       {label:'Total Projects', value:rows.length},
       {label:'Waste Opportunities', value:counts.WASTE||0, color:'var(--green,#16a34a)'},
       {label:'Purchase Opportunities', value:counts.PURCHASE||0, color:'var(--blue,#2563eb)'},
-      {label:'High Priority (80%+)', value:rows.filter(r=>r.score>=80).length, color:'var(--red,#dc2626)'},
+      {label:'Excellent match ('+oppBands().excellent+'%+)', value:rows.filter(r=>oppBandOf(r.score)==='Excellent').length, color:'var(--green,#16a34a)'},
+      {label:'Good match ('+oppBands().good+'%+)', value:rows.filter(r=>oppBandOf(r.score)==='Good').length, color:'var(--blue,#2563eb)'},
+      {label:'Possible ('+oppBands().possible+'%+)', value:rows.filter(r=>oppBandOf(r.score)==='Possible').length, color:'var(--amber,#d97706)'},
       {label:'Unmatched (no keyword)', value:unmatchedCount, color: unmatchedCount?'var(--amber,#d97706)':undefined},
       {label:'Saved Opportunities', value:Object.keys(Store.data.oppTracking).length},
       {label:'Total Fund Value', value:'\u20B9'+rows.reduce((s,r)=>s+oppMoney(r['FundTotal']),0).toLocaleString('en-IN')}
@@ -14373,7 +14912,9 @@ const OppFinder = {
         '<div class="field"><label>Minimum score</label><select id="oppMinScore" onchange="OppFinder.render()">' +
           [0,40,60,80,90].map(v=>'<option value="'+v+'" '+(f.minscore===v?'selected':'')+'>'+(v?v+'+':'All')+'</option>').join('') + '</select></div>' +
       '</div>' +
-      '<div class="form-row" style="grid-template-columns:1fr 1fr 1fr 1fr;margin-top:8px;">' +
+      '<div class="form-row" style="grid-template-columns:1fr 1fr 1fr 1fr 1fr;margin-top:8px;">' +
+        '<div class="field"><label>Match band</label><select id="oppBand" onchange="OppFinder.render()"><option value="">All bands</option>' +
+          ['Excellent','Good','Possible','Low','No match'].map(b=>'<option value="'+b+'" '+(f.band===b?'selected':'')+'>'+b+'</option>').join('') + '</select></div>' +
         '<div class="field"><label>Status</label><select id="oppStatus" onchange="OppFinder.render()"><option value="">All Status</option>' +
           OPP_STATUSES.map(s=>'<option '+(f.status===s?'selected':'')+'>'+s+'</option>').join('') + '</select></div>' +
         '<div class="field"><label>From Date</label><input type="date" id="oppFrom" value="'+f.from+'" onchange="OppFinder.render()"></div>' +
@@ -14390,8 +14931,8 @@ const OppFinder = {
         const name = Util.escapeHtml(r['Project Name Eng']||r['Project Name Mal']||'');
         return '<tr>' +
           '<td class="col-actions"><div class="row-action-btns"><button class="icon-btn" title="View" onclick="OppFinder.viewProject(\''+key+'\')">&#128065;</button></div></td>' +
-          '<td class="mono" style="min-width:70px;">' +
-            '<div style="color:'+cls(r.score)+';font-weight:700;">'+r.score+'%</div>' +
+          '<td class="mono" style="min-width:70px;" title="'+Util.escapeHtml(oppReasons(r).join(' | '))+'">' +
+            '<div style="color:'+cls(r.score)+';font-weight:700;">'+r.score+'% <span class="hint" style="color:'+OPP_BAND_COLORS[oppBandOf(r.score)]+';font-weight:600;">'+oppBandOf(r.score)+'</span></div>' +
             '<div style="background:var(--border,#e5e7eb);border-radius:6px;height:5px;margin-top:3px;overflow:hidden;"><div style="width:'+r.score+'%;height:100%;background:'+cls(r.score)+';"></div></div>' +
           '</td>' +
           '<td><span class="badge badge-blue">'+OPP_CATEGORY_NAMES[r.type]+'</span>'+(tr.status?' <span class="badge badge-green">'+Util.escapeHtml(tr.status)+'</span>':'')+'</td>' +
@@ -14431,7 +14972,53 @@ const OppFinder = {
       '</div>').join('') + '</div>';
   },
 
+  health: null,
+  async checkHealth(){
+    this.health = { loading:true }; this.paintHealth();
+    let dbCount = null, err = '';
+    try{ const { data, error } = await sb.rpc('opp_get_count'); if(error) throw error; dbCount = Number(data); }
+    catch(e){ err = (e && e.message) || String(e); }
+    this.health = { dbCount: (dbCount!=null && !isNaN(dbCount)) ? dbCount : null, err, at:new Date().toISOString() };
+    this.paintHealth();
+  },
+  paintHealth(){ const el=document.getElementById('oppHealthBox'); if(el) el.innerHTML=this.healthHTML(); },
+  healthHTML(){
+    const rows = Store.data.oppProjects, loaded = rows.length, h = this.health || {};
+    let noName=0, noLB=0, noNo=0, junkCols=0, zero=0; const keys = new Set();
+    rows.forEach(r=>{
+      if(!String(r['Project Name Eng']||r['Project Name Mal']||'').trim()) noName++;
+      if(!String(r['LB Name']||'').trim()) noLB++;
+      if(!String(r['Project No']||'').trim()) noNo++;
+      if(Object.keys(r).some(k=>k===''||/^__EMPTY/.test(k))) junkCols++;
+      if(!r.score) zero++;
+      keys.add(oppKeyOf(r));
+    });
+    const card = (v,l,warn)=>'<div class="card card-pad" style="text-align:center;"><div style="font-size:20px;font-weight:700;'+(warn?'color:var(--amber,#d97706);':'')+'">'+v+'</div><div class="hint">'+l+'</div></div>';
+    const dbTxt = h.loading ? 'checking…' : (h.dbCount!=null ? h.dbCount.toLocaleString('en-IN') : 'unavailable');
+    const mismatch = h.dbCount!=null && h.dbCount !== loaded;
+    const hist = Store.data.oppImportHistory;
+    return '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;">' +
+        card(dbTxt,'Records in Database (live count)', h.dbCount==null && !h.loading) +
+        card(loaded.toLocaleString('en-IN'),'Loaded in this Screen', mismatch) +
+        card(keys.size.toLocaleString('en-IN'),'Unique Record Keys', keys.size!==loaded) +
+        card(noName,'Missing Project Name', noName>0) +
+        card(noLB,'Missing Local Body', noLB>0) +
+        card(noNo,'Missing Project No', false) +
+        card(junkCols,'Rows with Unlabelled Columns', false) +
+        card(zero,'Scored 0 (no keyword)', false) +
+        card(hist.length?Util.fmtDateTime(hist[0].date):'Never','Last Import', false) +
+      '</div>' +
+      (h.err ? '<div class="hint" style="margin-top:8px;color:var(--red,#dc2626);">Could not read the live count: '+Util.escapeHtml(h.err)+'</div>' : '') +
+      (mismatch ? '<div class="card card-pad" id="oppMismatch" style="margin-top:10px;border-left:4px solid var(--amber,#d97706);">The database holds <b>'+h.dbCount+'</b> records but this screen has <b>'+loaded+'</b> loaded. Press <b>Reload from Database</b> to load the rest. Nothing has been deleted.</div>'
+        : (h.dbCount!=null ? '<div class="hint" id="oppMatchOk" style="margin-top:8px;">&#10003; Screen and database counts agree ('+loaded+').</div>' : '')) +
+      '<div class="hint" style="margin-top:8px;">Blank unlabelled columns are kept on existing records (never altered) and dropped from new imports. Project data lives in its own table; the old combined copy is no longer used.</div>' +
+      '<div class="toolbar" style="margin-top:10px;">' +
+        '<button class="btn btn-outline btn-sm" onclick="OppFinder.checkHealth()">&#10227; Re-check count</button>' +
+        '<button class="btn btn-outline btn-sm" onclick="OppFinder.reloadFromDatabase()">&#8635; Reload from Database</button>' +
+      '</div>';
+  },
   renderImport(){
+    if(!this.health) setTimeout(()=>this.checkHealth(),0);
     const hist = Store.data.oppImportHistory;
     const dbCount = Store.data.oppProjects.length;
     const invalidCount = Store.data.oppProjects.filter(r=>!r['Project No'] && !r['LB Name']).length;
@@ -14459,27 +15046,42 @@ const OppFinder = {
       '</div>' +
     '</div>' +
 
-    '<div class="card card-pad" style="margin-bottom:14px;">' +
-      '<h3 style="margin:0 0 10px;font-size:14px;">Project Data Health</h3>' +
-      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;">' +
-        '<div class="card card-pad" style="text-align:center;"><div style="font-size:20px;font-weight:700;">'+dbCount+'</div><div class="hint">Database Records</div></div>' +
-        '<div class="card card-pad" style="text-align:center;"><div style="font-size:20px;font-weight:700;">'+dbCount+'</div><div class="hint">Loaded in this Session</div></div>' +
-        '<div class="card card-pad" style="text-align:center;"><div style="font-size:20px;font-weight:700;'+(invalidCount?'color:var(--amber,#d97706);':'')+'">'+invalidCount+'</div><div class="hint">Missing Project No &amp; LB Name</div></div>' +
-        '<div class="card card-pad" style="text-align:center;"><div style="font-size:13px;font-weight:700;">'+(hist.length?Util.fmtDateTime(hist[0].date):'Never')+'</div><div class="hint">Last Import</div></div>' +
-      '</div>' +
-      '<div class="toolbar" style="margin-top:10px;">' +
-        '<button class="btn btn-outline btn-sm" onclick="OppFinder.reloadFromDatabase()">&#8635; Reload from Database</button>' +
-        '<span class="hint">Forces a fresh fetch from Supabase, bypassing anything cached in this browser tab \u2014 use this any time you want to double-check the real record count.</span>' +
-      '</div>' +
-    '</div>' +
+    '<div class="card card-pad" style="margin-bottom:14px;"><h3 style="margin:0 0 10px;font-size:14px;">Project Data Health</h3><div id="oppHealthBox">'+this.healthHTML()+'</div></div>' +
 
     '<div class="card"><div class="card-pad" style="padding-bottom:0;"><h3 style="margin:0;font-size:14px;">Import History</h3></div>' +
-      '<div class="table-wrap"><table><thead><tr><th>Date</th><th>Source</th><th>Records</th><th>New</th><th>Updated</th><th>Duplicates</th></tr></thead><tbody>' +
-      (hist.length ? hist.map(h=>'<tr><td class="cell-mute">'+Util.fmtDateTime(h.date)+'</td><td>'+Util.escapeHtml(h.source)+'</td><td>'+h.records+'</td><td>'+h.newCount+'</td><td>'+h.updated+'</td><td>'+h.duplicates+'</td></tr>').join('')
-        : '<tr><td colspan="6" class="cell-mute" style="text-align:center;padding:16px;">No imports yet.</td></tr>') +
+      '<div class="table-wrap"><table><thead><tr><th>Date</th><th>Source</th><th>Records</th><th>New</th><th>Updated</th><th>Skipped</th><th>Failed</th></tr></thead><tbody>' +
+      (hist.length ? hist.map(h=>'<tr><td class="cell-mute">'+Util.fmtDateTime(h.date)+'</td><td>'+Util.escapeHtml(h.source)+'</td><td>'+h.records+'</td><td>'+h.newCount+'</td><td>'+h.updated+'</td><td>'+(h.skipped||0)+'</td><td>'+(h.failed||0)+'</td></tr>').join('')
+        : '<tr><td colspan="7" class="cell-mute" style="text-align:center;padding:16px;">No imports yet.</td></tr>') +
       '</tbody></table></div></div>';
   },
 
+  matchSettingsHTML(){
+    const b = oppBands(), adm = Auth.isAdmin(), dis = adm ? '' : ' disabled';
+    const syn = String((Store.data.settings||{}).oppSynonyms||'');
+    return '<div class="card card-pad" style="margin-bottom:14px;" id="oppMatchSettings">' +
+      '<h3 style="margin-top:0;font-size:14px;">Match Bands &amp; Synonyms</h3>' +
+      '<div class="hint" style="margin-bottom:8px;">Bands turn the score into Excellent / Good / Possible for quick filtering. Synonyms let different spellings (English or Malayalam) count as one term - a project is never scored twice for saying both.'+(adm?'':' Only an Admin can change these.')+'</div>' +
+      '<div class="form-row" style="grid-template-columns:1fr 1fr 1fr;">' +
+        '<div class="field"><label>Excellent from %</label><input id="oppBandEx" type="number" min="1" max="100" value="'+b.excellent+'"'+dis+'></div>' +
+        '<div class="field"><label>Good from %</label><input id="oppBandGd" type="number" min="1" max="100" value="'+b.good+'"'+dis+'></div>' +
+        '<div class="field"><label>Possible from %</label><input id="oppBandPs" type="number" min="1" max="100" value="'+b.possible+'"'+dis+'></div>' +
+      '</div>' +
+      '<div class="field"><label>Synonyms - one line per set, like: <i>dustbin = waste bin, trash can, \u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f \u0d2c\u0d3f\u0d28\u0d4d\u0d28\u0d4d</i></label>' +
+        '<textarea id="oppSynonyms" rows="4"'+dis+'>'+Util.escapeHtml(syn)+'</textarea></div>' +
+      (adm ? '<div class="toolbar"><button class="btn btn-primary btn-sm" onclick="OppFinder.saveMatchSettings()">Save</button><span class="hint">Bands apply immediately. After changing synonyms, run Import &gt; Recalculate All Scores.</span></div>' : '') +
+    '</div>';
+  },
+  async saveMatchSettings(){
+    if(!Auth.isAdmin()){ UI.toast('Only an Admin can change this'); return; }
+    const n = id => Number(document.getElementById(id).value);
+    const ex = n('oppBandEx'), gd = n('oppBandGd'), ps = n('oppBandPs');
+    if(!(ex>gd && gd>ps && ps>=1 && ex<=100)){ UI.toast('Bands must go down: Excellent > Good > Possible, between 1 and 100'); return; }
+    Store.data.settings.oppBands = { excellent:ex, good:gd, possible:ps };
+    Store.data.settings.oppSynonyms = document.getElementById('oppSynonyms').value;
+    const ok = await Store.save('settings');
+    if(ok){ await Activity.log('Opportunity match settings changed', ex+'/'+gd+'/'+ps); UI.toast('Saved'); }
+    this.render();
+  },
   renderProducts(){
     const list = Store.data.oppProducts;
     const groups = Store.data.oppKeywordGroups;
@@ -14499,6 +15101,7 @@ const OppFinder = {
         : '<div class="hint">No products added yet.</div>') +
     '</div>' +
 
+    this.matchSettingsHTML() +
     '<div class="card card-pad" style="margin-bottom:14px;">' +
       '<h3 style="margin-top:0;font-size:14px;">Keyword Matching Library</h3>' +
       '<div class="hint" style="margin-bottom:8px;">Controls the Opportunity Score. Higher weight = counts more toward a match. Add new terms here any time \u2014 no code changes needed.' +
@@ -14642,9 +15245,28 @@ const Backup = {
       </div>
       <div id="backupBody"></div>
     `;
-    if(this.activeTab==='tools') this.renderTools(); else this.renderLog();
+    if(this.activeTab==='tools'){ this.renderTools(); this.loadSnaps(); } else this.renderLog();
   },
   setTab(t){ this.activeTab=t; this.render(); },
+  async loadSnaps(){
+    const box = document.getElementById('srvSnapList'); if(!box) return;
+    try{
+      const { data, error } = await sb.from('store_backups').select('id,key,taken_at,version,reason').order('taken_at',{ascending:false}).order('id',{ascending:false}).limit(60);
+      if(error) throw error; const rows = data || [];
+      const nice = k=>String(k).replace(/^jays_/,'');
+      box.innerHTML = rows.length ? `<div class="table-wrap" style="max-height:260px;overflow:auto;"><table><thead><tr><th>Taken</th><th>Module data</th><th>Reason</th><th></th></tr></thead><tbody>${rows.map(r=>`<tr><td>${Util.fmtDateTime(r.taken_at)}</td><td>${Util.escapeHtml(nice(r.key))}</td><td class="cell-mute">${Util.escapeHtml(r.reason||'')}</td><td><button class="btn btn-outline btn-sm" onclick="Backup.restoreSnap(${Number(r.id)})">Restore</button></td></tr>`).join('')}</tbody></table></div>` : 'No server backups yet.';
+    }catch(e){ box.textContent = 'Could not load server backups: ' + (e.message||'error'); }
+  },
+  async snapNow(){
+    try{ const { data, error } = await sb.rpc('store_snapshot', { p_reason:'manual' }); if(error) throw error; UI.toast(data ? 'Backup saved ('+data+' changed module(s))' : 'Nothing has changed since the last backup'); this.loadSnaps(); Activity.log('Server backup', 'Manual backup'); }
+    catch(e){ UI.toast('Backup failed: '+(e.message||'error')); }
+  },
+  async restoreSnap(id){
+    if(!Auth.isAdmin()) return;
+    if(!confirm('Restore this module to the version saved in this backup? Its current data is backed up first. The page will reload.')) return;
+    try{ const { data, error } = await sb.rpc('store_restore', { p_backup_id:id }); if(error) throw error; UI.toast('Restored '+String(data.key).replace(/^jays_/,'')+'. Reloading...'); setTimeout(()=>location.reload(), 900); }
+    catch(e){ UI.toast('Restore failed: '+(e.message||'error')); }
+  },
   renderTools(){
     const s = Store.data.settings;
     document.getElementById('backupBody').innerHTML = `
@@ -14656,6 +15278,11 @@ const Backup = {
         <button class="btn btn-primary btn-sm" onclick="Backup.googleDriveBackup()">&#9729; Backup Now</button>
       </div>
 
+      ${Auth.isAdmin() ? `<div class="card card-pad" style="margin-bottom:16px;" id="srvSnapCard">
+        <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center;"><div><h3 style="margin:0;font-size:14px;">Automatic server backups</h3>
+          <div class="cell-mute" style="font-size:12px;margin-top:2px;">A copy of every module is saved on the server every night (about 2:00 am IST). Restoring one module first saves a copy of its current data.</div></div>
+          <button class="btn btn-outline btn-sm" onclick="Backup.snapNow()">Take a backup now</button></div>
+        <div id="srvSnapList" class="cell-mute" style="margin-top:10px;">Loading&hellip;</div></div>` : ''}
       <div class="grid grid-4">
         <div class="backup-tile">
           <div class="bic" style="background:var(--blue-light);color:var(--blue);">&#9729;</div>
@@ -14758,6 +15385,8 @@ const Backup = {
     try{
       const text = await file.text();
       const data = JSON.parse(text);
+      try{ await sb.rpc('store_snapshot', { p_reason:'before file restore' }); }catch(e){ console.warn('pre-restore snapshot failed', e); }   // safety copy of the current data on the server
+      Store.forceOverwrite = true;
       ['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo','dayPlans','staffTargets','emdPbg','suppliers','purchaseOrders','amcRecords'].forEach(k=>{
         if(data[k]!==undefined) Store.data[k] = data[k];
       });
@@ -14767,6 +15396,7 @@ const Backup = {
       // imports actually merge against) gets restored too, not just
       // the legacy blob.
       await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo','dayPlans','staffTargets','emdPbg','suppliers','purchaseOrders','amcRecords'].map(k=>Store.save(k)));
+      Store.forceOverwrite = false;
       if(data['oppProjects']!==undefined) await Store.replaceAllOppProjects(Store.data.oppProjects);
       // Tender Centre tables: merged back by id (never deleted), only when the backup has them.
       let tenderMsg = '';
@@ -14774,7 +15404,7 @@ const Backup = {
       await Activity.log('Data restored', 'Restored from backup file '+file.name);
       UI.toast('Data restored successfully'+tenderMsg);
       Router.render('backup');
-    }catch(e){ console.error(e); UI.toast('Restore failed — invalid backup file'); }
+    }catch(e){ Store.forceOverwrite = false; console.error(e); UI.toast('Restore failed — invalid backup file'); }
   },
   exportDatabaseExcel(){
     if(!Auth.isAdmin()){ UI.toast("You don't have permission to export the full database"); return; }
@@ -15823,6 +16453,124 @@ async function callTeamUserFn(payload){
     return out;
   }catch(e){ console.error('manage-team-user call failed', e); return { error: 'Network error contacting the server' }; }
 }
+/* =====================================================================
+   ACCESS RULES  (Admin sets, per role, which menus show and what each
+   data area allows: Edit / View only / No access). Stored in the
+   access_rules table; the database enforces the data levels, the menus
+   are hidden here. No rules saved = everything open, as before.
+   ===================================================================== */
+const ACCESS_MODULES = [
+  {id:'followups', label:'Follow-ups',                 keys:['jays_followups'], menus:['followupcentre']},
+  {id:'quotations',label:'Quotations & Rate documents',keys:['jays_quotations','jays_ratedocs','jays_ratetemplates','jays_rateterms','jays_ratedoctemplates'], menus:['quotations','rate_docs']},
+  {id:'orders',    label:'Orders',                     keys:['jays_orders'], menus:['orders']},
+  {id:'payments',  label:'Payments & Outstanding',     keys:['jays_payments'], menus:['payments','outstanding']},
+  {id:'bids',      label:'GeM bids, GEM CRAC, EMD/PBG',keys:['jays_bids','jays_gemcrac','jays_emdpbg'], menus:['bidsearch','gemcrac','emdpbg']},
+  {id:'biddocs',   label:'Bid documents & letters',    keys:['jays_biddocs'], menus:['biddocs']},
+  {id:'opp',       label:'Project Opportunity (tracking, products, keywords)', keys:['jays_opptracking','jays_oppproducts','jays_oppimporthistory','jays_oppkeywordgroups'], menus:['oppfinder']},
+  {id:'products',  label:'Products, suppliers, purchase orders', keys:['jays_products','jays_suppliers','jays_purchaseorders'], menus:['products','inventory','suppliers','purchaseorders']},
+  {id:'tasks',     label:'Tasks & Notes (older list)', keys:['jays_tasks','jays_notes'], menus:['notes']},
+  {id:'complaints',label:'Complaints & AMC',           keys:['jays_complaints','jays_amcrecords'], menus:['complaints','amc']},
+  {id:'field',     label:'Field sales (visits, requirements, travel)', keys:['jays_visits','jays_requirements','jays_travellogs','jays_dayplans','jays_lsgofficegeo'], menus:['visits','requirements','travel','fieldmap']},
+  {id:'attendance',label:'Attendance & Leave',         keys:['jays_attendance','jays_leaverequests'], menus:['attendance']},
+  {id:'whatsapp',  label:'WhatsApp templates & history',keys:['jays_watemplates','jays_wahistory'], menus:[]}
+];
+const ACCESS_SALES_PRESET = { payments:'none', orders:'view', products:'view', biddocs:'view' };
+const Access = {
+  rules: { data:{}, menu:{} },
+  async load(){
+    this.rules = { data:{}, menu:{} };
+    try{
+      if(!Auth.session || Auth.session.role==='Admin') return;
+      const { data, error } = await sb.from('access_rules').select('kind,item,level').eq('role', Auth.session.role);
+      if(error) throw error;
+      (data||[]).forEach(r=>{ (r.kind==='menu' ? this.rules.menu : this.rules.data)[r.item] = r.level; });
+    }catch(e){ console.error('access rules load failed', e); }
+  },
+  level(key){
+    if(Auth.session && Auth.session.role==='Admin') return 'edit';
+    return this.rules.data[key] || 'edit';
+  },
+  moduleLevel(m){ return this.level(m.keys[0]); },
+  menuHidden(id){
+    if(!Auth.session || Auth.session.role==='Admin') return false;
+    if(this.rules.menu[id]==='none') return true;
+    const m = ACCESS_MODULES.find(x=>x.menus.includes(id));
+    return !!(m && this.moduleLevel(m)==='none');
+  }
+};
+const AccessAdmin = {
+  role: 'Sales', draft: null, loaded: false,
+  async open(){
+    const box = document.getElementById('accessRulesBox'); if(!box) return;
+    box.innerHTML = '<div class="hint">Loading access rules…</div>';
+    await this.loadRole(this.role);
+  },
+  async loadRole(role){
+    this.role = role; this.loaded = false;
+    const d = { data:{}, menu:{} };
+    try{
+      const { data, error } = await sb.from('access_rules').select('kind,item,level').eq('role', role);
+      if(error) throw error;
+      (data||[]).forEach(r=>{ if(r.kind==='menu') d.menu[r.item]=r.level; else d.data[r.item]=r.level; });
+      this.loaded = true;
+    }catch(e){ console.error('load rules', e); }
+    this.draft = { menu:{}, data:{} };
+    ACCESS_MODULES.forEach(m=>{ this.draft.data[m.id] = d.data[m.keys[0]] || 'edit'; });
+    assignableMenus().forEach(m=>{ this.draft.menu[m.id] = d.menu[m.id]==='none' ? 'hide' : 'show'; });
+    this.paint();
+  },
+  paint(){
+    const box = document.getElementById('accessRulesBox'); if(!box) return;
+    const E = Util.escapeHtml, d = this.draft;
+    const radio = (m,v,l)=>'<td style="text-align:center;"><input type="radio" name="am_'+m.id+'" value="'+v+'" '+(d.data[m.id]===v?'checked':'')+' onchange="AccessAdmin.setData(\''+m.id+'\',\''+v+'\')" aria-label="'+E(m.label)+' '+l+'"></td>';
+    box.innerHTML = '<div class="card card-pad" style="margin-top:16px;" id="accessCard">' +
+      '<h3 style="margin:0 0 4px;font-size:14px;">&#128272; Access Rules</h3>' +
+      '<div class="hint" style="margin-bottom:10px;">Choose a role, then set what its users may see and change. Admin always has full access. Until you press Save, nothing changes. Data rules are enforced by the database, not just hidden in the menu.</div>' +
+      '<div class="toolbar"><label class="hint" for="accessRole">Role</label> <select id="accessRole" onchange="AccessAdmin.loadRole(this.value)">'+['Sales','User'].map(r=>'<option '+(r===this.role?'selected':'')+'>'+r+'</option>').join('')+'</select>' +
+        '<div class="toolbar-spacer"></div><button class="btn btn-outline btn-sm" onclick="AccessAdmin.preset(\'open\')">Allow everything</button><button class="btn btn-outline btn-sm" onclick="AccessAdmin.preset(\'sales\')">Suggested for Sales</button></div>' +
+      (this.loaded ? '' : '<div class="hint" style="color:var(--red,#dc2626);">Could not read the saved rules - showing defaults. Saving will overwrite them.</div>') +
+      '<h4 style="margin:12px 0 6px;font-size:12.5px;">Data areas</h4>' +
+      '<div class="table-wrap"><table><thead><tr><th>Area</th><th>Edit</th><th>View only</th><th>No access</th></tr></thead><tbody>' +
+      ACCESS_MODULES.map(m=>'<tr><td class="cell-main">'+E(m.label)+'</td>'+radio(m,'edit','edit')+radio(m,'view','view only')+radio(m,'none','no access')+'</tr>').join('') +
+      '</tbody></table></div>' +
+      '<div class="hint" style="margin-top:6px;">&quot;No access&quot; also hides that area\'s menu items. Customers and the Project Opportunity project list are secured separately and are not changed here. Settings, counters and the activity log stay open to all staff because the app needs them to work.</div>' +
+      '<h4 style="margin:14px 0 6px;font-size:12.5px;">Menus this role can see</h4>' +
+      NAV.map(sec=>{ const items = sec.items.filter(i=>!i.adminOnly); if(!items.length) return '';
+        return '<div style="margin-bottom:8px;"><div class="hint" style="font-weight:700;">'+sec.sec+'</div><div style="display:flex;flex-wrap:wrap;gap:6px 14px;">' +
+          items.map(i=>'<label style="display:flex;align-items:center;gap:5px;font-size:12.5px;"><input type="checkbox" data-menu="'+i.id+'" '+(d.menu[i.id]==='show'?'checked':'')+' onchange="AccessAdmin.setMenu(\''+i.id+'\',this.checked)"> '+i.label+'</label>').join('') + '</div></div>'; }).join('') +
+      '<div class="toolbar" style="margin-top:12px;"><button class="btn btn-primary btn-sm" id="accessSave" onclick="AccessAdmin.save()">Save rules for '+E(this.role)+'</button><span class="hint" id="accessMsg"></span></div>' +
+    '</div>';
+  },
+  setData(id,v){ this.draft.data[id] = v; },
+  setMenu(id,on){ this.draft.menu[id] = on ? 'show' : 'hide'; },
+  preset(kind){
+    ACCESS_MODULES.forEach(m=>{ this.draft.data[m.id] = kind==='sales' ? (ACCESS_SALES_PRESET[m.id]||'edit') : 'edit'; });
+    assignableMenus().forEach(m=>{ this.draft.menu[m.id] = 'show'; });
+    this.paint();
+  },
+  async save(){
+    if(!Auth.isAdmin()){ UI.toast('Only an Admin can change access rules'); return; }
+    const role = this.role, d = this.draft, now = new Date().toISOString();
+    const upserts = [], delData = [], delMenu = [];
+    ACCESS_MODULES.forEach(m=>m.keys.forEach(k=>{ if(d.data[m.id]==='edit') delData.push(k); else upserts.push({role, kind:'data', item:k, level:d.data[m.id], updated_at:now}); }));
+    assignableMenus().forEach(m=>{ if(d.menu[m.id]==='hide') upserts.push({role, kind:'menu', item:m.id, level:'none', updated_at:now}); else delMenu.push(m.id); });
+    const msg = document.getElementById('accessMsg'); if(msg) msg.textContent = 'Saving…';
+    try{
+      if(upserts.length){ const { error } = await sb.from('access_rules').upsert(upserts, { onConflict:'role,kind,item' }); if(error) throw error; }
+      if(delData.length){ const { error } = await sb.from('access_rules').delete().eq('role',role).eq('kind','data').in('item', delData); if(error) throw error; }
+      if(delMenu.length){ const { error } = await sb.from('access_rules').delete().eq('role',role).eq('kind','menu').in('item', delMenu); if(error) throw error; }
+    }catch(e){
+      console.error('save rules failed', e);
+      if(msg) msg.textContent = 'Save failed - nothing was changed. Check your connection and try again.';
+      UI.toast('Access rules were not saved'); return;
+    }
+    const restricted = ACCESS_MODULES.filter(m=>d.data[m.id]!=='edit').map(m=>m.label+': '+(d.data[m.id]==='view'?'view only':'no access'));
+    const hidden = assignableMenus().filter(m=>d.menu[m.id]==='hide').length;
+    await Activity.log('Access rules changed ('+role+')', (restricted.join('; ')||'all data editable')+'; '+hidden+' menu(s) hidden');
+    if(msg) msg.textContent = 'Saved. Staff see the change the next time they sign in or refresh.';
+    UI.toast('Access rules saved for '+role);
+  }
+};
 const UsersMgmt = {
   render(){
     if(!Auth.isAdmin()){ document.getElementById('content').innerHTML = `<div class="empty-state"><div class="ic">&#128274;</div><div class="t">Admins only</div></div>`; return; }
@@ -15846,7 +16594,9 @@ const UsersMgmt = {
         </td>
       </tr>`).join('')}
       </tbody></table></div></div>
+      <div id="accessRulesBox"></div>
     `;
+    AccessAdmin.open();
   },
   openForm(id){
     const rec = id ? Store.data.users.find(u=>u.id===id) : null;
