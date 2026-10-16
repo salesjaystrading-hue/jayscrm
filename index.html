@@ -1039,7 +1039,7 @@ const Store = {
     customers: [], products: [], quotations: [], payments: [],
     followups: [], tasks: [], notes: [], users: [], settings: {}, activityLog: [],
     gemcrac: [], orders: [], complaints: [], bids: [], waTemplates: [], waHistory: [],
-    emdPbg: [], suppliers: [], purchaseOrders: [], amcRecords: [],
+    emdPbg: [], suppliers: [], purchaseOrders: [], amcRecords: [], rfqs: [], officeExpenses: [], officeWork: [], handovers: [],
     rateTemplates: [], rateDocs: [], rateTerms: [], rateDocTemplates: [],
     oppProjects: [], oppTracking: {}, oppProducts: [], oppImportHistory: [], oppKeywordGroups: [],
     attendance: [], leaveRequests: [], bidDocs: [],
@@ -1555,7 +1555,7 @@ const Store = {
       oppTracking, oppProducts, oppImportHistory, oppKeywordGroups,
       attendance, leaveRequests, bidDocs, visits, requirements, travelLogs,
       lsgOfficeGeo, settings, counters, _users, dayPlans, staffTargets,
-      emdPbg, suppliers, purchaseOrders, amcRecords
+      emdPbg, suppliers, purchaseOrders, amcRecords, rfqs, officeExpenses, officeWork, handovers
     ] = await Promise.all([
       this.loadCustomersDb(),
       this.loadKey('jays_products', null),
@@ -1595,6 +1595,10 @@ const Store = {
       this.loadKey('jays_suppliers', []),
       this.loadKey('jays_purchaseorders', []),
       this.loadKey('jays_amcrecords', []),
+      this.loadKey('jays_rfqs', []),
+      this.loadKey('jays_officeexpenses', []),
+      this.loadKey('jays_officework', []),
+      this.loadKey('jays_handovers', []),
     ]);
 
     /* customers now reads from public.customers (Phase 6 cutover), with
@@ -1651,6 +1655,10 @@ const Store = {
     this.data.suppliers = suppliers;
     this.data.purchaseOrders = purchaseOrders;
     this.data.amcRecords = amcRecords;
+    this.data.rfqs = rfqs;
+    this.data.officeExpenses = officeExpenses;
+    this.data.officeWork = officeWork;
+    this.data.handovers = handovers;
 
     await this.migrateWaTemplates();
     await this.migrateOppMachineKeywords();
@@ -2303,6 +2311,8 @@ const NAV = [
     {id:'pipeline', ic:'&#128202;', label:'Sales Pipeline'},
     {id:'mywork', ic:'&#127919;', label:'My Work'},
     {id:'followupcentre', ic:'&#9200;', label:'Follow-ups'},
+    {id:'officework', ic:'&#128203;', label:'Office Work Register'},
+    {id:'handover', ic:'&#129309;', label:'Work Handover'},
     {id:'mycalls', ic:'&#9742;', label:'My Calling List'},
     {id:'officequeue', ic:'&#128203;', label:'Office Queue'},
     {id:'quotations', ic:'&#128196;', label:'Quotations'},
@@ -2322,10 +2332,12 @@ const NAV = [
     {id:'inventory', ic:'&#127974;', label:'Inventory'},
     {id:'suppliers', ic:'&#127981;', label:'Suppliers'},
     {id:'purchaseorders', ic:'&#128722;', label:'Purchase Orders'},
+    {id:'rfq', ic:'&#128209;', label:'Supplier RFQs'},
   ]},
   {sec:'Payments &amp; Accounts', ic:'&#128176;', items:[
     {id:'payments', ic:'&#128176;', label:'Payments Follow-up'},
     {id:'outstanding', ic:'&#9888;', label:'Outstanding'},
+    {id:'expenses', ic:'&#129534;', label:'Office Expenses'},
   ]},
   {sec:'Field Sales', ic:'&#128204;', items:[
     {id:'fieldhome', ic:'&#128204;', label:'My Day'},
@@ -2382,6 +2394,10 @@ const PAGE_META = {
   mycalls:['My Calling List','Your assigned contacts, call logging and follow-ups'],
   callalloc:['Contact Allocation','Assign contacts by district and local body, and monitor calling'],
   emdpbg:['EMD / PBG Tracker','Earnest money, performance guarantees and deposits — with expiry alerts'],
+  officework:['Office Work Register','Daily office jobs with owner, due date and status'],
+  handover:['Work Handover','Hand pending work to a colleague and get it acknowledged'],
+  rfq:['Supplier RFQs','Ask suppliers for prices, compare landed cost and prepare the customer quotation'],
+  expenses:['Office Expenses','Courier, transport and other office spending with approval'],
   suppliers:['Suppliers','Supplier master with products and payment terms'],
   purchaseorders:['Purchase Orders','Orders placed with suppliers, delivery and payment status'],
   amc:['Service & AMC','AMC contracts, warranties and service visits'],
@@ -15422,7 +15438,9 @@ const Backup = {
       bidDocs: Store.data.bidDocs,
       visits: Store.data.visits, requirements: Store.data.requirements, travelLogs: Store.data.travelLogs,
       lsgOfficeGeo: Store.data.lsgOfficeGeo, dayPlans: Store.data.dayPlans, staffTargets: Store.data.staffTargets,
-      emdPbg: Store.data.emdPbg, suppliers: Store.data.suppliers, purchaseOrders: Store.data.purchaseOrders, amcRecords: Store.data.amcRecords
+      emdPbg: Store.data.emdPbg, suppliers: Store.data.suppliers, purchaseOrders: Store.data.purchaseOrders, amcRecords: Store.data.amcRecords,
+      rfqs: Store.data.rfqs, officeExpenses: Store.data.officeExpenses,
+      officeWork: Store.data.officeWork, handovers: Store.data.handovers
     };
   },
   async downloadJSON(){
@@ -15462,7 +15480,7 @@ const Backup = {
       const data = JSON.parse(text);
       try{ await sb.rpc('store_snapshot', { p_reason:'before file restore' }); }catch(e){ console.warn('pre-restore snapshot failed', e); }   // safety copy of the current data on the server
       Store.forceOverwrite = true;
-      ['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo','dayPlans','staffTargets','emdPbg','suppliers','purchaseOrders','amcRecords'].forEach(k=>{
+      ['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo','dayPlans','staffTargets','emdPbg','suppliers','purchaseOrders','amcRecords','rfqs','officeExpenses','officeWork','handovers'].forEach(k=>{
         if(data[k]!==undefined) Store.data[k] = data[k];
       });
       // oppProjects lives in its own indexed table now, not the
@@ -15470,7 +15488,7 @@ const Backup = {
       // the dedicated full-replace path so opp_projects_rows (what
       // imports actually merge against) gets restored too, not just
       // the legacy blob.
-      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo','dayPlans','staffTargets','emdPbg','suppliers','purchaseOrders','amcRecords'].map(k=>Store.save(k)));
+      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo','dayPlans','staffTargets','emdPbg','suppliers','purchaseOrders','amcRecords','rfqs','officeExpenses','officeWork','handovers'].map(k=>Store.save(k)));
       Store.forceOverwrite = false;
       if(data['oppProjects']!==undefined) await Store.replaceAllOppProjects(Store.data.oppProjects);
       // Tender Centre tables: merged back by id (never deleted), only when the backup has them.
@@ -16543,6 +16561,9 @@ const ACCESS_MODULES = [
   {id:'biddocs',   label:'Bid documents & letters',    keys:['jays_biddocs'], menus:['biddocs']},
   {id:'opp',       label:'Project Opportunity (tracking, products, keywords)', keys:['jays_opptracking','jays_oppproducts','jays_oppimporthistory','jays_oppkeywordgroups'], menus:['oppfinder']},
   {id:'products',  label:'Products, suppliers, purchase orders', keys:['jays_products','jays_suppliers','jays_purchaseorders'], menus:['products','inventory','suppliers','purchaseorders']},
+  {id:'rfq',       label:'Supplier RFQs & price comparison (supplier costs)', keys:['jays_rfqs'], menus:['rfq']},
+  {id:'officework',label:'Office work register & handover', keys:['jays_officework','jays_handovers'], menus:['officework','handover']},
+  {id:'expenses',  label:'Office expenses', keys:['jays_officeexpenses'], menus:['expenses']},
   {id:'tasks',     label:'Tasks & Notes (older list)', keys:['jays_tasks','jays_notes'], menus:['notes']},
   {id:'complaints',label:'Complaints & AMC',           keys:['jays_complaints','jays_amcrecords'], menus:['complaints','amc']},
   {id:'field',     label:'Field sales (visits, requirements, travel)', keys:['jays_visits','jays_requirements','jays_travellogs','jays_dayplans','jays_lsgofficegeo'], menus:['visits','requirements','travel','fieldmap']},
@@ -16646,6 +16667,508 @@ const AccessAdmin = {
     UI.toast('Access rules saved for '+role);
   }
 };
+
+/* =====================================================================
+   SUPPLIER RFQ & PRICE COMPARISON  (namespace: Rfq)
+   Customer requirement -> RFQ -> several supplier responses -> landed-cost
+   comparison -> supplier selected (reason recorded) -> selling-price
+   calculator -> customer quotation (Rate / Offer PDF).
+   Stored in the shared collection `rfqs` (key jays_rfqs). Supplier cost
+   prices live ONLY here; they are never copied into the customer
+   quotation - only the selling price is. Admins can hide this whole area
+   from a role in Users & Roles > Access Rules ("Supplier RFQs").
+   COST RULES (stated on screen too):
+     Base       = unit price x quantity (excluding GST)
+     GST        = base x GST rate
+     Other      = transport + other charges (entered as totals, excluding GST)
+     Total payable = base + GST + other
+     Landed cost   = base + other, plus GST only when GST is NOT recoverable
+                     (tick "GST is recoverable" when you can claim input credit)
+   The lowest landed cost is highlighted but never auto-selected.
+===================================================================== */
+const RFQ_STATUS = ['Draft','Sent to Suppliers','Responses Received','Supplier Selected','Quotation Prepared','Closed','Cancelled'];
+const RFQ_AVAIL = ['In stock','Order basis','Not available','Not stated'];
+function rfqCalc(rfq, resp){
+  const qty = Number(rfq.qty)||0, unit = Number(resp.unitPrice)||0, gst = Number(resp.gstRate)||0;
+  const base = unit*qty, gstAmt = base*gst/100, other = (Number(resp.transport)||0) + (Number(resp.other)||0);
+  const recoverable = rfq.gstRecoverable !== false;
+  const landed = base + other + (recoverable ? 0 : gstAmt);
+  return { base, gstAmt, other, total: base+gstAmt+other, landed, landedUnit: qty ? landed/qty : 0 };
+}
+/* Markup is a % of COST; margin is a % of SELLING PRICE. They are different. */
+function priceFromCost(cost, pct, mode){
+  cost = Number(cost)||0; pct = Number(pct)||0;
+  if(mode==='margin'){ return pct>=100 ? null : cost/(1-pct/100); }
+  return cost*(1+pct/100);
+}
+const r2 = n=>Math.round((Number(n)||0)*100)/100;
+const Rfq = {
+  cur: null, filter: {q:'', status:''},
+  all(){ return Array.isArray(Store.data.rfqs) ? Store.data.rfqs : (Store.data.rfqs = []); },
+  get(id){ return this.all().find(x=>x.id===id); },
+  who(){ return bidUserName(); },
+  log(rfq, text){ rfq.history = rfq.history||[]; rfq.history.push({date:new Date().toISOString(), by:this.who(), text}); },
+  responseCount(r){ return (r.responses||[]).length; },
+  lowest(rfq){ const rs = (rfq.responses||[]).filter(x=>Number(x.unitPrice)>0); if(!rs.length) return null; return rs.map(x=>({x,c:rfqCalc(rfq,x)})).sort((a,b)=>a.c.landed-b.c.landed)[0]; },
+  /* ---------- list ---------- */
+  render(){
+    if(this.cur && this.get(this.cur)) return this.renderDetail();
+    this.cur = null;
+    const f = this.filter, all = this.all();
+    let list = all.slice();
+    if(f.q) list = list.filter(r=>[r.id,r.product,r.brand,r.model,r.customerName,r.enquiryRef].some(v=>String(v||'').toLowerCase().includes(f.q.toLowerCase())));
+    if(f.status) list = list.filter(r=>r.status===f.status);
+    list.sort((a,b)=>String(b.id).localeCompare(String(a.id)));
+    const open = all.filter(r=>!['Closed','Cancelled'].includes(r.status));
+    const late = open.filter(r=>{ const d = Util.daysUntil(r.requiredDate); return d!==null && d<0; });
+    const pg = Paginate.slice('rfqs', list);
+    document.getElementById('content').innerHTML =
+      dashboardCardsHTML('Supplier RFQ Dashboard', [
+        {label:'Total RFQs', value:all.length},
+        {label:'Open', value:open.length, color:'var(--blue,#2563eb)'},
+        {label:'Waiting for supplier prices', value:open.filter(r=>['Draft','Sent to Suppliers'].includes(r.status)).length, color:'var(--amber,#d97706)'},
+        {label:'Ready to compare / select', value:open.filter(r=>r.status==='Responses Received').length, color:'var(--violet,#7c3aed)'},
+        {label:'Past required date', value:late.length, color:late.length?'var(--red,#dc2626)':undefined}
+      ]) +
+      '<div class="toolbar"><div class="search"><span class="ic">&#128269;</span><input id="rfqSearch" placeholder="Search RFQ no, product, brand, customer..." value="'+Util.escapeHtml(f.q)+'" oninput="Rfq.setFilter()"></div>' +
+        '<select id="rfqStatus" onchange="Rfq.setFilter()"><option value="">All Statuses</option>'+RFQ_STATUS.map(s=>'<option '+(s===f.status?'selected':'')+'>'+s+'</option>').join('')+'</select>' +
+        '<div class="toolbar-spacer"></div><button class="btn btn-outline btn-sm" onclick="PriceCalc.open()">&#129518; Price Calculator</button>' +
+        '<button class="btn btn-primary btn-sm" id="rfqNew" onclick="Rfq.openForm(null)">&#65291; New RFQ</button></div>' +
+      '<div class="card"><div class="table-wrap">' + (list.length ?
+        '<table><thead><tr><th class="col-actions">Actions</th><th>RFQ</th><th>Product</th><th>Customer</th><th>Qty</th><th>Required</th><th>Responses</th><th>Best landed cost</th><th>Selected supplier</th><th>Status</th></tr></thead><tbody>' +
+        pg.pageItems.map(r=>{ const lo = this.lowest(r), sel = (r.responses||[]).find(x=>x.id===r.selectedResponseId);
+          return '<tr><td class="col-actions"><div class="row-action-btns"><button class="icon-btn" title="Open" onclick="Rfq.open(\''+r.id+'\')">&#128065;</button><button class="icon-btn" title="Edit" onclick="Rfq.openForm(\''+r.id+'\')">&#9998;</button><button class="icon-btn" title="Delete" onclick="Rfq.remove(\''+r.id+'\')">&#128465;</button></div></td>' +
+            '<td class="mono">'+Util.escapeHtml(r.id)+'</td><td class="cell-main">'+Util.escapeHtml(r.product||'')+'<div class="cell-mute" style="font-size:11px;">'+Util.escapeHtml([r.brand,r.model].filter(Boolean).join(' '))+'</div></td>' +
+            '<td class="cell-mute">'+Util.escapeHtml(r.customerName||'—')+'</td><td>'+Util.escapeHtml(r.qty||'')+' '+Util.escapeHtml(r.unit||'')+'</td><td>'+Util.fmtDate(r.requiredDate)+' '+recDueBadge(r.requiredDate, ['Closed','Cancelled','Quotation Prepared'].includes(r.status), 3)+'</td>' +
+            '<td>'+this.responseCount(r)+'</td><td class="mono">'+(lo?Util.fmtMoney(lo.c.landed):'—')+'</td><td class="cell-mute">'+Util.escapeHtml(sel?sel.supplierName:'—')+'</td>' +
+            '<td>'+recBadge(r.status, r.status==='Closed'||r.status==='Quotation Prepared'?'green':r.status==='Cancelled'?'red':r.status==='Draft'?'gray':'blue')+'</td></tr>'; }).join('') +
+        '</tbody></table>' + Paginate.controlsHTML('rfqs', pg, 'Rfq.render()')
+        : '<div class="empty-state"><div class="ic">&#128209;</div><div class="t">'+(f.q||f.status?'No matching RFQs':'No supplier RFQs yet')+'</div><div class="d">Record a customer requirement, ask several suppliers for prices, then compare them side by side.</div><button class="btn btn-primary btn-sm" onclick="Rfq.openForm(null)">&#65291; New RFQ</button></div>') +
+      '</div></div>';
+    const el = document.getElementById('rfqSearch'); if(el && f.q){ el.focus(); el.setSelectionRange(f.q.length, f.q.length); }
+  },
+  setFilter(){ this.filter = { q:(document.getElementById('rfqSearch')||{}).value||'', status:(document.getElementById('rfqStatus')||{}).value||'' }; Paginate.get('rfqs').page=1; this.render(); },
+  open(id){ this.cur = id; this.render(); },
+  back(){ this.cur = null; this.render(); },
+  /* ---------- create / edit ---------- */
+  openForm(id){
+    const rec = id ? this.get(id) : null, E = Util.escapeHtml;
+    const v = rec || { customerId:'', customerName:'', enquiryRef:'', product:'', brand:'', model:'', specs:'', qty:1, unit:'Nos', requiredDate:'', assignedTo:(Auth.session&&(Auth.session.name||Auth.session.username))||'', gstRecoverable:true, status:'Draft' };
+    UI.openModal(rec?'Edit RFQ '+rec.id:'New Supplier RFQ',
+      '<div class="field"><label>Customer (from Customers - optional)</label>'+CustPicker.html('rq', v.customerId, 'rfqCustSelected')+'</div>' +
+      '<div class="form-row"><div class="field"><label>Customer name</label><input id="rq_customerName" value="'+E(v.customerName||'')+'"></div><div class="field"><label>Customer enquiry / reference</label><input id="rq_enquiryRef" value="'+E(v.enquiryRef||'')+'"></div></div>' +
+      '<div class="field"><label>Product *</label><input id="rq_product" list="rq_prodlist" value="'+E(v.product||'')+'"><datalist id="rq_prodlist">'+(Store.data.products||[]).map(p=>'<option value="'+E(p.name||'')+'">').join('')+'</datalist></div>' +
+      '<div class="form-row"><div class="field"><label>Brand</label><input id="rq_brand" value="'+E(v.brand||'')+'"></div><div class="field"><label>Model</label><input id="rq_model" value="'+E(v.model||'')+'"></div></div>' +
+      '<div class="field"><label>Specifications</label><textarea id="rq_specs" rows="3">'+E(v.specs||'')+'</textarea></div>' +
+      '<div class="form-row"><div class="field"><label>Quantity *</label><input id="rq_qty" type="number" min="0" step="any" value="'+E(v.qty)+'"></div><div class="field"><label>Unit</label><input id="rq_unit" value="'+E(v.unit||'Nos')+'"></div></div>' +
+      '<div class="form-row"><div class="field"><label>Required delivery date</label><input id="rq_requiredDate" type="date" value="'+E(v.requiredDate||'')+'"></div><div class="field"><label>Assigned to</label><select id="rq_assignedTo">'+userAssigneeOptions(v.assignedTo)+'</select></div></div>' +
+      '<div class="form-row"><div class="field"><label>Status</label><select id="rq_status">'+RFQ_STATUS.map(s=>'<option '+(s===v.status?'selected':'')+'>'+s+'</option>').join('')+'</select></div>' +
+      '<div class="field"><label style="display:flex;gap:6px;align-items:center;"><input type="checkbox" id="rq_gstRecoverable" '+(v.gstRecoverable!==false?'checked':'')+'> GST on purchases is recoverable (input tax credit)</label><div class="hint">Decides whether GST counts in the landed cost.</div></div></div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" id="rqSave" onclick="Rfq.save(\''+(id||'')+'\')">Save</button>', true);
+  },
+  async save(id){
+    const g = k=>document.getElementById('rq_'+k).value.trim();
+    const product = g('product'), qty = Number(g('qty'));
+    if(!product){ UI.toast('Product is required'); return; }
+    if(!(qty>0)){ UI.toast('Quantity must be more than zero'); return; }
+    if(this._saving) return; this._saving = true;
+    try{
+      const list = this.all(), prev = id ? this.get(id) : null;
+      const rec = prev ? prev : { id:'', date:Util.todayISO(), createdBy:this.who(), createdAt:new Date().toISOString(), responses:[], history:[] };
+      Object.assign(rec, { customerId:(document.getElementById('rq_customerId')||{}).value||'', customerName:g('customerName'), enquiryRef:g('enquiryRef'), product, brand:g('brand'), model:g('model'),
+        specs:document.getElementById('rq_specs').value.trim(), qty, unit:g('unit')||'Nos', requiredDate:g('requiredDate'), assignedTo:document.getElementById('rq_assignedTo').value,
+        gstRecoverable:document.getElementById('rq_gstRecoverable').checked, status:g('status'), updatedBy:this.who(), updatedAt:new Date().toISOString() });
+      if(!prev){
+        const c = Store.data.counters; rec.id = 'RFQ-'+String(c.rfqNext||1).padStart(4,'0'); c.rfqNext = (c.rfqNext||1)+1;
+        this.log(rec, 'RFQ created'); list.unshift(rec); await Store.save('counters');
+      } else this.log(rec, 'RFQ details edited');
+      const ok = await Store.save('rfqs');
+      if(ok===false){ UI.toast('Not saved - please try again'); return; }
+      await Activity.log(prev?'RFQ updated':'RFQ created', rec.id+' - '+rec.product);
+      UI.closeModal(); UI.toast('Saved'); this.cur = rec.id; this.render();
+    } finally { this._saving = false; }
+  },
+  async remove(id){
+    const r = this.get(id); if(!r) return;
+    if(!confirm('Delete '+r.id+' and its '+this.responseCount(r)+' supplier response(s)?')) return;
+    Store.data.rfqs = this.all().filter(x=>x.id!==id);
+    await Store.save('rfqs'); await Activity.log('RFQ deleted', r.id+' - '+r.product);
+    if(this.cur===id) this.cur = null; UI.toast('Deleted'); this.render();
+  },
+  /* ---------- supplier responses ---------- */
+  openResponse(rid, resId){
+    const rfq = this.get(rid); if(!rfq) return;
+    const e = resId ? (rfq.responses||[]).find(x=>x.id===resId) : null, E = Util.escapeHtml;
+    const v = e || { supplierId:'', supplierName:'', unitPrice:'', gstRate:18, transport:'', other:'', availability:'Not stated', deliveryDays:'', warranty:'', paymentTerms:'', validUntil:'', quoteRef:'', remarks:'' };
+    UI.openModal(e?'Edit supplier response':'Add supplier response - '+rfq.id,
+      '<div class="form-row"><div class="field"><label>Supplier (from Suppliers)</label><select id="rs_supplierId" onchange="Rfq.onSupplier()"><option value="">- type a name instead -</option>'+(Store.data.suppliers||[]).filter(s=>s.status!=='Inactive').map(s=>'<option value="'+E(s.id)+'" '+(s.id===v.supplierId?'selected':'')+'>'+E(s.name)+'</option>').join('')+'</select></div>' +
+      '<div class="field"><label>Supplier name *</label><input id="rs_supplierName" value="'+E(v.supplierName||'')+'"></div></div>' +
+      '<div class="form-row"><div class="field"><label>Quoted unit price (excl. GST) *</label><input id="rs_unitPrice" type="number" min="0" step="any" value="'+E(v.unitPrice)+'"></div><div class="field"><label>GST rate %</label><input id="rs_gstRate" type="number" min="0" step="any" value="'+E(v.gstRate)+'"></div></div>' +
+      '<div class="form-row"><div class="field"><label>Transport charges (total)</label><input id="rs_transport" type="number" min="0" step="any" value="'+E(v.transport)+'"></div><div class="field"><label>Other charges (total)</label><input id="rs_other" type="number" min="0" step="any" value="'+E(v.other)+'"></div></div>' +
+      '<div class="form-row"><div class="field"><label>Stock availability</label><select id="rs_availability">'+RFQ_AVAIL.map(s=>'<option '+(s===v.availability?'selected':'')+'>'+s+'</option>').join('')+'</select></div><div class="field"><label>Delivery time (days)</label><input id="rs_deliveryDays" type="number" min="0" value="'+E(v.deliveryDays)+'"></div></div>' +
+      '<div class="form-row"><div class="field"><label>Warranty</label><input id="rs_warranty" value="'+E(v.warranty||'')+'"></div><div class="field"><label>Payment terms</label><input id="rs_paymentTerms" value="'+E(v.paymentTerms||'')+'"></div></div>' +
+      '<div class="form-row"><div class="field"><label>Quotation valid until</label><input id="rs_validUntil" type="date" value="'+E(v.validUntil||'')+'"></div><div class="field"><label>Supplier quotation no. / file name</label><input id="rs_quoteRef" value="'+E(v.quoteRef||'')+'"></div></div>' +
+      '<div class="field"><label>Remarks</label><textarea id="rs_remarks" rows="2">'+E(v.remarks||'')+'</textarea></div>',
+      '<button class="btn btn-outline" onclick="Rfq.open(\''+rid+'\')">Cancel</button><button class="btn btn-primary" id="rsSave" onclick="Rfq.saveResponse(\''+rid+'\',\''+(resId||'')+'\')">Save response</button>', true);
+  },
+  onSupplier(){
+    const s = (Store.data.suppliers||[]).find(x=>x.id===document.getElementById('rs_supplierId').value); if(!s) return;
+    document.getElementById('rs_supplierName').value = s.name||''; const pt = document.getElementById('rs_paymentTerms'); if(pt && !pt.value) pt.value = s.paymentTerms||'';
+  },
+  async saveResponse(rid, resId){
+    const rfq = this.get(rid); if(!rfq) return;
+    const g = k=>document.getElementById('rs_'+k).value.trim();
+    const name = g('supplierName'), price = Number(g('unitPrice'));
+    if(!name){ UI.toast('Supplier name is required'); return; }
+    if(!(price>0)){ UI.toast('Enter the quoted unit price'); return; }
+    const sid = g('supplierId');
+    const dup = (rfq.responses||[]).find(x=>x.id!==resId && ((sid && x.supplierId===sid) || x.supplierName.toLowerCase()===name.toLowerCase()));
+    if(dup){ UI.toast(name+' already has a response on this RFQ - edit that one instead'); return; }
+    const rec = resId ? rfq.responses.find(x=>x.id===resId) : { id:'R'+Date.now().toString(36)+Math.floor(Math.random()*100), at:new Date().toISOString(), by:this.who() };
+    Object.assign(rec, { supplierId:sid, supplierName:name, unitPrice:price, gstRate:Number(g('gstRate'))||0, transport:Number(g('transport'))||0, other:Number(g('other'))||0,
+      availability:g('availability'), deliveryDays:g('deliveryDays')===''?'':Number(g('deliveryDays')), warranty:g('warranty'), paymentTerms:g('paymentTerms'), validUntil:g('validUntil'), quoteRef:g('quoteRef'), remarks:document.getElementById('rs_remarks').value.trim() });
+    rfq.responses = rfq.responses||[]; if(!resId) rfq.responses.push(rec);
+    if(['Draft','Sent to Suppliers'].includes(rfq.status)) rfq.status = 'Responses Received';
+    this.log(rfq, (resId?'Response updated: ':'Response received: ')+name+' at '+Util.fmtMoney(price)+' per '+(rfq.unit||'unit')+' (excl. GST)');
+    const ok = await Store.save('rfqs'); if(ok===false){ UI.toast('Not saved - please try again'); return; }
+    await Activity.log('RFQ supplier response', rfq.id+' - '+name);
+    UI.closeModal(); UI.toast('Response saved'); this.open(rid);
+  },
+  async removeResponse(rid, resId){
+    const rfq = this.get(rid); if(!rfq) return; const r = (rfq.responses||[]).find(x=>x.id===resId); if(!r) return;
+    if(rfq.selectedResponseId===resId && !confirm('This is the selected supplier. Remove it and clear the selection?')) return;
+    if(rfq.selectedResponseId!==resId && !confirm('Remove the response from '+r.supplierName+'?')) return;
+    rfq.responses = rfq.responses.filter(x=>x.id!==resId);
+    if(rfq.selectedResponseId===resId){ rfq.selectedResponseId = ''; rfq.selectionReason = ''; if(rfq.status==='Supplier Selected') rfq.status = 'Responses Received'; }
+    this.log(rfq, 'Response removed: '+r.supplierName); await Store.save('rfqs'); this.open(rid);
+  },
+  /* ---------- selection ---------- */
+  openSelect(rid, resId){
+    const rfq = this.get(rid); const r = rfq && (rfq.responses||[]).find(x=>x.id===resId); if(!r) return;
+    const lo = this.lowest(rfq), c = rfqCalc(rfq, r), notLowest = lo && lo.x.id!==resId;
+    UI.openModal('Select '+r.supplierName,
+      '<div class="hint" style="margin-bottom:8px;">Landed cost '+Util.fmtMoney(c.landed)+' ('+Util.fmtMoney(c.landedUnit)+' per '+Util.escapeHtml(rfq.unit||'unit')+')'+(notLowest?'. <b>This is not the lowest landed cost</b> ('+Util.escapeHtml(lo.x.supplierName)+' is lower) - say why.':'.')+'</div>' +
+      '<div class="field"><label>Reason for choosing this supplier *</label><textarea id="sel_reason" rows="3" placeholder="e.g. in stock, faster delivery, longer warranty, better payment terms, reliability"></textarea></div>',
+      '<button class="btn btn-outline" onclick="Rfq.open(\''+rid+'\')">Cancel</button><button class="btn btn-primary" onclick="Rfq.confirmSelect(\''+rid+'\',\''+resId+'\')">Select supplier</button>');
+  },
+  async confirmSelect(rid, resId){
+    const rfq = this.get(rid); const r = rfq && (rfq.responses||[]).find(x=>x.id===resId); if(!r) return;
+    const reason = document.getElementById('sel_reason').value.trim();
+    if(!reason){ UI.toast('Please record the reason for choosing this supplier'); return; }
+    const prevSel = (rfq.responses||[]).find(x=>x.id===rfq.selectedResponseId);
+    rfq.selectedResponseId = resId; rfq.selectionReason = reason; rfq.selectedBy = this.who(); rfq.selectedAt = new Date().toISOString();
+    if(!['Quotation Prepared','Closed'].includes(rfq.status)) rfq.status = 'Supplier Selected';
+    this.log(rfq, (prevSel && prevSel.id!==resId ? 'Selection changed from '+prevSel.supplierName+' to ' : 'Supplier selected: ')+r.supplierName+' - '+reason);
+    const ok = await Store.save('rfqs'); if(ok===false){ UI.toast('Not saved - please try again'); return; }
+    await Activity.log('RFQ supplier selected', rfq.id+' - '+r.supplierName);
+    UI.toast('Supplier selected'); this.open(rid);
+  },
+  async setStatus(rid, status){
+    const rfq = this.get(rid); if(!rfq || rfq.status===status) return;
+    rfq.status = status; this.log(rfq, 'Status changed to '+status); await Store.save('rfqs'); this.open(rid);
+  },
+  /* ---------- selling price ---------- */
+  pricing(rfq){ return Object.assign({ mode:'markup', pct:15, gst:18 }, rfq.pricing||{}); },
+  sellCalc(rfq){
+    const sel = (rfq.responses||[]).find(x=>x.id===rfq.selectedResponseId); if(!sel) return null;
+    const c = rfqCalc(rfq, sel), p = this.pricing(rfq), qty = Number(rfq.qty)||0;
+    const costUnit = c.landedUnit, sellUnit = priceFromCost(costUnit, p.pct, p.mode);
+    if(sellUnit===null || !isFinite(sellUnit)) return { error:'Margin must be below 100%' };
+    const gstUnit = sellUnit*(Number(p.gst)||0)/100, profitUnit = sellUnit-costUnit;
+    return { costUnit, sellUnit, gstUnit, sellIncl: sellUnit+gstUnit, profitUnit, profitTotal: profitUnit*qty, markup: costUnit? profitUnit/costUnit*100:0, margin: sellUnit? profitUnit/sellUnit*100:0, qty, totalEx: sellUnit*qty, totalIncl:(sellUnit+gstUnit)*qty, p };
+  },
+  sellHTML(rfq){
+    const s = this.sellCalc(rfq); if(!s) return '<div class="hint">Select a supplier above to work out a selling price.</div>';
+    if(s.error) return '<div class="hint" style="color:var(--red,#dc2626);">'+s.error+'</div>';
+    const row = (a,b)=>'<tr><td>'+a+'</td><td class="mono" style="text-align:right;">'+b+'</td></tr>', m = Util.fmtMoney;
+    return '<table><tbody>' + row('Landed cost per '+Util.escapeHtml(rfq.unit||'unit'), m(s.costUnit)) + row('Selling price per unit (excl. GST)', '<b>'+m(s.sellUnit)+'</b>') + row('GST on selling price @ '+(Number(s.p.gst)||0)+'%', m(s.gstUnit)) + row('Selling price per unit (incl. GST)', m(s.sellIncl)) +
+      row('Gross profit per unit', m(s.profitUnit)) + row('Markup on cost', r2(s.markup)+'%') + row('Gross margin on selling price', r2(s.margin)+'%') + row('Total quotation value (excl. GST), '+s.qty+' '+Util.escapeHtml(rfq.unit||''), m(s.totalEx)) + row('Total expected gross profit', '<b>'+m(s.profitTotal)+'</b>') + '</tbody></table>';
+  },
+  async setPricing(rid){
+    const rfq = this.get(rid); if(!rfq) return;
+    rfq.pricing = { mode:document.getElementById('pc_mode').value, pct:Number(document.getElementById('pc_pct').value)||0, gst:Number(document.getElementById('pc_gst').value)||0 };
+    document.getElementById('rfqSell').innerHTML = this.sellHTML(rfq);
+    clearTimeout(this._pt); this._pt = setTimeout(()=>{ Store.save('rfqs'); }, 800);
+  },
+  /* Only the SELLING price goes into the customer quotation - never the supplier cost. */
+  async toQuotation(rid){
+    const rfq = this.get(rid); const s = rfq && this.sellCalc(rfq);
+    if(!s || s.error){ UI.toast('Select a supplier and set a valid selling price first'); return; }
+    if(!confirm('Create a customer quotation (Rate / Offer) from this RFQ? Only the selling price is carried over - supplier costs are not.')) return;
+    const d = RatePDF.blankDraft(), c = rfq.customerId ? Store.data.customers.find(x=>x.id===rfq.customerId) : null;
+    if(c){ d.customerId = c.id; d.customerName = c.name||''; d.phone = c.phone||''; d.email = c.email||''; d.district = c.district||''; d.address = [c.panchayath, c.district].filter(Boolean).join(', '); }
+    else d.customerName = rfq.customerName||'';
+    d.reference = rfq.enquiryRef||''; d.rfqId = rfq.id;
+    d.items = [ Object.assign(RatePDF.blankItem(), { itemName:rfq.product, brand:rfq.brand||'', model:rfq.model||'', specs:rfq.specs||'', qty:Number(rfq.qty)||1, unit:rfq.unit||'Nos', rate:r2(s.sellUnit) }) ];
+    d.gstEnabled = (Number(s.p.gst)||0) > 0; if(d.gstEnabled) d.gstRate = Number(s.p.gst);
+    const sel = rfq.responses.find(x=>x.id===rfq.selectedResponseId);
+    if(sel && sel.warranty) d.warranty = sel.warranty;
+    RatePDF.draft = d; RatePDF.viewMode = 'editor';
+    rfq.status = 'Quotation Prepared'; this.log(rfq, 'Customer quotation started (selling price '+Util.fmtMoney(s.sellUnit)+' per unit excl. GST)');
+    await Store.save('rfqs'); await Activity.log('RFQ to quotation', rfq.id);
+    go('rate_docs');
+  },
+  /* ---------- detail page ---------- */
+  renderDetail(){
+    const rfq = this.get(this.cur), E = Util.escapeHtml, m = Util.fmtMoney;
+    const rs = (rfq.responses||[]), lo = this.lowest(rfq), p = this.pricing(rfq);
+    const fastest = rs.filter(x=>x.deliveryDays!=='' && x.deliveryDays!=null).sort((a,b)=>a.deliveryDays-b.deliveryDays)[0];
+    const today = Util.todayISO();
+    const rows = rs.map(x=>{ const c = rfqCalc(rfq,x), sel = x.id===rfq.selectedResponseId, expired = x.validUntil && x.validUntil < today;
+      const sup = (Store.data.suppliers||[]).find(s=>s.id===x.supplierId);
+      const tags = (lo&&lo.x.id===x.id?'<span class="badge badge-green">Lowest landed cost</span> ':'') + (fastest&&fastest.id===x.id?'<span class="badge badge-blue">Fastest</span> ':'') + (x.availability==='In stock'?'<span class="badge badge-gray">In stock</span> ':'') + (expired?'<span class="badge badge-red">Quote expired</span> ':'') + (sel?'<span class="badge badge-amber">SELECTED</span>':'');
+      return '<tr'+(sel?' style="background:var(--bg-soft,#fff7ed);"':'')+'><td class="cell-main">'+E(x.supplierName)+(sup&&sup.rating?'<div class="cell-mute" style="font-size:11px;">rating '+E(sup.rating)+'/5</div>':'')+'<div style="margin-top:3px;">'+tags+'</div></td>' +
+        '<td class="mono">'+m(x.unitPrice)+'</td><td>'+(Number(x.gstRate)||0)+'%</td><td class="mono">'+m(c.gstAmt)+'</td><td class="mono">'+m(c.other)+'</td><td class="mono">'+m(c.total)+'</td><td class="mono"><b>'+m(c.landed)+'</b><div class="cell-mute" style="font-size:11px;">'+m(c.landedUnit)+' / '+E(rfq.unit||'unit')+'</div></td>' +
+        '<td>'+(x.deliveryDays===''||x.deliveryDays==null?'—':x.deliveryDays+' d')+'</td><td>'+E(x.availability||'')+'</td><td class="cell-mute">'+E(x.warranty||'—')+'</td><td class="cell-mute">'+E(x.paymentTerms||'—')+'</td><td class="cell-mute">'+Util.fmtDate(x.validUntil)+'</td>' +
+        '<td style="white-space:nowrap;"><button class="btn btn-outline btn-sm" onclick="Rfq.openSelect(\''+rfq.id+'\',\''+x.id+'\')" '+(sel?'disabled':'')+'>'+(sel?'Selected':'Select')+'</button> <button class="icon-btn" title="Edit" onclick="Rfq.openResponse(\''+rfq.id+'\',\''+x.id+'\')">&#9998;</button><button class="icon-btn" title="Remove" onclick="Rfq.removeResponse(\''+rfq.id+'\',\''+x.id+'\')">&#128465;</button></td></tr>'; }).join('');
+    const selR = rs.find(x=>x.id===rfq.selectedResponseId);
+    document.getElementById('content').innerHTML =
+      '<div class="toolbar"><button class="btn btn-outline btn-sm" onclick="Rfq.back()">&larr; All RFQs</button><div class="toolbar-spacer"></div><button class="btn btn-outline btn-sm" onclick="PriceCalc.open()">&#129518; Calculator</button><button class="btn btn-outline btn-sm" onclick="Rfq.openForm(\''+rfq.id+'\')">&#9998; Edit RFQ</button></div>' +
+      '<div class="card card-pad" style="margin-bottom:14px;"><div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;"><div><h3 style="margin:0;font-size:16px;">'+E(rfq.id)+' &middot; '+E(rfq.product)+'</h3><div class="hint">'+E([rfq.brand,rfq.model].filter(Boolean).join(' '))+' &middot; '+E(rfq.qty)+' '+E(rfq.unit||'')+' &middot; Customer: '+E(rfq.customerName||'—')+(rfq.enquiryRef?' &middot; Ref: '+E(rfq.enquiryRef):'')+'</div>' +
+        '<div class="hint">Required by '+Util.fmtDate(rfq.requiredDate)+' &middot; Assigned to '+E(rfq.assignedTo||'—')+' &middot; GST on purchases '+(rfq.gstRecoverable!==false?'recoverable (excluded from landed cost)':'NOT recoverable (included in landed cost)')+'</div>' +
+        (rfq.specs?'<div style="margin-top:6px;font-size:12.5px;white-space:pre-wrap;">'+E(rfq.specs)+'</div>':'') + '</div>' +
+        '<div><label class="hint">Status</label><br><select id="rfqDetailStatus" onchange="Rfq.setStatus(\''+rfq.id+'\',this.value)">'+RFQ_STATUS.map(s=>'<option '+(s===rfq.status?'selected':'')+'>'+s+'</option>').join('')+'</select></div></div></div>' +
+      '<div class="card" style="margin-bottom:14px;"><div class="card-pad" style="padding-bottom:0;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;"><h3 style="margin:0;font-size:14px;">Supplier price comparison</h3><button class="btn btn-primary btn-sm" id="rfqAddResp" onclick="Rfq.openResponse(\''+rfq.id+'\',\'\')">&#65291; Add supplier response</button></div>' +
+        '<div class="hint" style="padding:4px 16px;">Base = unit price x quantity (excl. GST). Landed cost = base + transport/other'+(rfq.gstRecoverable!==false?'':' + GST')+'. The cheapest is highlighted, never chosen automatically - consider delivery, stock, warranty and payment terms too.</div>' +
+        (rs.length ? '<div class="table-wrap"><table id="rfqCompare"><thead><tr><th>Supplier</th><th>Unit price (ex GST)</th><th>GST %</th><th>GST amount</th><th>Other costs</th><th>Total payable</th><th>Landed cost</th><th>Delivery</th><th>Availability</th><th>Warranty</th><th>Payment terms</th><th>Valid until</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>'
+          : '<div class="empty-state"><div class="t">No supplier prices yet</div><div class="d">Add each supplier\'s quotation as it arrives.</div></div>') + '</div>' +
+      (selR ? '<div class="card card-pad" style="margin-bottom:14px;border-left:4px solid var(--orange,#ea580c);"><b>Selected: '+E(selR.supplierName)+'</b><div class="hint">Reason: '+E(rfq.selectionReason||'')+' &middot; by '+E(rfq.selectedBy||'')+' on '+E(rfq.selectedAt?new Date(rfq.selectedAt).toLocaleString('en-IN'):'')+'</div></div>' +
+        '<div class="card card-pad" style="margin-bottom:14px;"><h3 style="margin:0 0 4px;font-size:14px;">Selling price &amp; quotation</h3><div class="hint" style="margin-bottom:8px;"><b>Markup</b> is a percentage of cost. <b>Margin</b> is a percentage of the selling price, so 20% margin needs a higher price than 20% markup. Supplier costs stay inside this screen.</div>' +
+          '<div class="form-row" style="grid-template-columns:1fr 1fr 1fr;"><div class="field"><label>Price from</label><select id="pc_mode" onchange="Rfq.setPricing(\''+rfq.id+'\')"><option value="markup" '+(p.mode==='markup'?'selected':'')+'>Markup % on cost</option><option value="margin" '+(p.mode==='margin'?'selected':'')+'>Gross margin % of selling price</option></select></div>' +
+          '<div class="field"><label>Percentage</label><input id="pc_pct" type="number" step="any" min="0" value="'+E(p.pct)+'" oninput="Rfq.setPricing(\''+rfq.id+'\')"></div><div class="field"><label>GST on selling price %</label><input id="pc_gst" type="number" step="any" min="0" value="'+E(p.gst)+'" oninput="Rfq.setPricing(\''+rfq.id+'\')"></div></div>' +
+          '<div id="rfqSell" class="table-wrap">'+this.sellHTML(rfq)+'</div><div class="toolbar" style="margin-top:10px;"><button class="btn btn-primary btn-sm" id="rfqToQuote" onclick="Rfq.toQuotation(\''+rfq.id+'\')">&#128196; Create customer quotation</button><span class="hint">Opens the Rate / Offer editor with the selling price filled in. You can edit everything before saving.</span></div></div>' : '') +
+      '<div class="card card-pad"><h3 style="margin:0 0 6px;font-size:14px;">History</h3>' + (rfq.history||[]).slice().reverse().map(h=>'<div style="font-size:12.5px;padding:5px 0;border-bottom:1px solid var(--border);"><span class="cell-mute">'+Util.fmtDateTime(h.date)+' &middot; '+E(h.by||'')+'</span><br>'+E(h.text)+'</div>').join('') + '</div>';
+  }
+};
+function rfqCustSelected(c){ const el = document.getElementById('rq_customerName'); if(el && c) el.value = c.name; }
+Views.rfq = ()=>{ Rfq.cur = null; Rfq.render(); };
+
+/* ---------------- QUICK PRICE CALCULATOR ---------------- */
+const PriceCalc = {
+  /* pure helpers (also used by tests) */
+  gst(amount, rate, mode){ amount = Number(amount)||0; rate = Number(rate)||0;
+    if(mode==='inclusive'){ const base = amount/(1+rate/100); return { base, gst: amount-base, total: amount }; }
+    return { base: amount, gst: amount*rate/100, total: amount*(1+rate/100) }; },
+  fromMarkup(cost, pct){ const sell = priceFromCost(cost, pct, 'markup'); return { sell, profit: sell-(Number(cost)||0), margin: sell? (sell-cost)/sell*100 : 0 }; },
+  fromMargin(cost, pct){ const sell = priceFromCost(cost, pct, 'margin'); if(sell===null) return null; return { sell, profit: sell-(Number(cost)||0), markup: Number(cost)? (sell-cost)/cost*100 : 0 }; },
+  discount(price, pct){ price = Number(price)||0; pct = Number(pct)||0; return { net: price*(1-pct/100), off: price*pct/100 }; },
+  open(){
+    UI.openModal('Quick Price Calculator',
+      '<div class="card card-pad" style="margin-bottom:10px;"><b>GST</b><div class="form-row" style="grid-template-columns:1fr 1fr 1fr;margin-top:6px;"><div class="field"><label>Amount</label><input id="qc_gAmt" type="number" step="any" oninput="PriceCalc.calc()"></div><div class="field"><label>GST %</label><input id="qc_gRate" type="number" step="any" value="18" oninput="PriceCalc.calc()"></div><div class="field"><label>Amount is</label><select id="qc_gMode" onchange="PriceCalc.calc()"><option value="exclusive">excluding GST</option><option value="inclusive">including GST</option></select></div></div><div id="qc_gOut" class="hint"></div></div>' +
+      '<div class="card card-pad" style="margin-bottom:10px;"><b>Markup and margin</b><div class="form-row" style="grid-template-columns:1fr 1fr 1fr;margin-top:6px;"><div class="field"><label>Cost</label><input id="qc_cost" type="number" step="any" oninput="PriceCalc.calc()"></div><div class="field"><label>Markup % (on cost)</label><input id="qc_mk" type="number" step="any" oninput="PriceCalc.calc()"></div><div class="field"><label>Margin % (of price)</label><input id="qc_mg" type="number" step="any" oninput="PriceCalc.calc()"></div></div><div id="qc_mOut" class="hint"></div></div>' +
+      '<div class="card card-pad"><b>Discount</b><div class="form-row" style="grid-template-columns:1fr 1fr;margin-top:6px;"><div class="field"><label>Price</label><input id="qc_dP" type="number" step="any" oninput="PriceCalc.calc()"></div><div class="field"><label>Discount %</label><input id="qc_dPct" type="number" step="any" oninput="PriceCalc.calc()"></div></div><div id="qc_dOut" class="hint"></div></div>',
+      '<button class="btn btn-primary" onclick="UI.closeModal()">Close</button>');
+  },
+  calc(){
+    const v = id=>document.getElementById(id).value, m = Util.fmtMoney, out = (id,t)=>{ document.getElementById(id).innerHTML = t; };
+    if(v('qc_gAmt')!==''){ const r = this.gst(v('qc_gAmt'), v('qc_gRate'), v('qc_gMode')); out('qc_gOut','Price excl. GST <b>'+m(r.base)+'</b> &middot; GST <b>'+m(r.gst)+'</b> &middot; Total <b>'+m(r.total)+'</b>'); } else out('qc_gOut','');
+    let t = '';
+    if(v('qc_cost')!==''){
+      if(v('qc_mk')!==''){ const r = this.fromMarkup(v('qc_cost'), v('qc_mk')); t += 'At '+v('qc_mk')+'% markup: selling price <b>'+m(r.sell)+'</b>, profit '+m(r.profit)+', margin <b>'+r2(r.margin)+'%</b>. '; }
+      if(v('qc_mg')!==''){ const r = this.fromMargin(v('qc_cost'), v('qc_mg')); t += r ? 'At '+v('qc_mg')+'% margin: selling price <b>'+m(r.sell)+'</b>, profit '+m(r.profit)+', markup <b>'+r2(r.markup)+'%</b>.' : 'Margin must be below 100%.'; }
+    }
+    out('qc_mOut', t);
+    if(v('qc_dP')!==''){ const r = this.discount(v('qc_dP'), v('qc_dPct')); out('qc_dOut','Discount <b>'+m(r.off)+'</b> &middot; Net price <b>'+m(r.net)+'</b>'); } else out('qc_dOut','');
+  }
+};
+
+/* ---------------- OFFICE EXPENSES (petty cash register) ----------------
+   Approval rules are enforced in the app: only an Admin or Manager can
+   approve / reject / mark reimbursed, nobody but an Admin approves their
+   own claim, and approved claims are locked for ordinary staff. Because the
+   data sits in the shared store these are application rules, not database
+   rules; the area itself can be hidden or made view-only per role in
+   Users & Roles > Access Rules ("Office expenses"). */
+const EXP_STATUS = ['Recorded','Submitted','Approved','Rejected','Reimbursed'];
+const EXP_CATS = ['Courier','Transportation','Printing','Stationery','Packing','Office Maintenance','Local Purchases','Miscellaneous'];
+function expIsApprover(){ const r = Auth.session && Auth.session.role; return r==='Admin' || r==='Manager'; }
+const OfficeExpenses = RecModule.make({
+  name:'OfficeExpenses', coll:'officeExpenses', view:'expenses', title:'Office Expenses', singular:'Expense', addLabel:'Add Expense',
+  icon:'&#129534;', emptyTitle:'No expenses recorded', emptyDesc:'Record courier, transport, printing and other office spending, then submit it for approval.',
+  prefix:'EXP-', counter:'expNext', statusField:'status', statusOpts:EXP_STATUS,
+  searchHint:'Search expense no, employee, category, description, order...',
+  searchKeys:['id','employee','category','description','linkedRef'],
+  label:r=>(r.category||'')+' · '+Util.fmtMoney(r.amount),
+  sort:(a,b)=>String(b.date||'').localeCompare(String(a.date||'')) || String(b.id).localeCompare(String(a.id)),
+  defaults:()=>({date:Util.todayISO(), employee:(Auth.session&&(Auth.session.name||Auth.session.username))||'', category:'Courier', amount:'', description:'', linkedRef:'', payMethod:'Cash', receiptRef:'', status:'Recorded', note:''}),
+  fields:[
+    {k:'date', label:'Expense Date', type:'date', req:true},
+    {k:'employee', label:'Employee', req:true},
+    {k:'category', label:'Category', type:'select', opts:EXP_CATS},
+    {k:'amount', label:'Amount (₹)', type:'number', req:true},
+    {k:'description', label:'Description', type:'textarea', req:true},
+    {k:'linkedRef', label:'Related order / bid (optional)'},
+    {k:'payMethod', label:'Payment method', type:'select', opts:['Cash','UPI','Bank transfer','Card','Paid personally (reimburse)']},
+    {k:'receiptRef', label:'Receipt / bill no. (keep the paper receipt)'},
+    {k:'status', label:'Status', type:'select', opts:EXP_STATUS},
+    {k:'note', label:'Note', type:'textarea'}
+  ],
+  layout:[['date','employee'],['category','amount'],['description'],['linkedRef','payMethod'],['receiptRef','status'],['note']],
+  validate(rec, id){
+    if(!(Number(rec.amount)>0)) return 'Amount must be more than zero';
+    const prev = id ? (Store.data.officeExpenses||[]).find(x=>x.id===id) : null, admin = Auth.isAdmin();
+    if(prev && ['Approved','Reimbursed'].includes(prev.status) && !admin) return 'Approved expenses can only be changed by an Admin';
+    const prevS = prev ? prev.status : '', decided = ['Approved','Rejected','Reimbursed'];
+    if(decided.includes(rec.status) && rec.status!==prevS){
+      if(!expIsApprover()) return 'Only an Admin or Manager can approve, reject or mark an expense reimbursed';
+      const me = Auth.session && (Auth.session.name||Auth.session.username);
+      if(!admin && String(rec.employee||'').trim().toLowerCase()===String(me||'').trim().toLowerCase()) return 'You cannot approve your own expense - ask an Admin';
+    }
+    return '';
+  },
+  beforeSave(rec, prev){
+    rec.createdBy = (prev && prev.createdBy) || bidUserName();
+    ['approvedBy','approvedAt','reimbursedOn'].forEach(k=>{ if(prev && prev[k]) rec[k] = prev[k]; });
+    const prevS = prev ? prev.status : '';
+    if(rec.status!==prevS){
+      if(['Approved','Rejected'].includes(rec.status)){ rec.approvedBy = bidUserName(); rec.approvedAt = new Date().toISOString(); }
+      if(rec.status==='Reimbursed') rec.reimbursedOn = Util.todayISO();
+      rec.history = (prev && prev.history ? prev.history.slice() : []).concat([{date:new Date().toISOString(), by:bidUserName(), text:'Status: '+(prevS||'new')+' → '+rec.status}]);
+    } else if(prev && prev.history) rec.history = prev.history;
+  },
+  cards:(all)=>{
+    const ym = Util.todayISO().slice(0,7), sum = a=>a.reduce((s,x)=>s+(Number(x.amount)||0),0);
+    return [
+      {label:'This month (not rejected)', value:Util.fmtMoney(sum(all.filter(x=>String(x.date||'').slice(0,7)===ym && x.status!=='Rejected')))},
+      {label:'Awaiting approval', value:all.filter(x=>x.status==='Submitted').length+' · '+Util.fmtMoney(sum(all.filter(x=>x.status==='Submitted'))), color:'var(--amber,#d97706)'},
+      {label:'Approved, not yet reimbursed', value:Util.fmtMoney(sum(all.filter(x=>x.status==='Approved'))), color:'var(--blue,#2563eb)'},
+      {label:'Reimbursed', value:Util.fmtMoney(sum(all.filter(x=>x.status==='Reimbursed'))), color:'var(--green,#16a34a)'}
+    ];
+  },
+  cols:[
+    {h:'No', f:r=>Util.escapeHtml(r.id), cls:'mono'},
+    {h:'Date', f:r=>Util.fmtDate(r.date)},
+    {h:'Employee', f:r=>Util.escapeHtml(r.employee||'—'), cls:'cell-main'},
+    {h:'Category', f:r=>Util.escapeHtml(r.category||'—')},
+    {h:'Description', f:r=>Util.escapeHtml(r.description||'—')},
+    {h:'Related', f:r=>Util.escapeHtml(r.linkedRef||'—')},
+    {h:'Amount', f:r=>Util.fmtMoney(r.amount), cls:'mono'},
+    {h:'Approved by', f:r=>Util.escapeHtml(r.approvedBy||'—')},
+    {h:'Status', f:r=>recBadge(r.status, r.status==='Reimbursed'||r.status==='Approved'?'green':r.status==='Rejected'?'red':r.status==='Submitted'?'amber':'gray'), cls:''}
+  ]
+});
+Views.expenses = ()=>OfficeExpenses.render();
+
+/* ---------------- OFFICE WORK REGISTER ----------------
+   Daily office jobs that are not sales tasks: courier, dispatch, bill
+   follow-up, GST/portal work, vendor calls, document work. Each entry has
+   an owner, due date, priority and status; overdue open jobs are flagged. */
+const WORK_STATUS = ['Open','In Progress','Waiting','Done','Cancelled'];
+const WORK_TYPES = ['Courier / Dispatch','Bill / Invoice','Quotation work','Vendor follow-up','Customer follow-up','GST / Accounts','Portal / GeM work','Document work','Purchase','Other'];
+function staffNames(){ return (Store.data.users||[]).map(u=>u.name||u.username).filter(Boolean); }
+const OfficeWork = RecModule.make({
+  name:'OfficeWork', coll:'officeWork', view:'officework', title:'Office Work Register', singular:'Work Item', addLabel:'Add Work Item',
+  icon:'&#128203;', emptyTitle:'No office work recorded', emptyDesc:'Log office jobs with an owner and a due date so nothing is forgotten.',
+  prefix:'OW-', counter:'owNext', statusField:'status', statusOpts:WORK_STATUS,
+  searchHint:'Search no, title, owner, type, related...',
+  searchKeys:['id','title','assignedTo','type','linkedRef','remarks'],
+  label:r=>r.title,
+  sort:(a,b)=>{ const ca=['Done','Cancelled'].includes(a.status)?1:0, cb=['Done','Cancelled'].includes(b.status)?1:0; return ca-cb || String(a.dueDate||'9999').localeCompare(String(b.dueDate||'9999')); },
+  defaults:()=>({title:'', type:'Other', priority:'Normal', assignedTo:(Auth.session&&(Auth.session.name||Auth.session.username))||'', dueDate:Util.todayISO(), linkedRef:'', status:'Open', remarks:''}),
+  fields:[
+    {k:'title', label:'Work / Job', req:true},
+    {k:'type', label:'Type', type:'select', opts:WORK_TYPES},
+    {k:'priority', label:'Priority', type:'select', opts:['Urgent','High','Normal','Low']},
+    {k:'assignedTo', label:'Assigned to', type:'select', blank:'— unassigned —', opts:()=>staffNames()},
+    {k:'dueDate', label:'Due date', type:'date', req:true},
+    {k:'status', label:'Status', type:'select', opts:WORK_STATUS},
+    {k:'linkedRef', label:'Related customer / order / bid (optional)'},
+    {k:'remarks', label:'Remarks', type:'textarea'}
+  ],
+  layout:[['title'],['type','priority'],['assignedTo','dueDate'],['status','linkedRef'],['remarks']],
+  beforeSave(rec, prev){
+    rec.createdBy = (prev && prev.createdBy) || bidUserName();
+    const closed = ['Done','Cancelled'].includes(rec.status);
+    rec.completedOn = closed ? ((prev && prev.completedOn) || Util.todayISO()) : '';
+    if(!prev || prev.status!==rec.status) rec.history = ((prev&&prev.history)||[]).concat([{date:new Date().toISOString(), by:bidUserName(), text:'Status: '+(prev?prev.status:'new')+' → '+rec.status}]);
+    else rec.history = (prev&&prev.history)||[];
+  },
+  cards:(all)=>{
+    const open = all.filter(x=>!['Done','Cancelled'].includes(x.status)), today = Util.todayISO();
+    const me = Auth.session&&(Auth.session.name||Auth.session.username);
+    return [
+      {label:'Open work', value:open.length},
+      {label:'Overdue', value:open.filter(x=>x.dueDate&&x.dueDate<today).length, color:'var(--red,#dc2626)'},
+      {label:'Due today', value:open.filter(x=>x.dueDate===today).length, color:'var(--amber,#d97706)'},
+      {label:'Assigned to me', value:open.filter(x=>x.assignedTo===me).length, color:'var(--blue,#2563eb)'},
+      {label:'Done this month', value:all.filter(x=>x.status==='Done'&&String(x.completedOn||'').slice(0,7)===today.slice(0,7)).length, color:'var(--green,#16a34a)'}
+    ];
+  },
+  cols:[
+    {h:'No', f:r=>Util.escapeHtml(r.id), cls:'mono'},
+    {h:'Work', f:r=>Util.escapeHtml(r.title||''), cls:'cell-main'},
+    {h:'Type', f:r=>Util.escapeHtml(r.type||'')},
+    {h:'Priority', f:r=>recBadge(r.priority, r.priority==='Urgent'?'red':r.priority==='High'?'amber':'gray')},
+    {h:'Assigned to', f:r=>Util.escapeHtml(r.assignedTo||'—')},
+    {h:'Due', f:r=>Util.fmtDate(r.dueDate)+' '+recDueBadge(r.dueDate, ['Done','Cancelled'].includes(r.status), 2), cls:''},
+    {h:'Related', f:r=>Util.escapeHtml(r.linkedRef||'—')},
+    {h:'Status', f:r=>recBadge(r.status, r.status==='Done'?'green':r.status==='Cancelled'?'red':r.status==='Waiting'?'amber':'blue'), cls:''}
+  ]
+});
+Views.officework = ()=>OfficeWork.render();
+
+/* ---------------- WORK HANDOVER ----------------
+   When someone is on leave or leaves, record what is pending, who takes
+   over, and have the receiver acknowledge it. */
+const HANDOVER_STATUS = ['Draft','Handed Over','Acknowledged','Closed'];
+const Handover = RecModule.make({
+  name:'Handover', coll:'handovers', view:'handover', title:'Work Handover', singular:'Handover', addLabel:'New Handover',
+  icon:'&#129309;', emptyTitle:'No handovers recorded', emptyDesc:'Record pending work, files and passwords-to-ask-for when responsibility changes hands.',
+  prefix:'HO-', counter:'hoNext', statusField:'status', statusOpts:HANDOVER_STATUS,
+  searchHint:'Search no, from, to, pending work...',
+  searchKeys:['id','fromStaff','toStaff','pendingWork','reason'],
+  label:r=>(r.fromStaff||'')+' → '+(r.toStaff||''),
+  sort:(a,b)=>String(b.startDate||'').localeCompare(String(a.startDate||'')),
+  defaults:()=>({fromStaff:(Auth.session&&(Auth.session.name||Auth.session.username))||'', toStaff:'', reason:'Leave', startDate:Util.todayISO(), endDate:'', pendingWork:'', filesLocation:'', contacts:'', status:'Draft', note:''}),
+  fields:[
+    {k:'fromStaff', label:'Handing over (from)', type:'select', opts:()=>staffNames(), req:true},
+    {k:'toStaff', label:'Taking over (to)', type:'select', opts:()=>staffNames(), req:true},
+    {k:'reason', label:'Reason', type:'select', opts:['Leave','Resignation','Role change','Travel','Other']},
+    {k:'startDate', label:'From date', type:'date', req:true},
+    {k:'endDate', label:'Until (blank if permanent)', type:'date'},
+    {k:'pendingWork', label:'Pending work (one per line)', type:'textarea', req:true},
+    {k:'filesLocation', label:'Where files / documents are', type:'textarea'},
+    {k:'contacts', label:'Key contacts to know', type:'textarea'},
+    {k:'status', label:'Status', type:'select', opts:HANDOVER_STATUS},
+    {k:'note', label:'Note', type:'textarea'}
+  ],
+  layout:[['fromStaff','toStaff'],['reason','status'],['startDate','endDate'],['pendingWork'],['filesLocation'],['contacts'],['note']],
+  validate(rec, id){
+    if(String(rec.fromStaff).trim().toLowerCase()===String(rec.toStaff).trim().toLowerCase()) return 'From and To must be different people';
+    if(rec.endDate && rec.endDate<rec.startDate) return 'End date cannot be before the start date';
+    const prev = id ? (Store.data.handovers||[]).find(x=>x.id===id) : null;
+    if(rec.status==='Acknowledged' && (!prev || prev.status!=='Acknowledged')){
+      const me = String(Auth.session&&(Auth.session.name||Auth.session.username)||'').toLowerCase();
+      if(!Auth.isAdmin() && me!==String(rec.toStaff).toLowerCase()) return 'Only the person taking over (or an Admin) can acknowledge this handover';
+    }
+    return '';
+  },
+  beforeSave(rec, prev){
+    rec.createdBy = (prev && prev.createdBy) || bidUserName();
+    ['acknowledgedBy','acknowledgedAt'].forEach(k=>{ if(prev&&prev[k]) rec[k]=prev[k]; });
+    if(rec.status==='Acknowledged' && !(prev&&prev.acknowledgedBy)){ rec.acknowledgedBy = bidUserName(); rec.acknowledgedAt = new Date().toISOString(); }
+  },
+  cards:(all)=>{
+    const me = Auth.session&&(Auth.session.name||Auth.session.username), today = Util.todayISO();
+    return [
+      {label:'Active handovers', value:all.filter(x=>['Handed Over','Acknowledged'].includes(x.status)&&(!x.endDate||x.endDate>=today)).length},
+      {label:'Waiting for acknowledgement', value:all.filter(x=>x.status==='Handed Over').length, color:'var(--amber,#d97706)'},
+      {label:'Handed to me', value:all.filter(x=>x.toStaff===me&&x.status!=='Closed').length, color:'var(--blue,#2563eb)'}
+    ];
+  },
+  cols:[
+    {h:'No', f:r=>Util.escapeHtml(r.id), cls:'mono'},
+    {h:'From', f:r=>Util.escapeHtml(r.fromStaff||''), cls:'cell-main'},
+    {h:'To', f:r=>Util.escapeHtml(r.toStaff||'')},
+    {h:'Reason', f:r=>Util.escapeHtml(r.reason||'')},
+    {h:'Period', f:r=>Util.fmtDate(r.startDate)+(r.endDate?' – '+Util.fmtDate(r.endDate):' onwards'), cls:''},
+    {h:'Pending work', f:r=>Util.escapeHtml(String(r.pendingWork||'').split('\n')[0].slice(0,60))+(String(r.pendingWork||'').split('\n').length>1?' …':'')},
+    {h:'Acknowledged by', f:r=>Util.escapeHtml(r.acknowledgedBy||'—')},
+    {h:'Status', f:r=>recBadge(r.status, r.status==='Acknowledged'?'green':r.status==='Handed Over'?'amber':r.status==='Closed'?'gray':'blue'), cls:''}
+  ]
+});
+Views.handover = ()=>Handover.render();
+
 const UsersMgmt = {
   render(){
     if(!Auth.isAdmin()){ document.getElementById('content').innerHTML = `<div class="empty-state"><div class="ic">&#128274;</div><div class="t">Admins only</div></div>`; return; }
