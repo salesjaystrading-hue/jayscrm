@@ -8464,7 +8464,7 @@ const Vault = {
         <div style="display:flex;gap:8px;flex-wrap:wrap;"><input id="vf_q" placeholder="Search name, owner, product, tender..." value="${E(this.f.q)}" oninput="clearTimeout(Vault._t);Vault._t=setTimeout(()=>Vault.setF(),250)" style="min-width:200px;">
         <select id="vf_t" onchange="Vault.setF()"><option value="">All types</option>${vaultTypes().map(t=>`<option ${this.f.type===t?'selected':''}>${E(t)}</option>`).join('')}</select>
         <select id="vf_s" onchange="Vault.setF()"><option value="">All status</option><option value="Verified" ${this.f.status==='Verified'?'selected':''}>Verified</option><option value="Unverified" ${this.f.status==='Unverified'?'selected':''}>Not verified</option><option value="Rejected" ${this.f.status==='Rejected'?'selected':''}>Rejected</option><option value="expiring" ${this.f.status==='expiring'?'selected':''}>Expiring / expired</option></select></div>
-        ${mg?`<button class="btn btn-primary btn-sm" onclick="Vault.openForm()">&#65291; Add document</button>`:''}
+        <button class="btn btn-outline btn-sm" onclick="MergeDocs.open('vault')">&#128230; Merge documents</button>${mg?`<button class="btn btn-primary btn-sm" onclick="Vault.openForm()">&#65291; Add document</button>`:''}
       </div>
       <div class="hint" style="margin-bottom:10px;">Reusable tender documents. Only <b>Verified</b>, in-date documents can be attached to a tender, and only after you confirm they meet that tender's requirement. ${mg?'':'Only Admin or Manager can add or verify documents.'} &#128274; = Restricted (visible only to Admin and people the Admin allows).</div>
       ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Document</th><th>Type</th><th>Responsible</th><th>Validity</th><th>Verification</th><th>Applies to</th><th>Updated</th><th></th></tr></thead><tbody>${rows.map(d=>{ const x=vaultExpiry(d); return `<tr>
@@ -8803,6 +8803,147 @@ const BidPack = {
       S.bid.timeline.push({ date:new Date().toISOString(), text:'Bid pack compiled: '+loaded.length+' document(s), '+total+' pages'+(skipped.length?' ('+skipped.length+' skipped)':''), by:(Auth.session&&Auth.session.name)||'System' });
       try{ await Store.save('bids'); await Activity.log('Bid pack compiled', (S.bid.bidNumber||S.bid.id)+' - '+total+' pages'); }catch(e){ console.warn('pack log', e); }
     }catch(e){ vaultErr('Could not compile', e); }
+    S.busy = false; this.paint();
+  },
+  download(){
+    const S = this.S; if(!S || !S.blob || !S.result) return;
+    const a = document.createElement('a'); a.href = URL.createObjectURL(S.blob); a.download = S.result.name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href), 30000);
+  },
+  openPdf(){
+    const S = this.S; if(!S || !S.blob) return; const u = URL.createObjectURL(S.blob);
+    if(!window.open(u, '_blank')) UI.toast('Allow pop-ups to open the PDF'); setTimeout(()=>URL.revokeObjectURL(u), 60000);
+  }
+};
+
+/* =====================================================================
+   MERGE DOCUMENTS (Bid Documents menu + Tender Vault menu)
+   Combine any mix of: files from this computer (PDF / JPG / PNG), saved Bid
+   Documents (letters) and Tender Vault documents into ONE PDF, in the order
+   chosen. The merged PDF is only downloaded / opened - nothing is stored.
+   Uses pdf-lib (same library as the Bid Pack compiler).
+===================================================================== */
+const MergeDocs = {
+  S: null, MAX_FILE: 25 * 1024 * 1024,
+  async open(from){
+    this.S = { from, rows: [], busy: false, stamp: false, name: 'Merged-Documents', result: null, blob: null, vaultErr: '' };
+    UI.openModal('Merge Documents', '<div class="hint">Loading...</div>', '<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>', true);
+    try{ await Vault.load(false); }catch(e){ this.S.vaultErr = (e && e.message) || 'could not load'; }
+    this.paint();
+  },
+  paint(){
+    const S = this.S; if(!S) return; const E = Util.escapeHtml;
+    const body = document.getElementById('modalBody'); if(!body) return;
+    const keepName = document.getElementById('mdName') ? document.getElementById('mdName').value : null; if(keepName !== null) S.name = keepName;
+    const vault = (Vault.list||[]).filter(d=>/pdf|jpeg|png/.test(d.mime||''));
+    const letters = (Store.data.bidDocs||[]).slice().sort((a,b)=>String(b.updatedAt||b.createdAt||'').localeCompare(String(a.updatedAt||a.createdAt||'')));
+    const lbl = d => (d.docNumber?d.docNumber+' - ':'')+((BIDDOC_TEMPLATES[d.templateKey]||{}).label||'Letter')+(d.bid&&d.bid.bidNumber?' ('+d.bid.bidNumber+')':'')+(d.status==='Draft'?' [Draft]':'');
+    const inc = S.rows.length;
+    body.innerHTML = `
+      <div class="hint" style="margin-bottom:10px;">Add the documents you want, put them in order with the arrows, then merge them into one PDF. Nothing is saved - you just download the result.</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;margin-bottom:12px;">
+        <div class="card card-pad"><div style="font-weight:600;font-size:13px;margin-bottom:6px;">1. From this computer</div>
+          <input type="file" id="mdFiles" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" multiple onchange="MergeDocs.addFiles(this)">
+          <div class="hint" style="margin-top:4px;">PDF, JPG or PNG, up to 25 MB each.</div></div>
+        <div class="card card-pad"><div style="font-weight:600;font-size:13px;margin-bottom:6px;">2. Saved Bid Documents</div>
+          <select id="mdLetter" style="width:100%;"><option value="">${letters.length?'Choose a letter...':'No saved letters yet'}</option>${letters.map(d=>`<option value="${E(d.id)}">${E(lbl(d))}</option>`).join('')}</select>
+          <button class="btn btn-outline btn-sm" style="margin-top:6px;" onclick="MergeDocs.addLetter()">&#65291; Add</button></div>
+        <div class="card card-pad"><div style="font-weight:600;font-size:13px;margin-bottom:6px;">3. Tender Vault</div>
+          ${S.vaultErr?`<div class="hint" style="color:var(--red,#dc2626);">Vault not available: ${E(S.vaultErr)}</div>`:`<select id="mdVault" style="width:100%;"><option value="">${vault.length?'Choose a document...':'No vault documents yet'}</option>${vault.map(d=>`<option value="${E(d.id)}">${d.sensitivity==='Restricted'?'\u{1F512} ':''}${E(d.name)} (${E(d.doc_type)})</option>`).join('')}</select>
+          <button class="btn btn-outline btn-sm" style="margin-top:6px;" onclick="MergeDocs.addVault()">&#65291; Add</button>`}</div>
+      </div>
+      ${S.rows.length?`<div class="table-wrap"><table><thead><tr><th style="width:36px;">#</th><th>Document</th><th>From</th><th>Note</th><th style="width:110px;">Order</th></tr></thead><tbody>${S.rows.map((r,i)=>`<tr>
+        <td>${i+1}</td><td class="cell-main">${E(r.label)}<div class="cell-mute" style="font-size:11px;">${E(r.sub||'')}</div></td>
+        <td><span class="badge">${r.kind==='upload'?'Computer':r.kind==='vault'?'Vault':'Bid Document'}</span></td>
+        <td style="font-size:12px;color:var(--amber,#d97706);">${E(r.warn||'')}</td>
+        <td><button class="icon-btn" ${i===0?'disabled':''} onclick="MergeDocs.move(${i},-1)" title="Move up">&#8593;</button><button class="icon-btn" ${i===S.rows.length-1?'disabled':''} onclick="MergeDocs.move(${i},1)" title="Move down">&#8595;</button><button class="icon-btn" onclick="MergeDocs.remove(${i})" title="Remove from merge">&times;</button></td></tr>`).join('')}</tbody></table></div>`
+        : '<div class="empty-state"><div class="t">Nothing added yet</div><div class="hint">Use the three boxes above to add documents.</div></div>'}
+      <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin:12px 0;font-size:13px;">
+        <label>File name <input id="mdName" value="${E(S.name)}" style="width:220px;"> .pdf</label>
+        <label class="chk"><input type="checkbox" ${S.stamp?'checked':''} onchange="MergeDocs.S.stamp=this.checked"> Number every page ("Page X of N")</label>
+      </div>
+      <button class="btn btn-primary" ${S.busy||inc<2?'disabled':''} onclick="MergeDocs.merge()">${S.busy?'Merging...':'&#128230; Merge '+inc+' document'+(inc===1?'':'s')+' into one PDF'}</button>
+      ${inc===1?'<span class="hint" style="margin-left:8px;">Add at least two documents.</span>':''}
+      <div style="margin-top:12px;">${this.resultHTML()}</div>`;
+  },
+  resultHTML(){
+    const R = this.S && this.S.result; if(!R) return ''; const E = Util.escapeHtml;
+    return `<div class="card card-pad" style="border-left:4px solid ${R.skipped.length?'var(--red,#dc2626)':'var(--green,#16a34a)'};">
+      <b>${E(R.name)}</b> &middot; ${R.pages} pages &middot; ${vaultSize(R.bytes)}
+      ${R.skipped.length?`<div style="color:var(--red,#dc2626);font-size:13px;margin-top:4px;"><b>NOT included (could not be read):</b> ${R.skipped.map(s=>E(s.label+' - '+s.err)).join('; ')}</div>`:''}
+      ${R.unstamped?`<div class="hint" style="margin-top:4px;">${R.unstamped} rotated page(s) were left without a page number.</div>`:''}
+      <div style="margin-top:8px;display:flex;gap:8px;"><button class="btn btn-primary btn-sm" onclick="MergeDocs.download()">&#11015; Download</button><button class="btn btn-outline btn-sm" onclick="MergeDocs.openPdf()">&#128065; Open</button></div></div>`;
+  },
+  _dirty(){ this.S.result = null; this.S.blob = null; },
+  async addFiles(inp){
+    const S = this.S; const files = Array.from(inp.files||[]); inp.value = '';
+    for(const f of files){
+      if(f.size > this.MAX_FILE){ UI.toast(f.name+' is larger than 25 MB - skipped', 4500); continue; }
+      let u8; try{ u8 = new Uint8Array(await f.arrayBuffer()); }catch(e){ UI.toast('Could not read '+f.name); continue; }
+      const mime = vaultSniff(u8); if(!mime){ UI.toast(f.name+' is not a PDF, JPG or PNG - skipped', 4500); continue; }
+      S.rows.push({ kind:'upload', label:f.name, sub:vaultSize(f.size), bytes:u8, mime, warn:'' });
+    }
+    this._dirty(); this.paint();
+  },
+  addLetter(){
+    const id = (document.getElementById('mdLetter')||{}).value; if(!id) return UI.toast('Choose a letter first');
+    const d = (Store.data.bidDocs||[]).find(x=>x.id===id); if(!d) return;
+    this.S.rows.push({ kind:'doc', ref:id, label:((BIDDOC_TEMPLATES[d.templateKey]||{}).label||'Letter')+(d.docNumber?' '+d.docNumber:''), sub:(d.bid&&d.bid.bidNumber)?'Bid '+d.bid.bidNumber:'', warn:d.status==='Draft'?'Still a Draft':'' });
+    this._dirty(); this.paint();
+  },
+  addVault(){
+    const id = (document.getElementById('mdVault')||{}).value; if(!id) return UI.toast('Choose a vault document first');
+    const v = (Vault.list||[]).find(x=>x.id===id); if(!v) return;
+    const w = []; if(v.verification_status!=='Verified') w.push(v.verification_status==='Rejected'?'Rejected':'Not verified'); if(vaultExpiry(v).cls==='red') w.push('Expired');
+    if(v.sensitivity==='Restricted') w.push('Restricted');
+    this.S.rows.push({ kind:'vault', ref:id, label:v.name, sub:v.doc_type+' - '+vaultSize(v.size_bytes), warn:w.join(', '), restricted:v.sensitivity==='Restricted' });
+    this._dirty(); this.paint();
+  },
+  move(i,d){ const r = this.S.rows, j = i+d; if(j<0||j>=r.length) return; const t = r[i]; r[i] = r[j]; r[j] = t; this._dirty(); this.paint(); },
+  remove(i){ this.S.rows.splice(i,1); this._dirty(); this.paint(); },
+  async rowBytes(r){
+    if(r.kind === 'upload') return { bytes: r.bytes, mime: r.mime };
+    return BidPack.rowBytes(r);
+  },
+  async merge(){
+    const S = this.S; if(!S || S.busy) return;
+    const nameEl = document.getElementById('mdName'); if(nameEl) S.name = nameEl.value;
+    if(S.rows.length < 2) return UI.toast('Add at least two documents');
+    if(!window.PDFLib) return UI.toast('PDF merge library is not loaded. Check your internet connection and reload.', 5000);
+    const warn = S.rows.filter(r=>/Not verified|Rejected|Expired|Draft/.test(r.warn||'')).map(r=>r.label+' ('+r.warn+')');
+    if(warn.length && !confirm('Check these before merging:\n\n'+warn.join('\n')+'\n\nMerge anyway?')) return;
+    const { PDFDocument, StandardFonts, rgb } = window.PDFLib;
+    S.busy = true; S.result = null; this.paint();
+    try{
+      const out = await PDFDocument.create(), skipped = []; let used = 0;
+      for(const r of S.rows){
+        try{
+          const { bytes, mime } = await this.rowBytes(r); let pdf;
+          if(mime === 'application/pdf') pdf = await PDFDocument.load(bytes);
+          else {
+            pdf = await PDFDocument.create(); const img = mime === 'image/png' ? await pdf.embedPng(bytes) : await pdf.embedJpg(bytes);
+            const W = 595.28, H = 841.89, M = 28, sc = Math.min((W-2*M)/img.width, (H-2*M)/img.height, 1), w = img.width*sc, h = img.height*sc;
+            pdf.addPage([W, H]).drawImage(img, { x:(W-w)/2, y:(H-h)/2, width:w, height:h });
+          }
+          if(pdf.getPageCount() < 1) throw new Error('no pages');
+          (await out.copyPages(pdf, pdf.getPageIndices())).forEach(pg=>out.addPage(pg)); used++;
+          if(r.restricted){ try{ Activity.log('Restricted vault document merged', r.label); }catch(e){} }
+        }catch(e){ console.warn('merge skip', r.label, e); const m = (e && e.message) || ''; skipped.push({ label:r.label, err: /encrypt/i.test(m)?'password-protected PDF':(m||'could not be read') }); }
+      }
+      if(!used) throw new Error('None of the documents could be read');
+      let unstamped = 0; const total = out.getPageCount();
+      if(S.stamp){
+        const font = await out.embedFont(StandardFonts.Helvetica);
+        out.getPages().forEach((pg,i)=>{
+          if(((pg.getRotation().angle % 360) + 360) % 360 !== 0){ unstamped++; return; }
+          const t = 'Page '+(i+1)+' of '+total, w = font.widthOfTextAtSize(t, 8), { width } = pg.getSize();
+          pg.drawText(t, { x: Math.max(8, width-24-w), y:12, size:8, font, color:rgb(0.35,0.35,0.35) });
+        });
+      }
+      const bytes = await out.save(), base = (String(S.name||'').trim() || 'Merged-Documents').replace(/\.pdf$/i,'').replace(/[^a-z0-9._\- ]+/gi,'-');
+      S.blob = new Blob([bytes], { type:'application/pdf' });
+      S.result = { name: base+'.pdf', pages: total, bytes: bytes.length, skipped, unstamped };
+      try{ await Activity.log('Documents merged', used+' document(s), '+total+' pages'); }catch(e){}
+    }catch(e){ vaultErr('Could not merge', e); }
     S.busy = false; this.paint();
   },
   download(){
@@ -9559,7 +9700,7 @@ const BidAtc = {
           <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px;"><span class="badge">${E(c.category||'')}</span><span class="badge" style="background:${cc};color:#fff;">${E(c.classification)}${c.classification==='Unclear'?' — manual verification required':''}</span>${c.stage?`<span class="badge" title="Automatic guess from wording">${E(c.stage)}</span>`:''}<span class="badge" style="background:${c.review_status==='Verified'?'#16a34a':c.review_status==='Disputed'?'#dc2626':'#6b7280'};color:#fff;">${E(c.review_status)}</span></div>
           <div class="cell-mute" style="font-size:12px;margin-bottom:4px;">Source: <b>${E(c.file_name||'')}</b>${c.page?' · page/sheet '+c.page:''}${c.clause_ref?' · '+E(c.clause_ref):''}${!c.clause_ref?' · <span style="color:var(--amber,#d97706);">Clause number not identified — manual verification required</span>':''}</div>
           <blockquote style="margin:0 0 6px;padding:6px 10px;border-left:3px solid var(--border,#d1d5db);white-space:pre-wrap;font-size:12.5px;">${E(c.excerpt||'')}</blockquote>
-          <div class="cell-mute" style="font-size:12px;">${c.interpretation?'Interpretation: '+E(c.interpretation):'No interpretation yet (rule-based extraction; AI explanation comes in Phase 2). Category, type and stage are keyword-based.'}${c.reviewed_by_name?' · reviewed by '+E(c.reviewed_by_name):''}</div>
+          <div class="cell-mute" style="font-size:12px;">${c.interpretation?E(c.interpretation):(this.autoNote(c)?'Auto-summary (keyword-based, not AI — verify against the quoted text): '+E(this.autoNote(c)):'No key figures or documents recognised in this clause. Read the quoted text.')}${c.reviewed_by_name?' · reviewed by '+E(c.reviewed_by_name):''}</div>
           ${ed?`<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;"><button class="btn btn-outline btn-sm" onclick="BidAtc.setReview('${E(bidId)}','${c.id}','Verified')">Mark verified</button><button class="btn btn-outline btn-sm" onclick="BidAtc.setReview('${E(bidId)}','${c.id}','Disputed')">Wrong / disputed</button>${c.review_status!=='Not Verified'?`<button class="btn btn-outline btn-sm" onclick="BidAtc.setReview('${E(bidId)}','${c.id}','Not Verified')">Reset</button>`:''}<button class="btn btn-outline btn-sm" ${onList?'disabled':''} onclick="BidAtc.addItem('${E(bidId)}','${c.id}')">${onList?'On checklist':'+ Add to checklist'}</button></div>`:''}</div>`; }).join('')||'<div class="hint">No clauses match the filter.</div>'}`:''}
     </div>
     <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:16px 0 6px;">ATC Compliance Checklist</h4>
@@ -9713,8 +9854,8 @@ Object.assign(BidAtc, {
     const tbl = (rows)=>'<table style="width:100%;border-collapse:collapse;"><tbody>'+rows.map(r=>`<tr><td class="cell-mute" style="width:34%;padding:3px 8px 3px 0;vertical-align:top;">${E(r[0])}</td><td style="padding:3px 0;">${r[1]}</td></tr>`).join('')+'</tbody></table>';
     return `<h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:16px 0 6px;">Tender Intelligence Summary</h4>
     <div class="card card-pad" style="font-size:13px;margin-bottom:10px;">
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">${this.canEdit()?`<button class="btn btn-outline btn-sm" ${this.aiBusy||!this.docs.length?'disabled':''} onclick="BidAtc.runAI('${E(b.id)}')">${this.aiBusy?'AI is analysing...':'&#10024; '+(ai?'Re-run':'Generate')+' AI interpretation'}</button>`:''}${this.aiMsg?`<span class="hint" style="color:${/not configured|failed|error|could not/i.test(this.aiMsg)?'var(--red,#dc2626)':'inherit'};">${E(this.aiMsg)}</span>`:''}</div>
-      ${!ai?'<div class="hint" style="margin-bottom:8px;">The tables below are built by rules from the extracted clauses and your CRM records. AI interpretation (plain-language meaning of each clause, quoted overview, extra risks) is optional and needs the AI key to be set up.</div>':''}
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">${this.canEdit()&&this.aiOn()?`<button class="btn btn-outline btn-sm" ${this.aiBusy||!this.docs.length?'disabled':''} onclick="BidAtc.runAI('${E(b.id)}')">${this.aiBusy?'AI is analysing...':'&#10024; '+(ai?'Re-run':'Generate')+' AI interpretation'}</button>`:''}${this.aiMsg?`<span class="hint" style="color:${/not configured|failed|error|could not/i.test(this.aiMsg)?'var(--red,#dc2626)':'inherit'};">${E(this.aiMsg)}</span>`:''}</div>
+      ${!ai?'<div class="hint" style="margin-bottom:8px;">Everything below is built by <b>rules</b> from the extracted clauses and your CRM records — no AI, no subscription, no cost. Clause summaries are keyword-based.'+(Auth.isAdmin()?' <label class="chk" style="display:inline-flex;gap:6px;align-items:center;margin-left:8px;"><input type="checkbox" style="width:auto;" '+(this.aiOn()?'checked':'')+' onchange="BidAtc.toggleAi(this.checked)"> Show optional AI button (needs a paid API key)</label>':'')+'</div>':''}
       ${aiHTML}
       <b>A. Tender overview</b>${tbl(this.overviewRows(b))}
       <div style="margin:10px 0 4px;"><b>B. ATC summary</b></div>${tbl(this.summaryRows())}
@@ -9950,6 +10091,26 @@ Object.assign(BidAtc, {
       box.insertBefore(hold, box.firstChild); }catch(e){ console.error('p3', e); }
   };
 }
+
+
+/* ---------- No-subscription mode: rule-based auto-summary (no AI, no key, no cost) ---------- */
+Object.assign(BidAtc, {
+  aiOn(){ return !!((Store.data.settings||{}).atcAiEnabled) || !!this.ai; },
+  async toggleAi(on){ if(!Auth.isAdmin()) return; Store.data.settings.atcAiEnabled = !!on; await Store.save('settings'); const id = this.loadedFor; if(id) this.paint(id); },
+  /* Key points pulled from the clause wording by pattern. Never adds anything that is not in the text. */
+  autoNote(c){
+    const t = String(c.excerpt||''), pts = [], money = /(?:rs\.?|inr|₹)\s*([\d,]{3,}(?:\.\d+)?)/ig; let m;
+    while((m = money.exec(t)) && pts.length < 12) pts.push('amount ₹'+Number(m[1].replace(/,/g,'')).toLocaleString('en-IN'));
+    (t.match(/\d+(?:\.\d+)?\s*%/g)||[]).slice(0,4).forEach(x=>pts.push('percentage '+x.replace(/\s+/g,'')));
+    (t.match(/\d{1,3}\s*(?:calendar\s*)?(?:days?|weeks?|months?|years?)/gi)||[]).slice(0,4).forEach(x=>pts.push('period '+x.replace(/\s+/g,' ')));
+    (t.match(/\d{1,2}[-\/.]\d{1,2}[-\/.]\d{2,4}/g)||[]).slice(0,3).forEach(x=>pts.push('date '+x));
+    const docs = [['PAN',/\bpan\b/i],['GST registration',/\bgst/i],['Udyam / MSME',/udyam|msme|\bmse\b/i],['OEM authorization / MAF',/oem|authori[sz]ation|\bmaf\b/i],['ISO certificate',/\biso\b/i],['BIS / ISI mark',/\bbis\b|\bisi\b/i],['experience proof',/experience|past performance/i],['turnover proof',/turnover/i],['test report',/test report|testing/i],['catalogue / datasheet',/catalogue|datasheet|brochure/i],['declaration / undertaking',/declaration|undertaking|affidavit/i],['original / physical documents',/original|physical cop/i],['sample',/\bsample/i],['site visit / demonstration',/site visit|demonstrat/i],['EMD',/\bemd\b|earnest money/i],['performance security',/performance security|pbg|epbg/i],['warranty',/warranty/i],['installation / commissioning',/install|commission/i],['penalty / liquidated damages',/penalt|liquidated/i]];
+    const found = docs.filter(d=>d[1].test(t)).map(d=>d[0]);
+    const cls = { Mandatory:'wording says it is required (e.g. "shall / must / required")', Conditional:'applies only in certain cases ("if / in case of / unless…")', Optional:'wording says "may / optional"', Unclear:'wording does not clearly say whether it is required' }[c.classification]||'';
+    const parts = []; if(found.length) parts.push('Mentions: '+found.join(', ')); if(pts.length) parts.push('Figures in text: '+Array.from(new Set(pts)).join('; ')); if(cls) parts.push('Type: '+cls);
+    return parts.length ? parts.join('. ')+'.' : '';
+  }
+});
 
 const BidSearch = {
   render(){
@@ -17035,7 +17196,55 @@ const BidDocs = {
   addSubItem(id,i){ this.sec(id).data[i].subitems.push(''); this.render(); },
   removeSubItem(id,i,j){ this.sec(id).data[i].subitems.splice(j,1); this.render(); },
   updSubItem(id,i,j,val){ this.sec(id).data[i].subitems[j]=val; this.refreshPreview(); },
-  updTableCell(id,r,c,val){ this.sec(id).data.rows[r][c]=val; this.refreshPreview(); },
+  updTableCell(id,r,c,val){ const t=this.sec(id).data; while(t.rows[r].length<=c) t.rows[r].push(''); t.rows[r][c]=val; this.refreshPreview(); },
+  /* ---- Excel / spreadsheet paste -> real table ---- */
+  parseGrid(text){
+    /* Excel copies cells as tab-separated text; a cell containing line breaks is wrapped in "quotes". */
+    const t=String(text||'').replace(/\r\n?/g,'\n'); const rows=[]; let row=[],cell='',q=false;
+    for(let i=0;i<t.length;i++){
+      const ch=t[i];
+      if(q){ if(ch==='"'){ if(t[i+1]==='"'){cell+='"';i++;} else q=false; } else cell+=ch; }
+      else if(ch==='"' && cell==='') q=true;
+      else if(ch==='\t'){ row.push(cell); cell=''; }
+      else if(ch==='\n'){ row.push(cell); rows.push(row); row=[]; cell=''; }
+      else cell+=ch;
+    }
+    if(cell!==''||row.length) { row.push(cell); rows.push(row); }
+    while(rows.length && rows[rows.length-1].every(c=>!String(c).trim())) rows.pop();
+    return rows.map(r=>r.map(c=>String(c).trim()));
+  },
+  isGrid(text){ const g=this.parseGrid(text); return g.length>=1 && g.some(r=>r.length>=2) && /\t/.test(String(text)) ? g : null; },
+  normGrid(g){ const n=Math.max(1,...g.map(r=>r.length)); return g.map(r=>{ const x=r.slice(); while(x.length<n) x.push(''); return x; }); },
+  newTable(headers,rows,label){ return bdSection('tbl'+Date.now()+Math.floor(Math.random()*1000),label||'Table','table',{headers,rows,fit:true}); },
+  addTable(afterId){
+    const sec=this.newTable(['Sr. No.','Description','Details'],[['','','']]);
+    const arr=this.draft.sections; let i=afterId?arr.findIndex(x=>x.id===afterId):-1;
+    arr.splice(i>=0?i+1:arr.length,0,sec); this.render();
+  },
+  /* paste inside a paragraph box: if it is Excel cells, make a table section right after it */
+  pasteInLine(ev,id){
+    const txt=(ev.clipboardData||window.clipboardData).getData('text'); const g=this.isGrid(txt); if(!g) return;
+    ev.preventDefault(); const n=this.normGrid(g);
+    const sec=this.newTable(n[0],n.slice(1),'Table');
+    const arr=this.draft.sections; const i=arr.findIndex(x=>x.id===id); arr.splice(i+1,0,sec);
+    this.render(); UI.toast('Excel cells pasted as a table ('+n.length+' rows × '+n[0].length+' columns)');
+  },
+  /* paste inside a table cell: fills the grid from that cell, growing the table as needed */
+  pasteInCell(ev,id,r,c,isHead){
+    const txt=(ev.clipboardData||window.clipboardData).getData('text'); const g=this.isGrid(txt); if(!g) return;
+    ev.preventDefault(); const t=this.sec(id).data; let r0=isHead?-1:r;
+    g.forEach((row,gi)=>{ row.forEach((v,gj)=>{
+      const rr=r0+gi, cc=c+gj;
+      while(t.headers.length<=cc){ t.headers.push(''); t.rows.forEach(x=>x.push('')); }
+      if(rr<0) t.headers[cc]=v;
+      else { while(t.rows.length<=rr) t.rows.push(t.headers.map(()=>'')); t.rows[rr][cc]=v; }
+    }); });
+    this.render(); UI.toast('Pasted '+g.length+' row(s) into the table');
+  },
+  updTableHead(id,c,val){ this.sec(id).data.headers[c]=val; this.refreshPreview(); },
+  updTableLabel(id,val){ this.sec(id).label=val; this.refreshPreview(); },
+  addTableCol(id){ const t=this.sec(id).data; t.headers.push('Column '+(t.headers.length+1)); t.rows.forEach(r=>r.push('')); this.render(); },
+  removeTableCol(id,c){ const t=this.sec(id).data; if(t.headers.length<=1) return UI.toast('A table needs at least one column'); t.headers.splice(c,1); t.rows.forEach(r=>r.splice(c,1)); this.render(); },
   addTableRow(id){ const t=this.sec(id).data; t.rows.push(t.headers.map(()=>'')); this.render(); },
   removeTableRow(id,r){ this.sec(id).data.rows.splice(r,1); this.render(); },
 
@@ -17217,11 +17426,11 @@ const BidDocs = {
         });
         body += '</ol>';
       } else if(sec.kind==='table'){
-        body += '<div style="font-weight:700;color:var(--navy);margin:10px 0 6px;font-size:12px;">' + E(sec.label) + '</div>' +
-          '<table style="border-collapse:collapse;font-size:11.5px;margin-bottom:10px;"><thead><tr>' +
-          (sec.data.headers||[]).map(h=>'<th style="border:1px solid #ccc;padding:5px;background:var(--navy);color:#fff;">'+E(h)+'</th>').join('') +
+        body += (sec.label?'<div style="font-weight:700;color:var(--navy);margin:10px 0 6px;font-size:12px;">' + E(sec.label) + '</div>':'') +
+          '<table style="border-collapse:collapse;font-size:11.5px;margin-bottom:10px;width:100%;table-layout:auto;"><thead><tr>' +
+          (sec.data.headers||[]).map(h=>'<th style="border:1px solid #ccc;padding:5px;background:var(--navy);color:#fff;text-align:left;">'+E(h)+'</th>').join('') +
           '</tr></thead><tbody>' +
-          (sec.data.rows||[]).map(r=>'<tr>'+r.map(cell=>'<td style="border:1px solid #ccc;padding:5px;">'+merge(cell)+'</td>').join('')+'</tr>').join('') +
+          (sec.data.rows||[]).map(r=>'<tr>'+(sec.data.headers||[]).map((_,ci)=>'<td style="border:1px solid #ccc;padding:5px;vertical-align:top;white-space:pre-wrap;">'+merge(r[ci]||'')+'</td>').join('')+'</tr>').join('') +
           '</tbody></table>';
       }
     });
@@ -17341,11 +17550,11 @@ const BidDocs = {
       } else if(sec.kind==='table'){
         ensure(40);
         doc.setFont('helvetica','bold'); doc.setFontSize(10); doc.setTextColor(NAVY[0],NAVY[1],NAVY[2]);
-        doc.text(String(sec.label||''), M, y); y += 5;
+        if(sec.label){ doc.text(String(sec.label), M, y); y += 5; }
         doc.autoTable({
           startY: y, margin:{left:M, right:M},
           head:[sec.data.headers||[]],
-          body:(sec.data.rows||[]).map(r=>r.map(cell=>merge(cell))),
+          body:(sec.data.rows||[]).map(r=>(sec.data.headers||[]).map((_,ci)=>merge(r[ci]||''))),
           theme:'grid', styles:{fontSize:9, cellPadding:2.4},
           headStyles:{fillColor:NAVY, textColor:255}
         });
@@ -17437,10 +17646,11 @@ const BidDocs = {
       inner = sec.data.map((line,i)=>
         '<div class="field">' +
           '<label>Paragraph '+(i+1)+'</label>' +
-          '<textarea rows="3" oninput="BidDocs.updLine(\''+sec.id+'\','+i+',this.value)">'+E(line)+'</textarea>' +
+          '<textarea rows="3" onpaste="BidDocs.pasteInLine(event,\''+sec.id+'\')" oninput="BidDocs.updLine(\''+sec.id+'\','+i+',this.value)">'+E(line)+'</textarea>' +
           '<button class="btn btn-outline btn-sm" style="margin-top:4px;" onclick="BidDocs.removeLine(\''+sec.id+'\','+i+')">Remove</button>' +
         '</div>'
-      ).join('') + '<button class="btn btn-outline btn-sm" onclick="BidDocs.addLine(\''+sec.id+'\')">&#65291; Add Paragraph</button>';
+      ).join('') + '<button class="btn btn-outline btn-sm" onclick="BidDocs.addLine(\''+sec.id+'\')">&#65291; Add Paragraph</button>' +
+        '<div class="hint" style="margin-top:6px;">Tip: copy cells in Excel and paste them into a paragraph box &mdash; they become a proper table automatically.</div>';
     } else if(sec.kind==='numbered'){
       inner = sec.data.map((item,i)=>
         '<div class="card card-pad" style="margin-bottom:10px;background:#F8FAFC;">' +
@@ -17458,10 +17668,15 @@ const BidDocs = {
         '</div>'
       ).join('') + '<button class="btn btn-outline btn-sm" onclick="BidDocs.addNumbered(\''+sec.id+'\')">&#65291; Add Point</button>';
     } else if(sec.kind==='table'){
-      const headers = sec.data.headers||[];
-      inner = '<div class="table-wrap"><table><thead><tr>'+headers.map(h=>'<th>'+E(h)+'</th>').join('')+'<th></th></tr></thead><tbody>' +
-        sec.data.rows.map((row,ri)=>'<tr>'+row.map((cell,ci)=>'<td><input value="'+E(cell)+'" oninput="BidDocs.updTableCell(\''+sec.id+'\','+ri+','+ci+',this.value)" style="width:100%;border:1px solid var(--border);border-radius:6px;padding:5px;"></td>').join('')+'<td><button class="icon-btn" onclick="BidDocs.removeTableRow(\''+sec.id+'\','+ri+')">&times;</button></td></tr>').join('') +
-        '</tbody></table></div><button class="btn btn-outline btn-sm" style="margin-top:8px;" onclick="BidDocs.addTableRow(\''+sec.id+'\')">&#65291; Add Row</button>';
+      const headers = sec.data.headers||[]; const id=sec.id;
+      inner = '<div class="field"><label>Table heading <span class="hint">(optional)</span></label><input value="'+E(sec.label)+'" oninput="BidDocs.updTableLabel(\''+id+'\',this.value)"></div>' +
+        '<div class="hint" style="margin-bottom:6px;">Copy cells in Excel, click a cell below and paste (Ctrl+V) &mdash; columns and rows are kept. Pasting on a heading cell fills from the heading row.</div>' +
+        '<div class="table-wrap"><table><thead><tr>'+headers.map((h,ci)=>'<th><input value="'+E(h)+'" placeholder="Heading" onpaste="BidDocs.pasteInCell(event,\''+id+'\','+0+','+ci+',true)" oninput="BidDocs.updTableHead(\''+id+'\','+ci+',this.value)" style="width:100%;min-width:90px;font-weight:700;border:1px solid var(--border);border-radius:6px;padding:5px;"><button class="icon-btn" title="Remove column" onclick="BidDocs.removeTableCol(\''+id+'\','+ci+')">&times;</button></th>').join('')+'<th></th></tr></thead><tbody>' +
+        sec.data.rows.map((row,ri)=>'<tr>'+headers.map((_,ci)=>'<td><input value="'+E(row[ci]||'')+'" onpaste="BidDocs.pasteInCell(event,\''+id+'\','+ri+','+ci+',false)" oninput="BidDocs.updTableCell(\''+id+'\','+ri+','+ci+',this.value)" style="width:100%;min-width:90px;border:1px solid var(--border);border-radius:6px;padding:5px;"></td>').join('') +
+          '<td><button class="icon-btn" title="Remove row" onclick="BidDocs.removeTableRow(\''+id+'\','+ri+')">&times;</button></td></tr>').join('') +
+        '</tbody></table></div>' +
+        '<div class="toolbar" style="margin-top:8px;"><button class="btn btn-outline btn-sm" onclick="BidDocs.addTableRow(\''+id+'\')">&#65291; Add Row</button>' +
+        '<button class="btn btn-outline btn-sm" onclick="BidDocs.addTableCol(\''+id+'\')">&#65291; Add Column</button></div>';
     }
     return '<div class="card card-pad" style="margin-bottom:14px;">' +
       '<div class="toolbar" style="margin-bottom:10px;">' +
@@ -17584,7 +17799,8 @@ const BidDocs = {
         '</div>' +
 
         d.sections.map((sec,i)=>this.sectionEditorHTML(sec,i)).join('') +
-        '<button class="btn btn-outline btn-sm" onclick="BidDocs.addCustomSection()">&#65291; Add Custom Section</button>' +
+        '<button class="btn btn-outline btn-sm" onclick="BidDocs.addCustomSection()">&#65291; Add Custom Section</button> ' +
+        '<button class="btn btn-outline btn-sm" onclick="BidDocs.addTable()">&#65291; Add Table (paste from Excel)</button>' +
 
         '<div class="card card-pad" style="margin:14px 0;">' +
           '<div class="wa-step">Closing</div>' +
@@ -17647,6 +17863,7 @@ const BidDocs = {
         '<div class="card card-pad" style="text-align:center;"><div style="font-size:22px;font-weight:700;color:var(--accent-dark);">'+Store.data.bidDocs.filter(d=>d.status==='Completed').length+'</div><div class="cell-mute" style="font-size:11.5px;">Completed</div></div>' +
         '<div class="card card-pad" style="text-align:center;"><div style="font-size:22px;font-weight:700;">'+Object.keys(BIDDOC_TEMPLATES).length+'</div><div class="cell-mute" style="font-size:11.5px;">Templates</div></div>' +
       '</div>' +
+      '<div class="toolbar" style="margin-bottom:12px;"><div class="toolbar-spacer"></div><button class="btn btn-outline btn-sm" onclick="MergeDocs.open(\'biddocs\')">&#128230; Merge Documents</button></div>' +
       GemPdf.dropHTML() +
       '<div class="tabs">' + tabs.map(t=>'<button class="tab-btn '+(this.dashTab===t[0]?'active':'')+'" onclick="BidDocs.setTab(\''+t[0]+'\')">'+t[1]+'</button>').join('') + '</div>' +
       '<div id="bdTabBody"></div>';
