@@ -16754,6 +16754,35 @@ const OppFinder = {
       '<h4 style="margin:16px 0 6px;">Review Unmatched projects</h4>' +
       '<button class="btn btn-outline btn-sm" onclick="OppFinder.kwDiscover()">Find missing terms</button><div id="kwDiscOut"></div></div>';
   },
+  /* Admin only: deletes EVERY saved project of the district chosen in the District filter (not just the rows currently shown).
+     A backup file of those rows is downloaded first, the server re-checks the row count, and nothing else is touched. */
+  async deleteDistrict(){
+    if(!Auth.isAdmin()){ UI.toast('Only an Admin can delete project data'); return; }
+    const d = (document.getElementById('oppDistrict')||{}).value || '';
+    if(!d){ UI.toast('Select a district in the District filter first'); return; }
+    const rows = Store.data.oppProjects.filter(r=>String(r['District']||'').trim()===d.trim());
+    if(!rows.length){ UI.toast('No saved projects found for '+d); return; }
+    const typed = prompt('This will permanently delete ALL '+rows.length+' saved project records of district "'+d+'" (every category, not only the rows on screen).\n\nA backup file will be downloaded first. Other districts, My Opportunities tracking and keywords are not affected.\n\nType the district name to confirm:');
+    if(typed===null) return;
+    if(typed.trim()!==d.trim()){ UI.toast('District name did not match - nothing was deleted'); return; }
+    try{
+      const blob = new Blob([JSON.stringify(rows)], {type:'application/json'});
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+      a.download = 'opportunity-backup-'+d.replace(/[^\w]+/g,'_')+'-'+new Date().toISOString().slice(0,10)+'.json'; document.body.appendChild(a); a.click(); a.remove();
+    }catch(e){ console.error(e); if(!confirm('Backup file could not be created. Delete anyway?')) return; }
+    const { data, error } = await sb.rpc('opp_delete_district', { p_district: d, p_expected: rows.length });
+    if(error){
+      console.error('opp_delete_district', error);
+      UI.toast(/opp_delete_district/.test(error.message||'') && /not find|does not exist|schema cache/i.test(error.message||'') ? 'Delete is not set up on the server yet - ask your developer to run the opp_delete_district SQL' : 'Not deleted: '+(error.message||'server error'));
+      return;
+    }
+    const gone = new Set(rows);
+    Store.data.oppProjects = Store.data.oppProjects.filter(r=>!gone.has(r));
+    try{ await Activity.log('District project data deleted', d+': '+(data&&data.deleted!=null?data.deleted:rows.length)+' record(s)'); }catch(e){}
+    UI.toast('Deleted '+((data&&data.deleted!=null)?data.deleted:rows.length)+' record(s) of '+d);
+    const sel = document.getElementById('oppDistrict'); if(sel) sel.value = '';
+    Paginate.get('oppfinder').page = 1; this.render();
+  },
   resetFilters(){
     this.filters = { q:'', type:'ALL', type2:'ALL', rel:'possible', anyWord:false, district:'', localbody:'', minscore:0, status:'', from:'', to:'', band:'' };
     this.render();
@@ -17074,7 +17103,8 @@ const OppFinder = {
     return '<div class="card card-pad" style="margin-bottom:14px;">' +
       '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">' +
         '<div><h3 style="margin:0;font-size:14px;">Project Search &amp; Filters</h3><span class="hint">Combine filters: District + Local Body + Category + Score + Status.</span></div>' +
-        '<button class="btn btn-outline btn-sm" onclick="OppFinder.resetFilters()">Reset Filters</button>' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;"><button class="btn btn-outline btn-sm" onclick="OppFinder.resetFilters()">Reset Filters</button>' +
+        (Auth.isAdmin() && f.district ? '<button class="btn btn-sm" style="background:#dc2626;color:#fff;" onclick="OppFinder.deleteDistrict()">Delete all data of '+Util.escapeHtml(f.district)+'</button>' : '') + '</div>' +
       '</div>' +
       '<div class="form-row" style="grid-template-columns:2fr 1fr 1fr 1fr 1fr;margin-top:10px;">' +
         '<div class="field"><label>Search all project data</label><input id="oppSearch" placeholder="e.g. waste bins malappuram panchayat" value="'+Util.escapeHtml(f.q)+'" oninput="OppFinder.render()"></div>' +
