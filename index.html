@@ -16754,12 +16754,27 @@ const OppFinder = {
       '<h4 style="margin:16px 0 6px;">Review Unmatched projects</h4>' +
       '<button class="btn btn-outline btn-sm" onclick="OppFinder.kwDiscover()">Find missing terms</button><div id="kwDiscOut"></div></div>';
   },
-  /* Admin only: deletes EVERY saved project of the district chosen in the District filter (not just the rows currently shown).
+  renderDeleteData(){
+    if(!Auth.isAdmin()) return '<div class="card card-pad">Only an Admin can use this section.</div>';
+    const counts = {}; Store.data.oppProjects.forEach(r=>{ const d = String(r['District']||'').trim(); if(d) counts[d] = (counts[d]||0)+1; });
+    const opts = Object.keys(counts).sort().map(d=>'<option value="'+Util.escapeHtml(d)+'">'+Util.escapeHtml(d)+' ('+counts[d]+')</option>').join('');
+    return '<div class="card card-pad"><h3 style="margin:0 0 6px;">Delete project data by district <span class="badge" style="background:#fee2e2;color:#b91c1c;">Admin only</span></h3>' +
+      '<p class="hint" style="margin:0 0 14px;">Pick a district and delete every saved project of that district (all categories). A backup file is downloaded first and you must type the district name to confirm. Other districts, My Opportunities tracking and keywords are not affected. This cannot be undone.</p>' +
+      '<div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;"><div class="field" style="min-width:260px;margin:0;"><label>Filter by district</label><select id="delDistrict" onchange="OppFinder.delPreview()"><option value="">Select a district&hellip;</option>'+opts+'</select></div>' +
+      '<button id="delBtn" class="btn btn-sm" style="background:#dc2626;color:#fff;" onclick="OppFinder.deleteDistrict()">Delete data</button></div>' +
+      '<div id="delInfo" class="hint" style="margin-top:12px;">Total saved projects: '+Store.data.oppProjects.length.toLocaleString()+'</div></div>';
+  },
+  delPreview(){
+    const d = (document.getElementById('delDistrict')||{}).value || '', el = document.getElementById('delInfo'); if(!el) return;
+    const n = d ? Store.data.oppProjects.filter(r=>String(r['District']||'').trim()===d).length : 0;
+    el.innerHTML = d ? '<b>'+n.toLocaleString()+'</b> saved project(s) in <b>'+Util.escapeHtml(d)+'</b> will be deleted.' : 'Total saved projects: '+Store.data.oppProjects.length.toLocaleString();
+  },
+  /* Admin only: deletes EVERY saved project of the district chosen in the Delete Data tab.
      A backup file of those rows is downloaded first, the server re-checks the row count, and nothing else is touched. */
   async deleteDistrict(){
     if(!Auth.isAdmin()){ UI.toast('Only an Admin can delete project data'); return; }
-    const d = (document.getElementById('oppDistrict')||{}).value || '';
-    if(!d){ UI.toast('Select a district in the District filter first'); return; }
+    const d = (document.getElementById('delDistrict')||{}).value || '';
+    if(!d){ UI.toast('Select a district first'); return; }
     const rows = Store.data.oppProjects.filter(r=>String(r['District']||'').trim()===d.trim());
     if(!rows.length){ UI.toast('No saved projects found for '+d); return; }
     const typed = prompt('This will permanently delete ALL '+rows.length+' saved project records of district "'+d+'" (every category, not only the rows on screen).\n\nA backup file will be downloaded first. Other districts, My Opportunities tracking and keywords are not affected.\n\nType the district name to confirm:');
@@ -16780,7 +16795,6 @@ const OppFinder = {
     Store.data.oppProjects = Store.data.oppProjects.filter(r=>!gone.has(r));
     try{ await Activity.log('District project data deleted', d+': '+(data&&data.deleted!=null?data.deleted:rows.length)+' record(s)'); }catch(e){}
     UI.toast('Deleted '+((data&&data.deleted!=null)?data.deleted:rows.length)+' record(s) of '+d);
-    const sel = document.getElementById('oppDistrict'); if(sel) sel.value = '';
     Paginate.get('oppfinder').page = 1; this.render();
   },
   resetFilters(){
@@ -17035,6 +17049,7 @@ const OppFinder = {
     const tabs = [['dashboard','&#127968; Dashboard'],['projects','&#128269; Projects'],
       ['opportunities','&#11088; My Opportunities'],['import','&#128229; Import'],
       ['products','&#128230; Products'],['reports','&#128202; Reports']];
+    if(Auth.isAdmin()) tabs.push(['deldata','&#128465; Delete Data']);
     return '<div class="rp-switcher" style="flex-wrap:wrap;">' +
       tabs.map(([id,label])=>'<button class="'+(this.tab===id?'active':'')+'" onclick="OppFinder.setTab(\''+id+'\')">'+label+'</button>').join('') +
     '</div>';
@@ -17045,6 +17060,7 @@ const OppFinder = {
       : this.tab==='opportunities' ? this.renderOpportunities()
       : this.tab==='import' ? this.renderImport()
       : this.tab==='products' ? this.renderProducts()
+      : this.tab==='deldata' ? this.renderDeleteData()
       : this.renderReports();
     document.getElementById('content').innerHTML = this.switcherHTML() + body;
     if(this.tab==='products') this.renderKwTable();
@@ -17103,8 +17119,7 @@ const OppFinder = {
     return '<div class="card card-pad" style="margin-bottom:14px;">' +
       '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">' +
         '<div><h3 style="margin:0;font-size:14px;">Project Search &amp; Filters</h3><span class="hint">Combine filters: District + Local Body + Category + Score + Status.</span></div>' +
-        '<div style="display:flex;gap:8px;flex-wrap:wrap;"><button class="btn btn-outline btn-sm" onclick="OppFinder.resetFilters()">Reset Filters</button>' +
-        (Auth.isAdmin() && f.district ? '<button class="btn btn-sm" style="background:#dc2626;color:#fff;" onclick="OppFinder.deleteDistrict()">Delete all data of '+Util.escapeHtml(f.district)+'</button>' : '') + '</div>' +
+        '<button class="btn btn-outline btn-sm" onclick="OppFinder.resetFilters()">Reset Filters</button>' +
       '</div>' +
       '<div class="form-row" style="grid-template-columns:2fr 1fr 1fr 1fr 1fr;margin-top:10px;">' +
         '<div class="field"><label>Search all project data</label><input id="oppSearch" placeholder="e.g. waste bins malappuram panchayat" value="'+Util.escapeHtml(f.q)+'" oninput="OppFinder.render()"></div>' +
@@ -18005,11 +18020,55 @@ const BidDocs = {
     const arr=this.draft.sections; let i=afterId?arr.findIndex(x=>x.id===afterId):-1;
     arr.splice(i>=0?i+1:arr.length,0,sec); this.render();
   },
+  /* a first row holding one single text (e.g. a merged sheet title) becomes the table heading instead of a column header */
+  splitTitle(n){
+    if(n.length>=3 && n[0].filter(c=>String(c).trim()).length===1 && n[0].length>1 && n[1].filter(c=>String(c).trim()).length>=2) return {title:n[0].find(c=>String(c).trim()), grid:n.slice(1)};
+    return {title:'', grid:n};
+  },
+  /* ---- import a whole Excel file as a table ---- */
+  pickExcel(){ const f=document.getElementById('bd_xlFile'); if(f){ f.value=''; f.click(); } },
+  async readExcel(inp){
+    const file=inp.files&&inp.files[0]; if(!file) return;
+    try{
+      if(typeof XLSX==='undefined') throw new Error('Excel reader not loaded - check your internet connection');
+      const buf=await file.arrayBuffer(); this._xl={wb:XLSX.read(buf,{type:'array'}), name:file.name};
+      const names=this._xl.wb.SheetNames;
+      const body='<div class="hint" style="margin-bottom:10px;">'+Util.escapeHtml(file.name)+'</div>' +
+        (names.length>1?'<div class="field"><label>Sheet</label><select id="bd_xlSheet">'+names.map(n=>'<option>'+Util.escapeHtml(n)+'</option>').join('')+'</select></div>':'<input type="hidden" id="bd_xlSheet" value="'+Util.escapeHtml(names[0])+'">') +
+        '<div class="field"><label>Merged cells in the sheet</label><select id="bd_xlMerge"><option value="fill">Repeat the value in every row (recommended)</option><option value="blank">Show it once, leave the rows below blank</option></select></div>' +
+        '<label class="chk"><input type="checkbox" id="bd_xlTitle" checked> If the first row is only a title, use it as the table heading</label>';
+      UI.openModal('Import Excel as table', body, '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="BidDocs.insertExcel()">Insert Table</button>');
+    }catch(e){ console.error(e); UI.toast('Could not read that file: '+(e.message||e)); }
+  },
+  insertExcel(){
+    try{
+      const x=this._xl, sn=document.getElementById('bd_xlSheet').value, ws=x.wb.Sheets[sn];
+      let g=XLSX.utils.sheet_to_json(ws,{header:1,raw:false,defval:'',blankrows:false});
+      const ref=XLSX.utils.decode_range(ws['!ref']||'A1');
+      // sheet_to_json(blankrows:false) drops empty rows, so rebuild with the real row numbers to apply merges correctly
+      const all=XLSX.utils.sheet_to_json(ws,{header:1,raw:false,defval:'',blankrows:true,range:ref}); g=all;
+      let sheetTitle='';
+      if(document.getElementById('bd_xlTitle').checked && all.length>=3){
+        const f0=all[0].map(c=>String(c==null?'':c).trim()).filter(Boolean), f1=(all[1]||[]).filter(c=>String(c).trim());
+        if(f0.length===1 && all[0].length>1 && f1.length>=2){ sheetTitle=f0[0]; all[0]=all[0].map(()=>''); }
+      }
+      if(document.getElementById('bd_xlMerge').value==='fill'){
+        (ws['!merges']||[]).forEach(m=>{ const v=(all[m.s.r-ref.s.r]||[])[m.s.c-ref.s.c]; if(v==null||v==='') return;
+          for(let r=m.s.r;r<=m.e.r;r++) for(let c=m.s.c;c<=m.e.c;c++){ const rr=r-ref.s.r, cc=c-ref.s.c; if(all[rr]) all[rr][cc]=v; } });
+      }
+      g=g.map(r=>r.map(c=>String(c==null?'':c).trim())).filter(r=>r.some(c=>c));
+      if(!g.length) return UI.toast('The sheet is empty');
+      let n=this.normGrid(g), title=sheetTitle;
+      const sec=this.newTable(n[0],n.slice(1),title||'Table');
+      this.draft.sections.push(sec); UI.closeModal(); this.render();
+      UI.toast('Imported '+n.length+' rows × '+n[0].length+' columns from '+x.name);
+    }catch(e){ console.error(e); UI.toast('Import failed: '+(e.message||e)); }
+  },
   /* paste inside a paragraph box: if it is Excel cells, make a table section right after it */
   pasteInLine(ev,id){
     const txt=(ev.clipboardData||window.clipboardData).getData('text'); const g=this.isGrid(txt); if(!g) return;
-    ev.preventDefault(); const n=this.normGrid(g);
-    const sec=this.newTable(n[0],n.slice(1),'Table');
+    ev.preventDefault(); let n=this.normGrid(g); const st=this.splitTitle(n); n=st.grid;
+    const sec=this.newTable(n[0],n.slice(1),st.title||'Table');
     const arr=this.draft.sections; const i=arr.findIndex(x=>x.id===id); arr.splice(i+1,0,sec);
     this.render(); UI.toast('Excel cells pasted as a table ('+n.length+' rows × '+n[0].length+' columns)');
   },
@@ -18585,6 +18644,7 @@ const BidDocs = {
         d.sections.map((sec,i)=>this.sectionEditorHTML(sec,i)).join('') +
         '<button class="btn btn-outline btn-sm" onclick="BidDocs.addCustomSection()">&#65291; Add Custom Section</button> ' +
         '<button class="btn btn-outline btn-sm" onclick="BidDocs.addTable()">&#65291; Add Table (paste from Excel)</button>' +
+        '<button class="btn btn-outline btn-sm" onclick="BidDocs.pickExcel()">&#128194; Import Excel File as Table</button><input type="file" id="bd_xlFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="BidDocs.readExcel(this)">' +
 
         '<div class="card card-pad" style="margin:14px 0;">' +
           '<div class="wa-step">Closing</div>' +
