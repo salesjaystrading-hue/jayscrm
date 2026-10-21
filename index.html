@@ -1710,6 +1710,7 @@ const Store = {
     try{
       const { data, error } = await sb.rpc('opp_merge_batch', { p_batch: batch });
       if(error) throw error;
+      this.oppCacheClear();
       return data;
     }catch(e){ console.error('opp batch merge failed', e); return null; }
   },
@@ -1886,6 +1887,7 @@ const Store = {
         if(page.length < PAGE_SIZE) break;
       }
       this.loadFailed['jays_oppprojects'] = false;
+      this.oppCacheSet(all);
       return all;
     }catch(e){
       console.error('opp load failed', e);
@@ -1907,7 +1909,32 @@ const Store = {
      Project Opportunity Finder right after logging in sees records
      appear progressively instead of staring at an empty list until the
      entire ~38k-row fetch finishes. */
+  /* Local copy of the project list (IndexedDB, this browser only). Logging in no longer downloads the whole table from Supabase every time -
+     that download was the main cause of the "Disk IO budget" warning. The copy is reused for OPP_CACHE_HOURS, then refreshed in the background;
+     "Reload from database" and every import / delete refresh it at once. */
+  OPP_CACHE_HOURS: 24,
+  _oppIdb(){
+    return new Promise((res,rej)=>{
+      try{ const q = indexedDB.open('jays_opp_cache', 1); q.onupgradeneeded = ()=>q.result.createObjectStore('kv'); q.onsuccess = ()=>res(q.result); q.onerror = ()=>rej(q.error); }catch(e){ rej(e); }
+    });
+  },
+  async oppCacheGet(){
+    try{ const db = await this._oppIdb(); return await new Promise((res)=>{ const r = db.transaction('kv').objectStore('kv').get('rows'); r.onsuccess = ()=>res(r.result||null); r.onerror = ()=>res(null); }); }catch(e){ return null; }
+  },
+  async oppCacheSet(rows){
+    try{ const db = await this._oppIdb(); await new Promise((res,rej)=>{ const tx = db.transaction('kv','readwrite'); tx.objectStore('kv').put({ rows, savedAt: Date.now(), n: rows.length }, 'rows'); tx.oncomplete = res; tx.onerror = ()=>rej(tx.error); }); }catch(e){ console.warn('opp cache save skipped', e); }
+  },
+  async oppCacheClear(){
+    try{ const db = await this._oppIdb(); await new Promise((res)=>{ const tx = db.transaction('kv','readwrite'); tx.objectStore('kv').delete('rows'); tx.oncomplete = res; tx.onerror = res; }); }catch(e){}
+  },
   async loadOppProjectsBackground(){
+    const c = await this.oppCacheGet();
+    if(c && Array.isArray(c.rows) && c.rows.length && (Date.now()-c.savedAt) < this.OPP_CACHE_HOURS*3600*1000){
+      this.data.oppProjects = c.rows; this.loadFailed['jays_oppprojects'] = false;
+      try{ if(typeof OppMatch!=='undefined') await OppMatch.warm(); }catch(e){ console.warn('opp warm', e); }
+      if(UI.currentView==='dashboard' || UI.currentView==='oppfinder') Router.render(UI.currentView);
+      return;
+    }
     const rows = await this.loadOppProjects((soFar)=>{
       this.data.oppProjects = soFar;
       if(UI.currentView==='dashboard' || UI.currentView==='oppfinder') Router.render(UI.currentView);
@@ -1925,6 +1952,7 @@ const Store = {
     try{
       const { error } = await sb.rpc('opp_replace_all', { p_rows: rows });
       if(error) throw error;
+      this.oppCacheClear();
       return true;
     }catch(e){ console.error('opp replace-all failed', e); return false; }
   },
@@ -16857,6 +16885,7 @@ const OppFinder = {
       UI.toast('Not deleted - see the message on the page');
       return;
     }
+    Store.oppCacheClear();
     try{ await sb.rpc('opp_sync_blob'); }catch(e){ console.warn('blob sync skipped', e); }
     res = { data:{ deleted: total } };
     const data = res.data, gone = new Set(rows), cnt = (data && data.deleted!=null) ? data.deleted : rows.length;
