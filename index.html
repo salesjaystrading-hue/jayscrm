@@ -1913,6 +1913,7 @@ const Store = {
       if(UI.currentView==='dashboard' || UI.currentView==='oppfinder') Router.render(UI.currentView);
     });
     this.data.oppProjects = rows;
+    try{ if(typeof OppMatch!=='undefined') await OppMatch.warm(); }catch(e){ console.warn('opp warm', e); }
     if(UI.currentView==='dashboard' || UI.currentView==='oppfinder') Router.render(UI.currentView);
   },
   /* Full replace - only for the rare occasions the ENTIRE collection
@@ -15590,6 +15591,432 @@ function oppKeyOf(r){
   if(name) return oppNorm(name+'|'+district+'|'+fund);
   return oppNorm(JSON.stringify(r)).slice(0,120);
 }
+/* =====================================================================
+   OPPORTUNITY MATCH ENGINE v2  (pure JS - no DOM / Store dependencies)
+   - word-boundary, plural-tolerant English matching (token n-grams)
+   - Malayalam matching (normalised text, compound-tolerant for long terms)
+   - automatic phrase -> two-word phrase -> individual-word expansion, each
+     variation linked to the keyword it came from and labelled by match type
+   - weighted, field-aware scoring; same evidence is never counted twice
+   - one project can match several business categories
+   Depends on (injected / defined earlier in the page): oppNormMl, oppSynonymMap
+===================================================================== */
+const OppEngine = (function(){
+  const VERSION = 2;
+  const ML_RE = /[ഀ-ൿ]/;
+  const STOP = new Set(['and','of','for','the','to','in','with','at','on','a','an','by','from','or','as','is','are','be','under','into','per']);
+  /* spelling variants seen in Kerala local-body data: rewritten to one form on BOTH sides */
+  const SPELL = [
+    [/\b(anganawadi|anganvadi|ankanawadi|ankanavadi|angnawadi|anganwady|anganwaadi|anganvady|ankanvadi|anganavadi|angan wadi|ankan wadi|anganwadies)s?\b/g,'anganwadi'],
+    [/\b(balling|bailing|baleing)\b/g,'baling'], [/\b(bailer|baler?s?)\b/g,'baler'],
+    [/\bdust bins?\b/g,'dustbin'], [/\bstreetlights?\b/g,'street light'], [/\bstreet lamps?\b/g,'street light'],
+    [/\bharitha ?kar[a-z]* ?sena[a-z]*\b/g,'haritha karma sena'],
+    [/\b(cc tv|c c t v)\b/g,'cctv'], [/\bu p s\b/g,'ups'], [/\bw atm\b/g,'water atm'], [/\bgymnasium\b/g,'gym'],
+    [/\b(computors?|computar)\b/g,'computer'], [/\blap top\b/g,'laptop'], [/\bfurnitures\b/g,'furniture'],
+    [/\b(equipments)\b/g,'equipment'], [/\bsanitory\b/g,'sanitary'], [/\bsolor\b/g,'solar'], [/\bpurifer\b/g,'purifier'],
+    [/\bwaste bin(s)?\b/g,'waste bin'], [/\bmini mcf\b/g,'mini mcf'], [/\bm c f\b/g,'mcf'], [/\bm r f\b/g,'mrf']
+  ];
+  /* words that are too common to be evidence on their own (still usable inside a full phrase) */
+  const GENERIC_DEFAULT = ['machine','machinery','equipment','supply','supplies','purchase','purchasing','procurement','tender','material','materials',
+    'system','unit','plant','facility','kit','set','device','tool','accessory','instrument','apparatus','light','water','waste','collection','management',
+    'public','office','school','college','hospital','kitchen','laboratory','institutional','industrial','technical','electronic','maintenance','children',
+    'child','safety','emergency','protective','fire','drinking','storage','plastic','organic','food','wet','dry','solid','power','energy','electrical',
+    'installation','processing','treatment','cleaning','hygiene','sanitation','sanitary','personal','product','item','service','services','project','new',
+    'work','works','scheme','centre','center','station','park','outdoor','exercise','fitness','physical','sports','playground','play','learning','teaching',
+    'educational','education','street','vending','filling','bottle','distribution','pressure','floor','hand','public','point','digital','student','students','high','low','three','two','vehicle','community','house','household','home','network',
+    'computer','bio','mini','life','response','paper','news','toilet','newspaper','automatic','manual','steel','wooden','standard','provision','providing','procure','procured','buying','acquisition','rescue','relief',
+    'flood','disaster','medical','data','information','technology','recycling','recovery','segregation','sorting','handling','disposal','compost',
+    'composting','bin','bins','container','tank','supplying','quotation','item','items','fund','grant','block','district','panchayat','local','body'];
+  /* single-word dictionary terms that are generic by themselves (scored as weak evidence even if configured) */
+  const GENERIC_TERM = ['machine','machinery','equipment','supply','supplies','purchase','purchasing','procurement','tender','material','materials','system','unit','plant','facility','kit','set','device','tool','accessory','instrument','apparatus','light','water','waste','collection','management','public','office','school','college','hospital','kitchen','project','work','works','scheme','service','services','item','items','product','fund','grant'];
+  /* single words that look specific but are ambiguous in Kerala project titles: treated as weak topics */
+  const AMBIG = new Set(['crusher','crushing','grinder','grinding','compression','mcf','mrf','എം സി എഫ്','എം ആർ എഫ്','എംസിഎഫ്','എംആർഎഫ്','switch','monitor','mouse','router','server','cable','battery','bench','data storage','tablet','notebook','stove','rope','ladder','broom','mop','screen','belt','hopper','feeder','trolley','conveyor']);
+  const ML_GENERIC = ['മെഷീൻ','മെഷിനറി','ഉപകരണം','ഉപകരണങ്ങൾ','ഉപകരണ','യന്ത്രം','വാങ്ങൽ','വാങ്ങല്','വിതരണം','പദ്ധതി','സംസ്കരണ','സംസ്കരണം','ശേഖരണ','ശേഖരണം','മാലിന്യ','സാധനങ്ങൾ','സംവിധാനം','കേന്ദ്രം','യൂണിറ്റ്'];
+  const P_TIERS = new Set(['Exact JAYS Product','Product Synonym','Exact Machine Type','MCF/MRF Specific','Malayalam Machine','Your Product Keywords','Product Phrase']);
+  const QUAL_TIERS = new Set(['Supporting Word','Machine Component / Qualifier']);   // single words here are generic qualifiers
+  const SX_TIERS = new Set(['Sector','Sub-sector']);   // only meaningful in the sector / sub-sector columns
+  const T_TIERS = new Set(['Strong Category','Malayalam','Topic Phrase','Supporting Word','Machine Component / Qualifier']);
+  /* points by class and field. Fields: name, exp, sector, ptype, fund */
+  const PTS = {
+    P:  {name:100, exp:75, sector:12, ptype:8, fund:4},   // exact product phrase / specific product term
+    B:  {name:55,  exp:40, sector:8,  ptype:5, fund:3},   // two-word piece of a longer product phrase
+    W:  {name:30,  exp:22, sector:6,  ptype:4, fund:2},   // product-specific individual word
+    T:  {name:45,  exp:32, sector:10, ptype:6, fund:3},   // multi-word topic phrase (e.g. waste management)
+    SX: {name:3,   exp:3,  sector:10, ptype:6, fund:2},   // sector / sub-sector vocabulary
+    T1: {name:25,  exp:18, sector:8,  ptype:5, fund:2},   // single-word topic
+    TB: {name:20,  exp:14, sector:5,  ptype:3, fund:1},   // two-word piece of a longer topic phrase
+    S:  {name:2,   exp:2,  sector:1,  ptype:0, fund:0},   // generic word (equipment, machine, light ...)
+    PRP:{name:5,   exp:4,  sector:1,  ptype:0, fund:0},   // procurement phrase (purchase of, supply and installation)
+    PRW:{name:1,   exp:1,  sector:0,  ptype:0, fund:0}    // procurement word (purchase, tender)
+  };
+  /* keywords that name a broad topic rather than a product: found, but ranked lower (Admin can change per keyword) */
+  const DEFAULT_LOW = ['anganwadi','അങ്കണവാടി','അംഗൻവാടി','drinking water','drinking water system','water tank','water storage tank','water treatment','public drinking water facility','electrification','office electrification','electrical installation','solid waste','waste collection','waste handling','waste treatment','waste processing','outdoor exercise','sports equipment','playground equipment','public health','social welfare equipment','electrical equipment','battery','cable'];
+  const MULT = {low:0.4, normal:1, high:1.3};
+  const BANDS = {H:75, M:45, P:15};
+  const FIELD_LABEL = {nameE:'English project name', nameM:'Malayalam project name', exp:'expenditure description', sector:'sector / sub-sector', ptype:'project type / category', fund:'fund description'};
+  const PRIORITY = ['MACHINE','WASTE','WATER','FITNESS','ANGANWADI','IT','FURNITURE','ELECTRICAL','DISASTER','HYGIENE','EQUIPMENT'];
+
+  function norm(s){
+    let t = (typeof oppNormMl==='function') ? oppNormMl(s) : String(s==null?'':s).toLowerCase();
+    t = t.replace(/[^a-z0-9ഀ-ൿ]+/g,' ').replace(/\s+/g,' ').trim();
+    for(let i=0;i<SPELL.length;i++) t = t.replace(SPELL[i][0], SPELL[i][1]);
+    return t;
+  }
+  function stem(t){
+    if(!/^[a-z]+$/.test(t)) return t;
+    if(t.length>4 && t.endsWith('ies')) return t.slice(0,-3)+'y';
+    if(t.length>3 && t.endsWith('s') && !/(ss|us|is)$/.test(t)) return t.slice(0,-1);
+    return t;
+  }
+  function toks(s){ return s ? s.split(' ').filter(Boolean).map(stem) : []; }
+  function nWords(s){ return s.split(' ').filter(Boolean).length; }
+
+  /* ---------- compile the dictionary into a fast lookup index ---------- */
+  function compile(groups, products, cfg, synMap){
+    cfg = cfg || {};
+    const disabled = new Set((cfg.disabled||[]).map(norm));
+    const noExpand = new Set((cfg.noExpand||[]).map(norm));
+    const generic = new Set(GENERIC_DEFAULT.map(w=>stem(norm(w))));
+    const genericTerm = new Set(GENERIC_TERM.map(w=>stem(norm(w))));
+    (cfg.generic||[]).forEach(w=>genericTerm.add(stem(norm(w))));
+    (cfg.nonGeneric||[]).forEach(w=>genericTerm.delete(stem(norm(w))));
+    (cfg.generic||[]).forEach(w=>generic.add(stem(norm(w))));
+    (cfg.nonGeneric||[]).forEach(w=>generic.delete(stem(norm(w))));
+    const mlGeneric = new Set(ML_GENERIC.map(norm));
+    const prio = {}; DEFAULT_LOW.forEach(w=>{ prio[norm(w)] = 'low'; }); Object.keys(cfg.priority||{}).forEach(k=>{ prio[norm(k)] = cfg.priority[k]; });
+    const eng = new Map();      // ngram key -> [entry]
+    const mlMap = new Map();    // first 3 chars -> [entry]
+    const srcInfo = [];         // for the keyword manager: [{src, cat, cls, tier, disabled, variations:[{text,kind}]}]
+    const seen = new Set();
+    let maxN = 1;
+    function add(key, e){
+      if(!key) return;
+      e.mult = MULT[e._prio] || 1; const dk = e.cat+'|'+e.src+'|'+key+'|'+e.cls;
+      if(seen.has(dk)) return; seen.add(dk);
+      if(ML_RE.test(key)){
+        if(key.length<3) return;
+        e.t = key; const k3 = key.slice(0,3);
+        (mlMap.get(k3) || mlMap.set(k3,[]).get(k3)).push(e);
+      } else {
+        const n = nWords(key); if(n>maxN) maxN = n;
+        (eng.get(key) || eng.set(key,[]).get(key)).push(e);
+      }
+    }
+    /* pass 1: which keywords of each category contain each word? (a word only becomes
+       evidence on its own when it is corroborated by several keywords, or is a keyword itself) */
+    const wordSrc = {};   // cat -> word -> Set(src)
+    const selfTerm = {};  // cat -> Set(single-word keywords)
+    function pass1(cat, rawWord, cls0){
+      if(cls0==='PR') return;
+      const w0 = norm(rawWord); if(!w0) return;
+      const isMl = ML_RE.test(w0);
+      const vt = isMl ? w0.split(' ').filter(Boolean) : toks(w0);
+      const ws = wordSrc[cat] || (wordSrc[cat] = {}), st = selfTerm[cat] || (selfTerm[cat] = new Set());
+      if(vt.length===1) st.add(vt[0]);
+      vt.forEach(t=>{ (ws[t] || (ws[t]=new Set())).add(w0); });
+    }
+    function classOfGroup(g){
+      if(g.category==='PURCHASE') return 'PR';
+      if(P_TIERS.has(g.tier)) return 'P';
+      if(SX_TIERS.has(g.tier)) return 'SX';
+      if(T_TIERS.has(g.tier)) return 'T';
+      const wt = Number(g.weight)||10; return wt>=18 ? 'P' : (wt>=12 ? 'T' : 'S');
+    }
+    (groups||[]).forEach(g=>{ if(g.off) return; const c0 = classOfGroup(g); (g.words||[]).forEach(w=>{ const wd=String(w).trim(); if(wd) pass1(g.category, wd, c0); }); });
+    (products||[]).forEach(p=>{ String(p.keywords||'').split(',').forEach(k=>{ k=k.trim(); if(k) pass1('PRODUCT', k, 'P'); }); });
+    const MIN_CORROBORATION = (cfg.minCorroboration>0) ? cfg.minCorroboration : 3;
+    const dfMax = (cfg.dfMax>0) ? cfg.dfMax : 0.005, df = cfg.df || null;
+    function wordOk(cat, wd, isMl){
+      if(isMl ? mlGeneric.has(wd) : generic.has(wd)) return false;
+      if(df && !isMl && (df.get(wd)||0) > dfMax) return false;
+      const st = selfTerm[cat]; if(st && st.has(wd)) return true;
+      const ws = wordSrc[cat]; return !!(ws && ws[wd] && ws[wd].size >= MIN_CORROBORATION);
+    }
+    function expandOne(cat, tier, rawWord, cls0, group){
+      const w0 = norm(rawWord); if(!w0) return;
+      const info = {src: String(rawWord).trim(), cat, cls: cls0, tier, off: disabled.has(w0), prio: prio[w0]||'normal', variations: []};
+      srcInfo.push(info);
+      if(info.off) return;
+      const isMl = ML_RE.test(w0);
+      const variants = [w0];
+      const syn = synMap && synMap(rawWord); if(syn) syn.forEach(v=>{ const nv = norm(v); if(nv && !variants.includes(nv)) variants.push(nv); });
+      variants.forEach(v=>{
+        const vtoks = isMl ? v.split(' ').filter(Boolean) : toks(v);
+        const key = isMl ? v : vtoks.join(' ');
+        const n = vtoks.length;
+        let cls = cls0;
+        if(cls==='PR'){ cls = (n>=2 || isMl) ? 'PRP' : 'PRW'; }
+        else if(cls==='P' && AMBIG.has(key)) cls = 'T1';
+        else if(n===1){
+          if(!isMl && genericTerm.has(key)) cls = 'S';
+          else if(isMl && mlGeneric.has(key)) cls = 'S';
+          else if(cls==='P' && AMBIG.has(key)) cls = 'T1';
+          else if(cls==='T') cls = QUAL_TIERS.has(tier) ? 'S' : 'T1';
+        }
+        add(key, {src:info.src, cat, cls, kind:'phrase', _prio:info.prio});
+        info.variations.push({text:key, kind:'phrase'});
+        // expansion: two-word pieces (phrases of 3+ words) and corroborated individual words
+        const canExpand = !noExpand.has(w0) && (cls0==='P' || cls0==='T') && n>=2;
+        if(!canExpand) return;
+        if(n>=3){
+          for(let i=0;i<n-1;i++){
+            const a = vtoks[i], b = vtoks[i+1];
+            if(STOP.has(a)||STOP.has(b)) continue;
+            const ok = wordOk(cat,a,isMl) || wordOk(cat,b,isMl);
+            if(!ok) continue;
+            add(a+' '+b, {src:info.src, cat, cls: cls0==='P' ? 'B' : 'TB', kind:'bigram', _prio:info.prio});
+            info.variations.push({text:a+' '+b, kind:'two-word'});
+          }
+        }
+        if(cls0!=='P') return;       // topic phrases expand to two-word pieces only
+        vtoks.forEach(wd=>{
+          if(STOP.has(wd) || wd.length<(isMl?4:3) || /^\d+$/.test(wd)) return;
+          const stSelf = selfTerm[cat]; if(stSelf && stSelf.has(wd)){ info.variations.push({text:wd, kind:'word - has its own keyword entry'}); return; }
+          if(!wordOk(cat, wd, isMl)){ info.variations.push({text:wd, kind:'word - skipped (too common or not specific)'}); return; }
+          add(wd, {src:info.src, cat, cls:'W', kind:'word', _prio:info.prio});
+          info.variations.push({text:wd, kind:'word'});
+        });
+      });
+    }
+    (groups||[]).forEach(g=>{
+      if(g.off) return;
+      (g.words||[]).forEach(w=>{
+        const wd = String(w).trim(); if(!wd) return;
+        expandOne(g.category, g.tier, wd, classOfGroup(g), g);
+      });
+    });
+    /* the free-text "Your Product Keywords" (Products tab) are product terms too */
+    (products||[]).forEach(p=>{
+      String(p.keywords||'').split(',').forEach(k=>{ k=k.trim(); if(k) expandOne('PRODUCT','Your Product Keywords',k,'P',null); });
+    });
+    return {eng, mlMap, maxN: Math.min(maxN,5), srcInfo, generic, version: ++_ver, cfg};
+  }
+  let _ver = 0;
+
+  /* ---------- match one project row ---------- */
+  function fieldsOf(r){
+    return [
+      ['nameE','name', norm(r['Project Name Eng'])],
+      ['nameM','name', norm(r['Project Name Mal'])],
+      ['exp','exp', norm(r['Expenditure Description'])],
+      ['sector','sector', norm((r['Sector']||'')+' '+(r['Sub Sector']||''))],
+      ['ptype','ptype', norm((r['Project Type']||'')+' '+(r['Project Category']||'')+' '+(r['Sector Type']||''))],
+      ['fund','fund', norm(r['Fund Description'])]
+    ];
+  }
+  const CONSTRUCTION = new Set(['construction','constructions','renovation','rennovation','renovating','repair','repairing','repairs','maintenance','maintanance','maintanence','building','reconstruction','retarring','concreting','completion','roofing','flooring','extension','improvement','improvements','upgradation','rehabilitation','restoration','amc','rent']);
+  function matchRow(idx, r){
+    const raw = {};   // field|cat -> [hit]
+    function hit(e, fkey, fcls, text, a, b){
+      const pts = PTS[e.cls][fcls]*e.mult; if(!pts) return;
+      const k = fkey+'|'+e.cat; (raw[k] || (raw[k]=[])).push({cat:e.cat, src:e.src, cls:e.cls, kind:e.kind, pts, field:fkey, fcls, text, a, b});
+    }
+    const F = fieldsOf(r);
+    for(let f=0; f<F.length; f++){
+      const fkey = F[f][0], fcls = F[f][1], text = F[f][2];
+      if(!text) continue;
+      const ts = toks(text);
+      for(let i=0;i<ts.length;i++){
+        let key = '';
+        for(let n=1;n<=idx.maxN && i+n<=ts.length;n++){
+          key = n===1 ? ts[i] : key+' '+ts[i+n-1];
+          const list = idx.eng.get(key);
+          if(list) for(let j=0;j<list.length;j++) hit(list[j], fkey, fcls, key, i, i+n);
+        }
+      }
+      if(ML_RE.test(text) && idx.mlMap.size){
+        for(let p=0;p<=text.length-3;p++){
+          const list = idx.mlMap.get(text.substr(p,3));
+          if(!list) continue;
+          for(let j=0;j<list.length;j++){
+            const e = list[j];
+            if(text.startsWith(e.t,p) && (e.t.length>=5 || p===0 || text.charCodeAt(p-1)===32)) hit(e, fkey, fcls, e.t, -p-1, -(p+e.t.length)-1);
+          }
+        }
+      }
+    }
+    // drop evidence swallowed by a stronger, longer match in the same field (a word inside its own phrase)
+    const ev = new Map();   // cat|text -> best evidence (same words are never counted twice)
+    Object.keys(raw).forEach(k=>{
+      const list = raw[k].sort((x,y)=> y.pts-x.pts || (Math.abs(y.b-y.a)-Math.abs(x.b-x.a)));
+      const kept = [];
+      list.forEach(h=>{
+        const lo = Math.min(h.a,h.b), hi = Math.max(h.a,h.b), ml = h.a<0;
+        if(kept.some(q=>(q.a<0)===ml && Math.min(q.a,q.b)<=lo && Math.max(q.a,q.b)>=hi)) return;
+        kept.push(h);
+        const ek = h.cat+'|'+h.text+'|'+h.field; const cur = ev.get(ek);
+        if(!cur || h.pts>cur.pts) ev.set(ek, h);
+      });
+    });
+    // construction / maintenance projects are not equipment opportunities: soft evidence is halved (exact product phrases are not)
+    const nameToks = new Set(toks(norm(r['Project Name Eng'])));
+    let construction = false; nameToks.forEach(t=>{ if(CONSTRUCTION.has(t)) construction = true; });
+    // procurement intent: purchase / supply wording in the project name or expenditure description
+    let intent = false; ev.forEach(x=>{ if(x.cat==='PURCHASE' && x.cls==='PRP' && (x.fcls==='name'||x.fcls==='exp')) intent = true; });
+    ev.forEach(x=>{
+      if(x.cat==='PURCHASE' || x.cls==='P' || x.cls==='S' || x.cls==='SX') return;
+      if(construction && !intent) x.pts = x.pts*0.5; else if(intent && !construction) x.pts = x.pts*1.3;
+    });
+    // one entry per (category, keyword): best field wins
+    const best = new Map();
+    ev.forEach(x=>{ const k = x.cat+'|'+x.src; const c = best.get(k); if(!c || x.pts>c.pts || (x.pts===c.pts && x.fcls==='name' && c.fcls!=='name')) best.set(k,x); });
+    ev.clear(); best.forEach((v,k)=>ev.set(k,v));
+    // group by category
+    const byCat = {};
+    ev.forEach(x=>{ (byCat[x.cat] || (byCat[x.cat]=[])).push(x); });
+    const cats = [];
+    let prTop = 0, prIntent = false;
+    Object.keys(byCat).forEach(c=>{
+      const list = byCat[c].sort((a,b)=>b.pts-a.pts);
+      if(c==='PURCHASE'){
+        prTop = list[0].pts;
+        prIntent = list.some(x=>(x.cls==='PRP') && (x.fcls==='name'||x.fcls==='exp'));
+        return;
+      }
+      let s = list[0].pts; for(let i=1;i<list.length;i++) s += list[i].pts*0.25;
+      s = Math.min(150, s);
+      const strong = list.some(x=>x.fcls==='name'||x.fcls==='exp');
+      if(!strong) s = Math.min(s, BANDS.P-1);      // sector / type / fund text alone is only ever "weak"
+      cats.push({c, s: Math.round(s*10)/10, top: list[0], n: list.length, ev: list.slice(0,6)});
+    });
+    cats.sort((a,b)=>b.s-a.s);
+    const bestProd = cats.length ? cats[0] : null;
+    const bestScore = bestProd ? bestProd.s : 0;
+    // PURCHASE: procurement intent is reported, but product relevance is judged separately
+    const impl = String(r['Impl mode']||'').toLowerCase().includes('tender');
+    const hasPr = prTop>0 || impl;
+    if(hasPr){
+      let s = Math.max(prTop, prIntent?BANDS.P:0, impl?1:0) + (prIntent ? 0.8*bestScore : 0);
+      s = Math.round(Math.min(150,s)*10)/10;
+      const top = byCat.PURCHASE ? byCat.PURCHASE.sort((a,b)=>b.pts-a.pts)[0] : {src:'Implementation mode: Tender', cls:'PRW', kind:'phrase', pts:1, field:'meta', fcls:'meta', text:'tender'};
+      cats.push({c:'PURCHASE', s, top, n: byCat.PURCHASE ? byCat.PURCHASE.length : 1, ev: byCat.PURCHASE ? byCat.PURCHASE.slice(0,4) : [top], intent: prIntent});
+    }
+    cats.forEach(x=>{
+      x.b = x.c==='PURCHASE' ? (bestScore>=BANDS.M && prIntent ? bandOf(x.s) : (prIntent ? (x.s>=BANDS.P?bandOf(x.s):'P') : 'W')) : bandOf(x.s);
+    });
+    cats.sort((a,b)=>b.s-a.s);
+    const prodCats = cats.filter(x=>x.c!=='PURCHASE');
+    const okProd = prodCats.filter(x=>x.s>=BANDS.P);
+    let primary = 'OTHER';
+    if(okProd.length){
+      const top = okProd[0].s;
+      const near = okProd.filter(x=>x.s>=top-0.01).map(x=>x.c);
+      primary = PRIORITY.find(p=>near.includes(p)) || okProd[0].c;
+    } else if(prIntent) primary = 'PURCHASE';
+    return {cats, primary, best: bestProd, bestScore, bestBand: bestProd?bandOf(bestScore):'-', prIntent, prTop, unmatched: okProd.length===0, v: idx.version};
+  }
+  function bandOf(s){ return s>=BANDS.H ? 'H' : (s>=BANDS.M ? 'M' : (s>=BANDS.P ? 'P' : (s>0 ? 'W' : '-'))); }
+  const BAND_NAME = {H:'High', M:'Medium', P:'Possible', W:'Weak', '-':'None'};
+  const BAND_RANK = {H:4, M:3, P:2, W:1, '-':0};
+  const REL_MIN = {high:4, medium:3, possible:2, all:1};
+
+  function explain(cat, ev){
+    ev = ev || cat.top; if(!ev) return '';
+    const fieldName = FIELD_LABEL[ev.field] || 'project record';
+    const shown = (ev.text && ev.text!==ev.src.toLowerCase()) ? ev.text : ev.src;
+    const mt = ev.kind==='bigram' ? 'two-word phrase' : (ev.kind==='word' ? 'individual word' : 'exact phrase');
+    if(ev.field==='meta') return 'Implementation mode is Tender (procurement context only).';
+    if(ev.cls==='PRP'||ev.cls==='PRW') return 'Matched procurement wording "'+shown+'" in the '+fieldName+'.';
+    if(ev.cls==='S') return 'Only a generic word "'+shown+'" matched in the '+fieldName+' (weak evidence).';
+    if(ev.fcls==='sector'||ev.fcls==='ptype'||ev.fcls==='fund') return 'Supporting match: '+mt+' "'+shown+'" in the '+fieldName+(ev.src!==shown?' (from keyword "'+ev.src+'")':'')+'.';
+    const ml = ev.field==='nameM' ? ' (Malayalam)' : '';
+    return 'Matched '+mt+' "'+shown+'" in the '+fieldName+ml+(ev.src.toLowerCase()!==String(shown).toLowerCase()?' (variation of keyword "'+ev.src+'")':'')+'.';
+  }
+  function matchTypeOf(ev){ return !ev ? '' : (ev.fcls==='sector'||ev.fcls==='ptype'||ev.fcls==='fund') ? 'supporting field' : (ev.cls==='PRP'||ev.cls==='PRW') ? 'procurement' : (ev.cls==='S' ? 'generic word' : (ev.kind==='bigram' ? 'two-word phrase' : ev.kind==='word' ? 'individual word' : 'exact phrase')); }
+
+  return {VERSION, DEFAULT_LOW, MULT, BANDS, PTS, BAND_NAME, BAND_RANK, REL_MIN, FIELD_LABEL, GENERIC_DEFAULT, ML_GENERIC, AMBIG, SPELL, PRIORITY,
+          norm, stem, toks, compile, matchRow, bandOf, explain, matchTypeOf, fieldsOf};
+})();
+
+/* Expanded category keyword dictionary (v2). p = specific product terms, t = topic phrases,
+   ml = Malayalam product terms, mlt = Malayalam topic terms. Merged INTO the saved dictionary
+   (nothing existing is replaced); every entry can later be disabled/edited by an Admin. */
+const OPP_DICT_V2 = {
+  WASTE: {
+    p: ['composter','composters','bio composter','biocomposter','biodigester','bio digester','waste digester','kitchen waste digester','household composter','kitchen bin','biobin','portable composter','waste collection bin','waste collection bins','collection bin','collection bins','dustbin','dustbins','garbage bin','garbage bins','waste bin','waste bins','compost unit','composting unit','pipe compost','pot compost','vermicompost','biogas plant','shredding machine','shredder','baling machine','baling press','waste baler','waste compactor','waste processing machine','waste processing equipment','waste management equipment','waste treatment plant','ring compost','bottle booth','waste disposal unit'],
+    t: ['household composting','compost pit','organic manure unit','waste collection','solid waste','solid waste management','waste segregation','waste sorting','waste processing','waste treatment','waste handling','plastic waste','organic waste','biodegradable waste','non biodegradable waste','non-biodegradable waste','food waste','wet waste','dry waste','composting','material collection facility','material recovery facility','MCF','MRF','Harithakarmasena','Haritha Karma Sena','Haritha Karmasena'],
+    ml: ['മാലിന്യ സംസ്കരണ ഉപകരണങ്ങൾ','വേസ്റ്റ് ബിൻ'],
+    mlt: ['മാലിന്യം','മാലിന്യങ്ങൾ','മാലിന്യ സംസ്കരണം','ഖരമാലിന്യ പരിപാലനം','മാലിന്യ ശേഖരണം','ജൈവ മാലിന്യം','അജൈവ മാലിന്യം','ഹരിതകർമ്മസേന','ഹരിത കർമ്മ സേന']
+  },
+  WATER: {
+    p: ['water ATM','water ATMs','water purifier','water purification unit','water purification plant','water filter','water filtration','RO system','reverse osmosis','water dispenser','water cooler','water vending machine','drinking water vending machine','water kiosk','bottle filling station','water treatment plant'],
+    t: ['drinking water','drinking water system','water purification','water treatment','water supply equipment','water storage tank','water tank','water distribution equipment','public drinking water facility'],
+    ml: ['വാട്ടർ എടിഎം','വാട്ടർ പ്യൂരിഫയർ','ജലശുദ്ധീകരണ ഉപകരണം'],
+    mlt: ['കുടിവെള്ളം','കുടിവെള്ള സംവിധാനം','ജലശുദ്ധീകരണം']
+  },
+  FITNESS: {
+    p: ['open gym','gym equipment','open gym equipment','outdoor gym','outdoor gym equipment','outdoor fitness equipment','fitness equipment','exercise equipment','exercise station','multi gym','multi-gym equipment','public gym','public fitness equipment','fitness station','fitness park','fitness centre equipment','physical fitness equipment'],
+    t: ['outdoor exercise','sports equipment','playground equipment'],
+    ml: ['ഓപ്പൺ ജിം','ഓപ്പൺ ജിം ഉപകരണങ്ങൾ','വ്യായാമ ഉപകരണങ്ങൾ'],
+    mlt: ['കായിക ഉപകരണങ്ങൾ']
+  },
+  ANGANWADI: {
+    p: ['anganwadi equipment','anganwadi furniture','anganwadi utensils','anganwadi kitchen equipment','anganwadi kitchen utensils','anganwadi supplies','preschool equipment','nursery equipment','kindergarten equipment','childcare equipment','children furniture','children table','children chair','baby chair','educational toys','learning materials','teaching materials','educational materials','play materials','play equipment','kitchen utensils','cooking utensils','gas stove','cooking equipment','steel utensils','storage almirah','children learning equipment','child development equipment'],
+    t: ['anganwadi','social welfare equipment'],
+    ml: ['അങ്കണവാടി ഉപകരണങ്ങൾ','അങ്കണവാടി ഫർണിച്ചർ','പാചക പാത്രങ്ങൾ','പഠനോപകരണങ്ങൾ','കളി ഉപകരണങ്ങൾ'],
+    mlt: ['അങ്കണവാടി','അംഗൻവാടി']
+  },
+  IT: {
+    p: ['xerox machine','photo copier','note counting machine','tablet computer','LED TV','smart tv','sound system','PA system','public address system','amplifier','desktop computer','desktop','computer system','computer systems','laptop','notebook computer','computer monitor','printer','multifunction printer','laser printer','inkjet printer','scanner','barcode scanner','UPS','online UPS','offline UPS','computer accessories','computer peripherals','keyboard','webcam','projector','digital projector','interactive panel','interactive display','smart board','CCTV','CCTV camera','surveillance camera','network camera','networking equipment','network switch','network router','Wi-Fi access point','biometric device','biometric attendance system','fingerprint scanner','computer workstation','external hard disk','hard disk','IT equipment','IT accessories','information technology equipment','computer','photocopier'],
+    t: ['server','monitor','mouse','router','switch','data storage'],
+    ml: ['കമ്പ്യൂട്ടർ','ലാപ്ടോപ്പ്','പ്രിന്റർ','സ്കാനർ','കമ്പ്യൂട്ടർ ഉപകരണങ്ങൾ','സിസിടിവി','യുപിഎസ്'],
+    mlt: []
+  },
+  FURNITURE: {
+    p: ['furniture','office furniture','institutional furniture','classroom furniture','college furniture','hostel furniture','anganwadi furniture','hospital furniture','laboratory furniture','library furniture','steel furniture','wooden furniture','school furniture','office table','computer table','writing table','dining table','conference table','office chair','visitor chair','student chair','student desk','school desk','dual desk','bench','benches','school bench','steel rack','storage rack','book rack','bookshelf','cupboard','storage cabinet','filing cabinet','almirah','steel almirah','wooden almirah','reception counter','workstation furniture','furniture supply','furniture purchase','table','tables','chair','chairs','desk','desks'],
+    t: [],
+    ml: ['ഫർണിച്ചർ','മേശ','കസേര','ബെഞ്ച്','അലമാര','സ്കൂൾ ഫർണിച്ചർ','ഓഫീസ് ഫർണിച്ചർ'],
+    mlt: []
+  },
+  ELECTRICAL: {
+    p: ['mini mast light','minimast light','mast light','mast lights','low mast light','LED street light','solar lamp','solar lantern','solar fence','solar fencing','LED light','LED lights','street light','street lights','solar street light','solar street lights','solar light','solar lighting','solar panel','solar panels','solar power system','solar energy system','solar inverter','solar pump','solar equipment','high mast light','high mast lighting','flood light','LED flood light','tube light','electrical supplies','electrical accessories','street lighting','lighting equipment','energy efficient lighting','inverter','inverter battery','power inverter','electrical panel','distribution board','switchgear','wiring accessories','electric motor','transformer','street light installation'],
+    t: ['street main','electrical equipment','electrical installation','electrification','office electrification','battery','cable'],
+    ml: ['തെരുവ് വിളക്ക്','സോളാർ ലൈറ്റ്','സോളാർ പാനൽ','വൈദ്യുത ഉപകരണങ്ങൾ','എൽഇഡി ലൈറ്റ്'],
+    mlt: ['വൈദ്യുതീകരണം']
+  },
+  DISASTER: {
+    p: ['disaster management equipment','disaster response equipment','emergency equipment','emergency supplies','rescue equipment','rescue tools','rescue kit','first aid box','first aid kit','medical emergency kit','safety equipment','protective equipment','life jacket','life jackets','life buoy','rescue rope','rescue ladder','emergency light','emergency lamp','flood rescue equipment','disaster relief kit','safety kit','fire safety equipment','fire extinguisher','personal protective equipment','PPE','emergency kit'],
+    t: ['disaster management','disaster preparedness','emergency response','disaster response','flood relief materials','emergency shelter supplies','flood equipment','flood rescue'],
+    ml: ['രക്ഷാ ഉപകരണങ്ങൾ','സുരക്ഷാ ഉപകരണങ്ങൾ','പ്രഥമ ശുശ്രൂഷ കിറ്റ്'],
+    mlt: ['ദുരന്ത നിവാരണം','ദുരന്ത മാനേജ്മെന്റ്']
+  },
+  HYGIENE: {
+    p: ['menstrual cup','menstrual cups','sanitary pad','sanitary pads','she pad','sanitary napkin incinerator','sanitation equipment','sanitation supplies','hygiene products','hygiene kit','cleaning equipment','cleaning machine','cleaning materials','cleaning supplies','floor cleaning machine','pressure washer','vacuum cleaner','disinfection equipment','disinfectant','spraying equipment','sprayer','sanitary napkin','sanitary napkin vending machine','sanitary napkin destroyer','incinerator','napkin destroyer','handwashing station','handwash station','hand wash unit','public toilet equipment','toilet cleaning equipment','toilet accessories','soap dispenser','liquid soap dispenser','sanitary supplies','personal hygiene kit','cleaning tools','brooms','mops','garbage collection tools','sanitation worker equipment','hand sanitizer'],
+    t: ['sanitation','hygiene','public health','sanitation worker','sanitation workers'],
+    ml: ['ശുചീകരണ ഉപകരണങ്ങൾ','ശുചിത്വ ഉപകരണങ്ങൾ','സാനിറ്ററി നാപ്കിൻ','നാപ്കിൻ ഡിസ്ട്രോയർ'],
+    mlt: ['ശുചിത്വം','ശുചീകരണം','ഹൈജീൻ']
+  },
+  EQUIPMENT: {
+    p: [],
+    t: ['equipment supply','equipment purchase','equipment procurement','supply of equipment','purchase of equipment','purchase of materials','purchase of tools','machinery supply','institutional equipment','office equipment','school equipment','college equipment','laboratory equipment','hospital equipment','kitchen equipment','industrial equipment','technical equipment','electronic equipment','maintenance equipment','tools and equipment','equipment and accessories','equipment and supplies','essential supplies','office supplies','school supplies','institutional supplies','materials supply'],
+    ml: [],
+    mlt: ['ഉപകരണങ്ങൾ വാങ്ങൽ','സാധനങ്ങൾ വിതരണം','ഉപകരണ വിതരണം']
+  },
+  MACHINE: {
+    p: ['bailing','baling','MCF equipment','MRF equipment','MCF machinery','MRF machinery','waste processing machinery','waste processing machine','waste processing equipment','waste segregation machine','waste sorting machine','waste shredder','plastic shredder','plastic shredding machine','baling machine','baling press','waste baler','hydraulic baler','waste compactor','compactor machine','conveyor belt','material handling equipment','sorting conveyor','organic waste processing machine','organic waste converter','composting machine','composting equipment','biowaste processing equipment','plastic recycling machine','recycling equipment','recycling machinery','sanitary napkin destroyer','incinerator','bottle crushing machine','bottle booth','waste collection machinery','solid waste processing plant','solid waste management equipment'],
+    t: ['material collection facility','material recovery facility'],
+    ml: ['MCF ഉപകരണങ്ങൾ','MRF ഉപകരണങ്ങൾ','മാലിന്യ സംസ്കരണ യന്ത്രം','മാലിന്യ സംസ്കരണ ഉപകരണങ്ങൾ','ബെയിലിംഗ് മെഷീൻ','ഷ്രെഡർ'],
+    mlt: []
+  },
+  PURCHASE: {
+    pr: ['procurement of','procurement','supply of','provision of','purchase and installation','supply and installation','supply and commissioning','procure','procured','buying','acquisition of equipment','equipment purchase','machinery purchase','materials purchase','product supply','item supply','tender for supply','purchase of','purchase','purchasing','supply','providing','tender','വാങ്ങല്','വാങ്ങുന്നതിനായി','വാങ്ങുന്നതിന്','വിതരണത്തിനായി','വിതരണം ചെയ്യൽ','വാങ്ങൽ','വിതരണം']
+  }
+};
+/* Words discovered in the real data and added to the dictionary after reviewing the CSV (see report) */
+const OPP_DICT_V2_DISCOVERED = { /* filled in after data review */ };
+function oppDictV2Groups(){
+  const out = [];
+  Object.keys(OPP_DICT_V2).forEach(cat=>{
+    const d = OPP_DICT_V2[cat];
+    if(d.p && d.p.length) out.push({tier:'Product Phrase', weight:22, category:cat, words:d.p.slice(), v2:true});
+    if(d.t && d.t.length) out.push({tier:'Topic Phrase', weight:15, category:cat, words:d.t.slice(), v2:true});
+    if(d.ml && d.ml.length) out.push({tier:'Product Phrase', weight:22, category:cat, words:d.ml.slice(), v2:true, lang:'ml'});
+    if(d.mlt && d.mlt.length) out.push({tier:'Topic Phrase', weight:15, category:cat, words:d.mlt.slice(), v2:true, lang:'ml'});
+    if(d.pr && d.pr.length) out.push({tier:'Procurement Intent', weight:12, category:cat, words:d.pr.slice(), v2:true});
+  });
+  return out;
+}
+
 /* Smart Opportunity Score 2.0 - a weighted blend instead of raw keyword
    counting, so the number actually reflects how promising a project is,
    not just how many trigger words happen to appear in its text:
@@ -15610,109 +16037,132 @@ function oppKeyOf(r){
    "Disaster Management" key existed inside its raw_data dump. */
 const OPP_NON_CONTENT_FIELDS = new Set(['id','score','type','hits','scoreBreakdown','opportunity_score','opportunity_type',
   'matched_keywords','raw_data','updated_at','created_at','source_status']);
-function oppClassify(r){
-  const text = Object.entries(r).filter(([k])=>!OPP_NON_CONTENT_FIELDS.has(k)).map(([,v])=>oppNormMl(v)).join(' ');
-  const groups = (Store.data.oppKeywordGroups && Store.data.oppKeywordGroups.length) ? Store.data.oppKeywordGroups : OPP_DEFAULT_KEYWORD_GROUPS;
-
-  const matched = [];               // [{word, weight, tier, category}]
-  const categoryWeights = {};       // category -> summed weight, to pick the dominant type
-  groups.forEach(g=>{
-    (g.words||[]).forEach(w=>{
-      const wn = oppNormMl(w);
-      if(wn && oppTextHas(text, w)){
-        matched.push({word:w, weight:g.weight, tier:g.tier, category:g.category});
-        categoryWeights[g.category] = (categoryWeights[g.category]||0) + g.weight;
-      }
+/* =====================================================================
+   OppMatch - runtime wrapper around OppEngine: builds the index from the saved
+   dictionary + built-in v2 dictionary + Admin settings, caches one match result
+   per project (never saved to the database), and keeps each row's score / type /
+   hits consistent with the current engine.
+===================================================================== */
+const OPP_JUNK_WORDS = new Set(['baili','conv']);   // truncated entries found in the saved dictionary (matched "convention", "conveyance" ...)
+const OppMatch = {
+  idx: null, sig: '', cache: new WeakMap(), synced: new WeakMap(), df: null, dfN: 0, warming: false,
+  cfg(){ return (Store.data.settings && Store.data.settings.oppMatchCfg) || {}; },
+  savedGroups(){
+    const g = Store.data.oppKeywordGroups;
+    return (g && g.length) ? g : OPP_DEFAULT_KEYWORD_GROUPS;
+  },
+  /* saved dictionary (nothing removed, except the two truncated junk entries) + built-in v2 dictionary (only words not already present) */
+  groups(){
+    const have = new Set(), out = [];
+    this.savedGroups().forEach(g=>{
+      const words = (g.words||[]).filter(w=>!OPP_JUNK_WORDS.has(String(w).trim().toLowerCase()));
+      words.forEach(w=>have.add(g.category+'|'+OppEngine.norm(w)));
+      out.push(Object.assign({}, g, {words}));
     });
-  });
-  // Your own added keywords (Products tab) count too, at Product-Synonym weight.
-  (Store.data.oppProducts||[]).forEach(p=>{
-    String(p.keywords||'').split(',').forEach(k=>{
-      const wn = oppNormMl(k);
-      if(wn && oppTextHas(text, k)){
-        matched.push({word:k.trim(), weight:18, tier:'Your Product Keywords', category:'PRODUCT'});
-        categoryWeights.PRODUCT = (categoryWeights.PRODUCT||0) + 18;
-      }
+    oppDictV2Groups().forEach(g=>{
+      const words = g.words.filter(w=>!have.has(g.category+'|'+OppEngine.norm(w)));
+      words.forEach(w=>have.add(g.category+'|'+OppEngine.norm(w)));
+      if(words.length) out.push(Object.assign({}, g, {words}));
     });
-  });
-
-  // CRITICAL: if nothing actually matched, the project has no demonstrated
-  // relevance at all - fund value, a near deadline or "has a district" are
-  // NOT substitutes for that, so none of them get to contribute. This is
-  // what stops an unrelated project (e.g. road construction) from scoring
-  // well just because it's large and closing soon.
-  if(!matched.length){
-    return { score:0, type:'OTHER', hits:[],
-      scoreBreakdown:{product:0, sector:0, subSector:0, procurement:0, location:0, fund:0, deadline:0, history:0, zeroExpenditure:0} };
+    return out;
+  },
+  /* words that appear in a large share of all projects cannot be evidence on their own */
+  computeDF(){
+    const rows = Store.data.oppProjects || [], N = rows.length;
+    if(N < 5000){ this.df = null; this.dfN = 0; return null; }
+    if(this.df && N < this.dfN * 2) return this.df;
+    const cnt = new Map();
+    for(let i=0;i<N;i++){
+      const r = rows[i], seen = new Set();
+      const t = OppEngine.toks(OppEngine.norm((r['Project Name Eng']||'')+' '+(r['Expenditure Description']||'')));
+      for(let k=0;k<t.length;k++){ const w = t[k]; if(w.length>2 && !seen.has(w)){ seen.add(w); cnt.set(w,(cnt.get(w)||0)+1); } }
+    }
+    const df = new Map(); cnt.forEach((c,w)=>{ const f = c/N; if(f>0.005) df.set(w,f); });
+    this.df = df; this.dfN = N; return df;
+  },
+  index(){
+    const df = this.computeDF();
+    const cfg = this.cfg(), grp = this.savedGroups(), prods = Store.data.oppProducts || [];
+    const syn = String((Store.data.settings||{}).oppSynonyms||'');
+    const sig = JSON.stringify([grp.length, grp.reduce((s,g)=>s+(g.words||[]).length,0), cfg, prods, syn, this.dfN]);
+    if(this.idx && sig===this.sig) return this.idx;
+    this.idx = OppEngine.compile(this.groups(), prods, Object.assign({}, cfg, {df}), OppMatch.synFn);
+    this.sig = sig; return this.idx;
+  },
+  synFn(w){ const m = oppSynonymMap()[oppNormMl(w)]; return m && m.length>1 ? m : null; },
+  invalidate(){ this.idx = null; this.sig = ''; },
+  compute(r){ return OppEngine.matchRow(this.index(), r); },
+  /* cached match for a row; also refreshes the row's score / type / hits in memory so every screen agrees */
+  get(r){
+    const idx = this.index();
+    let m = this.cache.get(r);
+    if(!m || m.v !== idx.version){
+      m = OppEngine.matchRow(idx, r); this.cache.set(r, m);
+      try{ Object.assign(r, oppScoreFrom(r, m)); }catch(e){ console.warn('opp score', e); }
+    }
+    return m;
+  },
+  hitsOf(m){
+    const seen = new Set(), out = [];
+    m.cats.filter(c=>c.c!=='PURCHASE').concat(m.cats.filter(c=>c.c==='PURCHASE')).forEach(c=>{
+      c.ev.forEach(e=>{ const k = e.src.toLowerCase(); if(!seen.has(k) && e.pts>=1 && out.length<15){ seen.add(k); out.push(e.src); } });
+    });
+    return out;
+  },
+  /* chunked, so a 100k-row list never freezes the page */
+  warm(progress){
+    if(this.warming) return this.warming;
+    const rows = Store.data.oppProjects || [];
+    this.warming = new Promise(resolve=>{
+      let i = 0; const SIZE = 1500;
+      const step = ()=>{
+        const end = Math.min(rows.length, i+SIZE);
+        for(; i<end; i++) this.get(rows[i]);
+        if(progress) progress(i, rows.length);
+        if(i < rows.length) setTimeout(step, 0); else { this.warming = false; resolve(rows.length); }
+      };
+      step();
+    });
+    return this.warming;
   }
+};
 
-  const dominant = Object.entries(categoryWeights).sort((a,b)=>b[1]-a[1])[0];
-  const type = (dominant && dominant[0]!=='PRODUCT') ? dominant[0] : (dominant ? 'EQUIPMENT' : 'OTHER');
-  const isWasteText = t => t.includes('waste') || t.includes('\u0d2e\u0d3e\u0d32\u0d3f\u0d28\u0d4d\u0d2f');
-
-  // 1) Product / keyword match - 30% cap. Summed matched weight, so one
-  //    exact-product hit (25) plus a supporting word (10) clearly outweighs
-  //    five generic "equipment"/"supply" mentions (10 each capped low).
-  const rawWeightSum = matched.reduce((s,m)=>s+m.weight,0);
-  const productScore = Math.min(30, rawWeightSum * 0.5);
-
-  // 2) Sector - 15% (only credited when it's actually a waste-type sector; no more "any text present" credit)
-  const sector = oppNorm(r['Sector']);
-  const sectorScore = isWasteText(sector) ? 15 : 0;
-
-  // 3) Sub-sector - 10%
-  const subSector = oppNorm(r['Sub Sector']);
-  const subSectorScore = isWasteText(subSector) ? 10 : 0;
-
-  // 4) Procurement wording - 10% (from matched Procurement Intent keywords specifically)
-  const procurementScore = Math.min(10, (categoryWeights.PURCHASE||0) * 0.3);
-
-  // 5) District preference - 5% (only a real match already exists, per the gate above)
-  const preferredDistricts = String(Store.data.settings.preferredOppDistricts||'').split(',').map(d=>oppNorm(d)).filter(Boolean);
+/* The Smart Opportunity Score (weights unchanged) fed by the new match result. */
+function oppScoreFrom(r, m){
+  const zeroB = {product:0, sector:0, subSector:0, procurement:0, location:0, fund:0, deadline:0, history:0, zeroExpenditure:0};
+  // no product evidence at all: fund value, deadlines, or a bare "purchase" are not substitutes for relevance
+  if(!m.best || m.bestScore <= 0){
+    return { score:0, type:m.primary||'OTHER', hits: OppMatch.hitsOf(m), scoreBreakdown:zeroB };
+  }
+  const isWasteText = t => t.includes('waste') || t.includes('മാലിന്യ');
+  const productScore = Math.min(30, m.bestScore * 0.3);
+  const sectorScore = isWasteText(oppNorm(r['Sector'])) ? 15 : 0;
+  const subSectorScore = isWasteText(oppNorm(r['Sub Sector'])) ? 10 : 0;
+  const procurementScore = m.prIntent ? 10 : (m.prTop>0 ? 3 : 0);
+  const preferredDistricts = String((Store.data.settings||{}).preferredOppDistricts||'').split(',').map(d=>oppNorm(d)).filter(Boolean);
   const district = oppNorm(r['District']);
   const locationScore = district ? (preferredDistricts.includes(district) ? 5 : 1) : 0;
-
-  // 6) Estimated fund value - 10% (log-scaled so one huge project can't dominate the score alone)
   const fund = oppMoney(r['FundTotal']);
   const fundScore = fund>0 ? Math.min(10, Math.log10(fund+1)*1.3) : 0;
-
-  // 7) Deadline proximity - 10% (an actionable, not-yet-closed date scores higher than one far off or already past)
   let deadlineScore = 0;
   const closing = r['Closing Date'] || r['Project Date'];
   if(closing){
     const days = Math.floor((new Date(closing) - new Date())/86400000);
-    if(days>=0 && days<=30) deadlineScore = 10;
-    else if(days>30 && days<=90) deadlineScore = 6;
-    else if(days>90) deadlineScore = 3;
+    if(days>=0 && days<=30) deadlineScore = 10; else if(days>30 && days<=90) deadlineScore = 6; else if(days>90) deadlineScore = 3;
   }
-
-  // 8) Historical relevance - 10% (has this local body previously produced a Won opportunity?)
   const lb = oppNorm(r['LB Name']);
   const historyScore = (lb && Object.entries(Store.data.oppTracking||{}).some(([k,tr])=>tr.status==='Won' && k.split('|')[1]===lb)) ? 10 : 0;
-
-  // 9) Zero Expenditure - 5% bonus. A project with money allocated but a
-  //    stated Expenditure of exactly 0 has its full fund still untouched -
-  //    genuinely more actionable to pursue right now than one that's
-  //    already partly (or fully) spent. Only credited when Expenditure is
-  //    an explicit "0" (not simply blank/unknown) AND there's an actual
-  //    fund amount to spend - an all-blank row gets no free credit, same
-  //    rule this scoring model already applies to every other factor.
   const expRaw = String(r['Expenditure']!=null ? r['Expenditure'] : '').trim();
   const zeroExpenditureScore = (fund>0 && expRaw!=='' && oppMoney(expRaw)===0) ? 5 : 0;
-
-  const score = Math.round(Math.min(100,
-    productScore + sectorScore + subSectorScore + procurementScore + locationScore + fundScore + deadlineScore + historyScore + zeroExpenditureScore));
-
+  const score = Math.round(Math.min(100, productScore + sectorScore + subSectorScore + procurementScore + locationScore + fundScore + deadlineScore + historyScore + zeroExpenditureScore));
   return {
-    score, type, hits: [...new Set(matched.map(m=>m.word))].slice(0,15),
-    scoreBreakdown: {
-      product: Math.round(productScore), sector: sectorScore, subSector: subSectorScore,
-      procurement: Math.round(procurementScore), location: locationScore,
-      fund: Math.round(fundScore*10)/10, deadline: deadlineScore, history: historyScore,
-      zeroExpenditure: zeroExpenditureScore
-    }
+    score, type: m.primary, hits: OppMatch.hitsOf(m),
+    scoreBreakdown: { product: Math.round(productScore), sector: sectorScore, subSector: subSectorScore, procurement: Math.round(procurementScore),
+      location: locationScore, fund: Math.round(fundScore*10)/10, deadline: deadlineScore, history: historyScore, zeroExpenditure: zeroExpenditureScore }
   };
 }
+function oppClassify(r){ return oppScoreFrom(r, OppMatch.compute(r)); }
+
 function oppParseTSV(txt){
   const lines = String(txt||'').replace(/\r/g,'').split('\n').filter(x=>x.trim());
   if(lines.length < 2) return [];
@@ -15740,9 +16190,17 @@ const OPP_PDF_FONT_MEERA_B64 = 'AAEAAAALAIAAAwAwT1MvMmZPHKkAAFecAAAAYGNtYXDFCmUs
 const OppFinder = {
   tab: 'dashboard',
   filtered: [],
-  filters: { q:'', type:'ALL', district:'', localbody:'', minscore:0, status:'', from:'', to:'', band:'' },
+  filters: { q:'', type:'ALL', type2:'ALL', rel:'possible', anyWord:false, district:'', localbody:'', minscore:0, status:'', from:'', to:'', band:'' },
 
   setTab(t){ this.tab = t; this.render(); },
+  /* first visit: analyse every project once (in small slices so the page never freezes), then show the screen */
+  async prepare(){
+    const rows = Store.data.oppProjects || [];
+    if(!rows.length || rows.every(r=>OppMatch.cache.has(r))) return;
+    const box = document.getElementById('content');
+    if(box) box.innerHTML = '<div class="card card-pad"><div class="hint" id="oppPrep">Analysing '+rows.length+' projects against the keyword library\u2026</div></div>';
+    await OppMatch.warm((i,n)=>{ const e = document.getElementById('oppPrep'); if(e) e.textContent = 'Analysing projects against the keyword library\u2026 '+i+' / '+n; });
+  },
 
   /* ---------------- import: paste TSV or upload an Excel file ---------------- */
   /* Saves via Store.mergeOppBatch - only THIS batch travels to the
@@ -15998,27 +16456,306 @@ const OppFinder = {
   readFilters(){
     const g = id => { const el = document.getElementById(id); return el ? el.value : ''; };
     this.filters = {
-      q: oppNormMl(g('oppSearch')), band: g('oppBand'), type: g('oppType')||'ALL', district: g('oppDistrict'),
+      q: oppNormMl(g('oppSearch')), band: g('oppBand'), type: g('oppType')||'ALL', type2: g('oppType2')||'ALL', rel: g('oppRel')||'possible',
+      anyWord: !!(document.getElementById('oppAny') && document.getElementById('oppAny').checked), district: g('oppDistrict'),
       localbody: g('oppLocalBody'), minscore: Number(g('oppMinScore')||0),
       status: g('oppStatus'), from: g('oppFrom'), to: g('oppTo')
     };
   },
+  /* ---------------- match engine v2: filters, explanations ---------------- */
+  BAND_COLOR: { H:'var(--green,#16a34a)', M:'var(--blue,#2563eb)', P:'var(--amber,#d97706)', W:'var(--text-mute,#6b7280)', '-':'var(--text-mute,#6b7280)' },
+  REL_LABEL: { high:'High', medium:'Medium and above', possible:'Possible and above', all:'All matches (incl. weak)' },
+  inCat(m, c, relMin){
+    if(c==='OTHER') return m.unmatched;
+    const x = m.cats.find(y=>y.c===c);
+    return !!x && OppEngine.BAND_RANK[x.b] >= relMin;
+  },
+  setRel(v){ const el = document.getElementById('oppRel'); if(el) el.value = v; Paginate.get('oppfinder').page = 1; this.render(); },
+  rowBlob(r){
+    let b = this._blobs.get(r);
+    if(b === undefined){
+      b = oppNormMl(['Project Name Eng','Project Name Mal','Sector','Sub Sector','Project Type','Project Category','Expenditure Description','Fund Description','LB Name','District','Project No','Impl Code']
+        .map(k=>r[k]).join(' ') + ' ' + (r.hits||[]).join(' '));
+      this._blobs.set(r, b);
+    }
+    return b;
+  },
+  _blobs: new WeakMap(),
+  /* free-text search: the whole phrase, or every word of it (any word when "match any word" is ticked); synonyms count */
+  textMatch(blob, q, anyWord){
+    if(!q) return true;
+    if(oppTextHas(blob, q)) return true;
+    const words = q.split(' ').filter(w=>w.length>1 && !['and','of','for','the','to','in','a'].includes(w));
+    if(words.length < 2) return false;
+    const padded = ' '+blob;
+    const has = w => oppVariants(w).some(v=>padded.includes(' '+v) || (/[ഀ-ൿ]/.test(v) && blob.includes(v)));
+    if(anyWord) return words.some(has);
+    if(words.every(has)) return true;
+    // a multi-word keyword (e.g. "baling machine") also finds projects that contain only its meaningful word ("baling"); generic words like machine/purchase are ignored
+    const gen = new Set((OppEngine.GENERIC_DEFAULT||[]).map(x=>String(x).toLowerCase()));
+    const key = words.filter(w=>!gen.has(w));
+    return key.length>0 && key.length<words.length ? key.every(has) : false;
+  },
   applyFilters(){
     this.readFilters();
-    const f = this.filters;
-    this.filtered = Store.data.oppProjects.filter(r=>{
-      const blob = f.q ? oppNormMl(Object.entries(r).filter(([k])=>!['score','type','hits','scoreBreakdown'].includes(k)).map(([,v])=>v).join(' ')) : '';
+    const f = this.filters, relMin = OppEngine.REL_MIN[f.rel] || 2;
+    const bandCount = {H:0, M:0, P:0, W:0};
+    const out = [];
+    const rows = Store.data.oppProjects;
+    for(let i=0;i<rows.length;i++){
+      const r = rows[i];
+      const m = OppMatch.get(r);
+      if(f.district && r['District']!==f.district) continue;
+      if(f.localbody && r['LB Name']!==f.localbody) continue;
+      if(f.q && !this.textMatch(this.rowBlob(r), f.q, f.anyWord)) continue;
       const tr = Store.data.oppTracking[oppKeyOf(r)] || {};
-      const st = tr.status || 'New';
-      const dateVal = r['Project Date'] || r['Date'] || r['Created Date'] || r['Closing Date'] || '';
-      return r.score >= f.minscore && (f.type==='ALL' || r.type===f.type) &&
-        (!f.district || r['District']===f.district) && (!f.localbody || r['LB Name']===f.localbody) &&
-        (!f.q || oppTextHas(blob, f.q)) && (!f.band || oppBandOf(r.score)===f.band) && (!f.status || st===f.status) &&
-        (!f.from || String(dateVal).slice(0,10) >= f.from) && (!f.to || String(dateVal).slice(0,10) <= f.to);
-    }).sort((a,b)=>b.score-a.score);
+      if(f.status && (tr.status || 'New')!==f.status) continue;
+      const dateVal = String(r['Project Date'] || r['Date'] || r['Created Date'] || r['Closing Date'] || '').slice(0,10);
+      if(f.from && dateVal < f.from) continue;
+      if(f.to && dateVal > f.to) continue;
+      if(r.score < f.minscore) continue;
+      if(f.band && oppBandOf(r.score)!==f.band) continue;
+      if(f.type2!=='ALL' && !this.inCat(m, f.type2, relMin)) continue;
+      if(f.type!=='ALL'){
+        // counts for the relevance chips are taken before the relevance filter, so nothing is silently hidden
+        if(f.type==='OTHER'){ if(!m.unmatched) continue; }
+        else { const x = m.cats.find(y=>y.c===f.type); if(!x) continue; bandCount[x.b === '-' ? 'W' : x.b]++; if(OppEngine.BAND_RANK[x.b] < relMin) continue; }
+      }
+      out.push(r);
+    }
+    this.bandCount = bandCount;
+    const t = f.type;
+    out.sort((a,b)=>{
+      if(t!=='ALL' && t!=='OTHER'){ const sa = (OppMatch.get(a).cats.find(y=>y.c===t)||{s:0}).s, sb = (OppMatch.get(b).cats.find(y=>y.c===t)||{s:0}).s; if(sb!==sa) return sb-sa; }
+      return b.score-a.score;
+    });
+    this.filtered = out;
+  },
+  catBadges(r, m, focus){
+    const E = Util.escapeHtml, show = [];
+    if(focus && focus!=='ALL' && focus!=='OTHER'){ const x = m.cats.find(y=>y.c===focus); if(x) show.push(x); }
+    m.cats.filter(x=>!show.includes(x) && OppEngine.BAND_RANK[x.b] >= 2).slice(0,3-show.length).forEach(x=>show.push(x));
+    if(!show.length) return m.unmatched ? '<span class="badge badge-gray">'+E(OPP_CATEGORY_NAMES.OTHER)+'</span>' : '<span class="badge badge-gray">Weak match only</span>';
+    return show.map(x=>'<div style="margin-bottom:2px;"><span class="badge badge-blue" title="'+E(OppEngine.explain(x))+'">'+E(OPP_CATEGORY_NAMES[x.c]||x.c)+'</span> <b style="font-size:11px;color:'+this.BAND_COLOR[x.b]+';">'+OppEngine.BAND_NAME[x.b]+'</b></div>').join('');
+  },
+  whyCell(r, m, focus){
+    const E = Util.escapeHtml;
+    let x = (focus && focus!=='ALL' && focus!=='OTHER') ? m.cats.find(y=>y.c===focus) : null;
+    if(!x) x = m.cats.find(y=>y.c!=='PURCHASE') || m.cats[0];
+    if(!x) return '<span class="hint">No keyword matched</span>';
+    const ev = x.top;
+    return '<div style="font-size:12px;"><b>'+E(ev.src)+'</b> <span class="hint">'+E(OppEngine.matchTypeOf(ev))+'</span></div><div class="hint" style="font-size:11px;white-space:normal;min-width:180px;">'+E(OppEngine.explain(x))+'</div>';
+  },
+  matchPanelHTML(r){
+    const E = Util.escapeHtml, m = OppMatch.get(r);
+    if(!m.cats.length) return '<div class="card card-pad" style="margin:12px 0;"><b>Category matches</b><div class="hint">No keyword from the library matched this project, so it is listed as <b>Unmatched</b>. Admins can review unmatched projects in Products &rarr; Match Engine and add new keywords.</div></div>';
+    return '<div class="card card-pad" style="margin:12px 0;"><b>Category matches</b> <span class="hint">(a project can belong to several categories; weak matches stay reviewable)</span>' +
+      m.cats.map(x=>'<div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border,#e5e7eb);"><span class="badge badge-blue">'+E(OPP_CATEGORY_NAMES[x.c]||x.c)+'</span> ' +
+        '<b style="color:'+this.BAND_COLOR[x.b]+';">'+OppEngine.BAND_NAME[x.b]+'</b> <span class="hint">relevance '+x.s+'</span>' +
+        '<ul style="margin:4px 0 0 18px;font-size:12.5px;">'+x.ev.slice(0,4).map(ev=>'<li>'+E(OppEngine.explain(x, ev))+' <span class="hint">('+E(OppEngine.matchTypeOf(ev))+', +'+Math.round(ev.pts*10)/10+')</span></li>').join('')+'</ul></div>').join('') +
+      (m.unmatched ? '<div class="hint" style="margin-top:8px;">No category reaches &ldquo;Possible&rdquo;, so this project also counts as <b>Unmatched</b>.</div>' : '') + '</div>';
+  },
+
+  /* ---------------- export with match details ---------------- */
+  exportMatchCSV(){
+    const list = this.filtered.length ? this.filtered : Store.data.oppProjects;
+    if(!list.length){ UI.toast('Nothing to export'); return; }
+    const cols = ['score','type',...OPP_TEMPLATE_COLUMNS,'hits'], extra = ['Matched categories','Best relevance','Top keyword','Match type','Explanation'];
+    const q = v => '"'+String(v==null?'':v).replace(/"/g,'""')+'"';
+    const out = [cols.concat(extra).join(',')];
+    list.forEach(r=>{
+      const m = OppMatch.get(r), top = m.cats.find(c=>c.c!=='PURCHASE') || m.cats[0];
+      const vals = cols.map(c=>c==='hits' ? r.hits.join('; ') : r[c]);
+      vals.push(m.cats.filter(c=>OppEngine.BAND_RANK[c.b]>=2).map(c=>(OPP_CATEGORY_NAMES[c.c]||c.c)+' ('+OppEngine.BAND_NAME[c.b]+')').join('; ') || (m.unmatched?'Unmatched':''));
+      vals.push(top ? OppEngine.BAND_NAME[top.b] : 'None', top ? top.top.src : '', top ? OppEngine.matchTypeOf(top.top) : '', top ? OppEngine.explain(top) : '');
+      out.push(vals.map(q).join(','));
+    });
+    const blob = new Blob(['﻿'+out.join('\n')], {type:'text/csv;charset=utf-8'});
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'JAYS_Project_Opportunities_match_details.csv'; a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
+  },
+
+  /* ---------------- match engine: Admin keyword manager ---------------- */
+  kw: { q:'', cat:'', state:'all', page:1, draft:null, test:null, disc:null },
+  STRENGTH: { P:'Product phrase', B:'Product phrase', W:'Product phrase', T:'Topic', T1:'Topic (single word)', TB:'Topic', S:'Generic word', SX:'Sector wording', PRP:'Procurement', PRW:'Procurement' },
+  STRENGTH_TIER: { product:'Product Phrase', topic:'Topic Phrase', procurement:'Procurement Intent' },
+  kwDraft(){ if(!this.kw.draft){ const c = OppMatch.cfg(); this.kw.draft = JSON.parse(JSON.stringify({disabled:c.disabled||[], noExpand:c.noExpand||[], generic:c.generic||[], nonGeneric:c.nonGeneric||[], priority:c.priority||{}})); } return this.kw.draft; },
+  kwNorm(s){ return OppEngine.norm(decodeURIComponent(s)); },
+  kwSetOn(enc, on){ const d = this.kwDraft(), k = this.kwNorm(enc); d.disabled = d.disabled.filter(x=>OppEngine.norm(x)!==k); if(!on) d.disabled.push(decodeURIComponent(enc)); this.kw.dirty = true; this.renderKwTable(); },
+  kwSetExpand(enc, on){ const d = this.kwDraft(), k = this.kwNorm(enc); d.noExpand = d.noExpand.filter(x=>OppEngine.norm(x)!==k); if(!on) d.noExpand.push(decodeURIComponent(enc)); this.kw.dirty = true; this.renderKwTable(); },
+  kwSetPrio(enc, v){ const d = this.kwDraft(), key = decodeURIComponent(enc); Object.keys(d.priority).forEach(x=>{ if(OppEngine.norm(x)===OppEngine.norm(key)) delete d.priority[x]; }); if(v!=='normal' || OppEngine.DEFAULT_LOW.some(w=>OppEngine.norm(w)===OppEngine.norm(key))) d.priority[key] = v; this.kw.dirty = true; this.renderKwTable(); },
+  kwSetFilter(){ const g = id => (document.getElementById(id)||{}).value||''; this.kw.q = g('kwQ'); this.kw.cat = g('kwCat'); this.kw.state = g('kwState')||'all'; this.kw.page = 1; this.renderKwTable(); },
+  kwPage(d){ this.kw.page = Math.max(1, this.kw.page + d); this.renderKwTable(); },
+  kwSaveGeneric(){
+    const d = this.kwDraft(), parse = id => (document.getElementById(id).value||'').split(/[,\n]/).map(x=>x.trim()).filter(Boolean);
+    d.generic = parse('kwGeneric'); d.nonGeneric = parse('kwNonGeneric'); this.kw.dirty = true; this.kwSaveApply();
+  },
+  async kwSaveApply(){
+    if(!Auth.isAdmin()){ UI.toast('Only an Admin can change keywords'); return; }
+    const d = this.kwDraft();
+    Store.data.settings.oppMatchCfg = Object.assign({}, Store.data.settings.oppMatchCfg||{}, JSON.parse(JSON.stringify(d)));
+    const ok = await Store.save('settings');
+    if(!ok){ UI.toast('Could not save - try again'); return; }
+    await Activity.log('Opportunity match keywords changed', (d.disabled.length)+' disabled, '+(d.noExpand.length)+' without word expansion');
+    this.kw.dirty = false; OppMatch.invalidate(); await this.rewarm('Applying keyword changes'); UI.toast('Saved and applied'); this.render();
+  },
+  async rewarm(label){
+    OppMatch.cache = new WeakMap(); OppMatch.warming = false;
+    const rows = (Store.data.oppProjects||[]).length; if(!rows) return;
+    await OppMatch.warm((i,n)=>{ this.setMsg((label||'Updating')+' '+i+' / '+n+'…'); });
+    this.setMsg('');
+  },
+  /* scans every project with ONE temporary keyword set; used by "Test", "Count" and "Examples" */
+  async kwScan(groups, progress){
+    const cfg = Object.assign({}, OppMatch.cfg(), {df: OppMatch.df});
+    const idx = OppEngine.compile(groups, [], cfg, OppMatch.synFn);
+    const rows = Store.data.oppProjects || [], res = {total:0, rows:rows.length, kinds:{}, bands:{H:0,M:0,P:0,W:0}, examples:[], variations: idx.srcInfo.length ? idx.srcInfo[0].variations : [], broad:false};
+    const cat = groups[0].category, all = [];
+    await new Promise(resolve=>{
+      let i = 0; const SIZE = 1200;
+      const step = ()=>{
+        const end = Math.min(rows.length, i+SIZE);
+        for(; i<end; i++){
+          const m = OppEngine.matchRow(idx, rows[i]); const x = m.cats.find(y=>y.c===cat);
+          if(!x || x.s<=0) continue;
+          res.total++; res.bands[x.b === '-' ? 'W' : x.b]++;
+          const mt = OppEngine.matchTypeOf(x.top); res.kinds[mt] = (res.kinds[mt]||0)+1;
+          all.push([x.s, rows[i], x]);
+        }
+        if(progress) progress(i, rows.length);
+        if(i < rows.length) setTimeout(step, 0); else resolve();
+      };
+      step();
+    });
+    all.sort((a,b)=>b[0]-a[0]); res.examples = all.slice(0,30).map(([s,r,x])=>({r, x, s}));
+    res.weakOnly = all.filter(a=>a[2].top.kind==='word' || a[2].top.cls==='S').length;
+    res.broad = res.rows>0 && res.total/res.rows > 0.03;
+    return res;
+  },
+  scanHTML(res, title){
+    const E = Util.escapeHtml, pct = res.rows ? Math.round(res.total/res.rows*1000)/10 : 0;
+    return '<div class="card card-pad" style="margin-top:10px;"><b>'+E(title)+'</b>: '+res.total+' of '+res.rows+' projects ('+pct+'%)' +
+      (res.broad ? ' <span class="badge" style="background:#fee2e2;color:#991b1b;">very broad &mdash; likely false positives</span>' : '') +
+      '<div class="hint" style="margin-top:4px;">By match type: '+(Object.keys(res.kinds).map(k=>E(k)+' '+res.kinds[k]).join(' &middot; ')||'none')+' &nbsp;|&nbsp; Relevance: High '+res.bands.H+', Medium '+res.bands.M+', Possible '+res.bands.P+', Weak '+res.bands.W+'</div>' +
+      (res.weakOnly ? '<div class="hint">'+res.weakOnly+' matched only through an individual or generic word &mdash; review these first for false positives.</div>' : '') +
+      '<div class="hint" style="margin-top:4px;">Generated variations: '+(res.variations.map(v=>E(v.text)+' <i>('+E(v.kind)+')</i>').join(', ')||'-')+'</div>' +
+      (res.examples.length ? '<div class="table-wrap" style="margin-top:6px;"><table><thead><tr><th>Project</th><th>Local body</th><th>Match</th><th>Relevance</th></tr></thead><tbody>'+
+        res.examples.slice(0,15).map(e=>'<tr><td class="cell-main">'+E(e.r['Project Name Eng']||e.r['Project Name Mal']||'')+'</td><td class="cell-mute">'+E(e.r['LB Name']||'')+'</td><td style="font-size:12px;white-space:normal;">'+E(OppEngine.explain(e.x))+'</td><td>'+OppEngine.BAND_NAME[e.x.b]+' ('+e.s+')</td></tr>').join('')+'</tbody></table></div>' : '<div class="hint">No project matched.</div>') + '</div>';
+  },
+  async kwTest(){
+    if(!Auth.isAdmin()){ UI.toast('Only an Admin can change keywords'); return; }
+    const g = id => (document.getElementById(id)||{}).value||'';
+    const word = g('kwNew').trim(), cat = g('kwNewCat'), str = g('kwNewStrength') || 'product';
+    if(!word || !cat){ UI.toast('Type a keyword and choose a category'); return; }
+    if(!Store.data.oppProjects.length){ UI.toast('No projects loaded to test against'); return; }
+    const box = document.getElementById('kwTestOut'); box.innerHTML = '<div class="hint" style="margin-top:8px;">Scanning projects…</div>';
+    const grp = [{tier:this.STRENGTH_TIER[str], weight:22, category: str==='procurement' ? 'PURCHASE' : cat, words:[word]}];
+    const res = await this.kwScan(grp, (i,n)=>{ box.innerHTML = '<div class="hint" style="margin-top:8px;">Scanning '+i+' / '+n+'…</div>'; });
+    this.kw.test = {word, cat, str};
+    box.innerHTML = this.scanHTML(res, 'Test of “'+word+'”') + '<div class="toolbar" style="margin-top:8px;"><button class="btn btn-primary btn-sm" onclick="OppFinder.kwAddNew()">Add this keyword</button><span class="hint">Review the examples first &mdash; the keyword is only saved when you press Add.</span></div>';
+  },
+  async kwAddNew(){
+    const t = this.kw.test; if(!t) return; if(!Auth.isAdmin()){ UI.toast('Only an Admin can change keywords'); return; }
+    Store.data.oppKeywordGroups.push({tier:this.STRENGTH_TIER[t.str], weight:22, category: t.str==='procurement'?'PURCHASE':t.cat, words:[t.word], custom:true});
+    const ok = await Store.save('oppKeywordGroups'); if(!ok){ Store.data.oppKeywordGroups.pop(); UI.toast('Could not save - try again'); return; }
+    await Activity.log('Opportunity keyword added', t.word+' ('+t.cat+')'); this.kw.test = null;
+    OppMatch.invalidate(); await this.rewarm('Applying new keyword'); UI.toast('Keyword added and applied'); this.render();
+  },
+  async kwCount(enc){
+    const src = decodeURIComponent(enc), info = OppMatch.index().srcInfo.find(s=>s.src===src); if(!info) return;
+    const box = document.getElementById('kwScanOut'); box.innerHTML = '<div class="hint">Scanning…</div>'; box.scrollIntoView({block:'nearest'});
+    const res = await this.kwScan([{tier:info.tier, weight:22, category:info.cat, words:[src]}], (i,n)=>{ box.innerHTML = '<div class="hint">Scanning '+i+' / '+n+'…</div>'; });
+    box.innerHTML = this.scanHTML(res, 'Keyword “'+src+'” ('+(OPP_CATEGORY_NAMES[info.cat]||info.cat)+')');
+  },
+  kwRows(){
+    const idx = OppMatch.index(), d = this.kwDraft(), E = Util.escapeHtml, q = OppEngine.norm(this.kw.q);
+    const offSet = new Set(d.disabled.map(OppEngine.norm));
+    let list = idx.srcInfo.map(s=>Object.assign({}, s, {off: offSet.has(OppEngine.norm(s.src))}));
+    if(this.kw.cat) list = list.filter(s=>s.cat===this.kw.cat);
+    if(q) list = list.filter(s=>OppEngine.norm(s.src).includes(q));
+    if(this.kw.state==='off') list = list.filter(s=>s.off);
+    if(this.kw.state==='on') list = list.filter(s=>!s.off);
+    return list;
+  },
+  renderKwTable(){
+    const box = document.getElementById('kwTable'); if(!box) return;
+    const E = Util.escapeHtml, d = this.kwDraft(), all = this.kwRows(), PER = 25, pages = Math.max(1, Math.ceil(all.length/PER));
+    this.kw.page = Math.min(this.kw.page, pages);
+    const slice = all.slice((this.kw.page-1)*PER, this.kw.page*PER);
+    const noExp = new Set(d.noExpand.map(OppEngine.norm)), pr = {}; Object.keys(d.priority).forEach(k=>pr[OppEngine.norm(k)] = d.priority[k]);
+    box.innerHTML = '<div class="hint" style="margin:6px 0;">'+all.length+' keyword(s)'+(this.kw.dirty?' &mdash; <b style="color:var(--amber,#d97706);">unsaved changes</b>':'')+'</div>' +
+      '<div class="table-wrap"><table><thead><tr><th>Keyword</th><th>Category</th><th>Strength</th><th>Generated variations</th><th>Priority</th><th>Word expansion</th><th>Enabled</th><th></th></tr></thead><tbody>' +
+      (slice.map(s=>{
+        const enc = encodeURIComponent(s.src), k = OppEngine.norm(s.src), cur = pr[k] || s.prio || 'normal', vs = s.variations;
+        const pieces = vs.filter(v=>v.kind!=='phrase');
+        return '<tr'+(s.off?' style="opacity:.55;"':'')+'><td class="cell-main">'+E(s.src)+'</td><td><span class="badge badge-blue">'+E(OPP_CATEGORY_NAMES[s.cat]||s.cat)+'</span></td><td class="cell-mute">'+E(this.STRENGTH[s.cls]||s.cls)+'</td>' +
+          '<td style="white-space:normal;font-size:12px;max-width:300px;">'+(pieces.length ? '<details><summary>'+pieces.length+' piece(s)</summary>'+pieces.map(v=>E(v.text)+' <i class="hint">('+E(v.kind)+')</i>').join('<br>')+'</details>' : '<span class="hint">phrase only</span>')+'</td>' +
+          '<td><select onchange="OppFinder.kwSetPrio(\''+enc+'\',this.value)">'+['low','normal','high'].map(o=>'<option value="'+o+'" '+(cur===o?'selected':'')+'>'+o+'</option>').join('')+'</select></td>' +
+          '<td><input type="checkbox" '+(noExp.has(k)?'':'checked')+' onchange="OppFinder.kwSetExpand(\''+enc+'\',this.checked)" title="Also match two-word pieces and specific individual words of this phrase"></td>' +
+          '<td><input type="checkbox" '+(s.off?'':'checked')+' onchange="OppFinder.kwSetOn(\''+enc+'\',this.checked)"></td>' +
+          '<td><button class="btn btn-outline btn-sm" onclick="OppFinder.kwCount(\''+enc+'\')">Count / examples</button></td></tr>';
+      }).join('') || '<tr><td colspan="8" class="cell-mute" style="text-align:center;padding:14px;">No keywords match this filter.</td></tr>') +
+      '</tbody></table></div>' +
+      '<div class="toolbar" style="margin-top:8px;"><button class="btn btn-outline btn-sm" '+(this.kw.page<=1?'disabled':'')+' onclick="OppFinder.kwPage(-1)">&larr; Prev</button><span class="hint">Page '+this.kw.page+' / '+pages+'</span><button class="btn btn-outline btn-sm" '+(this.kw.page>=pages?'disabled':'')+' onclick="OppFinder.kwPage(1)">Next &rarr;</button><div class="toolbar-spacer"></div>' +
+      '<button class="btn btn-primary btn-sm" '+(this.kw.dirty?'':'disabled')+' onclick="OppFinder.kwSaveApply()">Save &amp; apply changes</button></div>';
+  },
+  /* Unmatched review: most frequent words / two-word phrases among projects no category matched */
+  async kwDiscover(){
+    const box = document.getElementById('kwDiscOut'); const rows = Store.data.oppProjects || [];
+    if(!rows.length){ UI.toast('No projects loaded'); return; }
+    box.innerHTML = '<div class="hint">Scanning unmatched projects…</div>';
+    await OppMatch.warm();
+    const stop = new Set(('of and for to the in at a an by with from on construction renovation repair repairs maintenance maintanance road roads works work project panchayat panchayath grama ward wards various near phase building new scheme development general phase improvement concrete concreting tarring retarring share expense expenses').split(' '));
+    const gen = OppMatch.index().generic, uw = new Map(), ub = new Map();
+    rows.forEach(r=>{
+      if(!OppMatch.get(r).unmatched) return;
+      const t = OppEngine.toks(OppEngine.norm(r['Project Name Eng'])), seen = new Set();
+      t.forEach((w,i)=>{ if(w.length>3 && !stop.has(w) && !gen.has(w) && !/^\d+$/.test(w) && !seen.has(w)){ seen.add(w); uw.set(w,(uw.get(w)||0)+1); }
+        const b = i<t.length-1 ? w+' '+t[i+1] : ''; if(b && !stop.has(w) && !stop.has(t[i+1]) && w.length>2 && t[i+1].length>2 && !seen.has(b)){ seen.add(b); ub.set(b,(ub.get(b)||0)+1); } });
+    });
+    const top = m => Array.from(m.entries()).filter(e=>e[1]>=3).sort((a,b)=>b[1]-a[1]).slice(0,25);
+    this.kw.disc = {words: top(uw), pairs: top(ub)};
+    const list = this.kw.disc.pairs.map(e=>[e[0],e[1],'two-word']).concat(this.kw.disc.words.map(e=>[e[0],e[1],'word']));
+    const catOpts = Object.keys(OPP_CATEGORY_NAMES).filter(k=>k!=='OTHER'&&k!=='PURCHASE').map(k=>'<option value="'+k+'">'+Util.escapeHtml(OPP_CATEGORY_NAMES[k])+'</option>').join('');
+    const unm = rows.filter(r=>OppMatch.get(r).unmatched).length;
+    box.innerHTML = '<div class="hint" style="margin:6px 0;">'+unm+' of '+rows.length+' projects are Unmatched. Most frequent terms in their English names (a term here is not necessarily relevant to JAYS &mdash; add only real products):</div>' +
+      '<div class="table-wrap"><table><thead><tr><th>Term</th><th>Projects</th><th>Kind</th><th>Add to category</th><th></th></tr></thead><tbody>' +
+      list.map((e,i)=>'<tr><td class="cell-main">'+Util.escapeHtml(e[0])+'</td><td class="mono">'+e[1]+'</td><td class="cell-mute">'+e[2]+'</td><td><select id="kwDc'+i+'"><option value="">choose...</option>'+catOpts+'</select></td><td><button class="btn btn-outline btn-sm" onclick="OppFinder.kwUseDiscovered('+i+')">Test this term</button></td></tr>').join('') +
+      '</tbody></table></div>';
+    this.kw.discList = list;
+  },
+  kwUseDiscovered(i){
+    const e = this.kw.discList[i], cat = (document.getElementById('kwDc'+i)||{}).value;
+    if(!cat){ UI.toast('Choose a category first'); return; }
+    document.getElementById('kwNew').value = e[0]; document.getElementById('kwNewCat').value = cat;
+    document.getElementById('kwNew').scrollIntoView({block:'center'}); this.kwTest();
+  },
+  renderMatchEngine(){
+    if(!Auth.isAdmin()) return '<div class="card card-pad" style="margin-bottom:14px;"><h3 style="margin-top:0;font-size:14px;">Match Engine</h3><div class="hint">Only an Admin can review or change the keyword dictionary.</div></div>';
+    const E = Util.escapeHtml, d = this.kwDraft(), cats = Object.keys(OPP_CATEGORY_NAMES).filter(k=>k!=='OTHER');
+    return '<div class="card card-pad" style="margin-bottom:14px;"><h3 style="margin-top:0;font-size:14px;">Match Engine &mdash; keyword manager</h3>' +
+      '<div class="hint" style="margin-bottom:8px;">Every keyword is matched as a whole word or phrase (never inside another word), in English and Malayalam, in the project name, expenditure description, sector and other fields. A longer keyword automatically also matches its two-word pieces and its specific individual words, at lower relevance. Add new product keywords below &mdash; test first, then add. <span id="oppMsg"></span></div>' +
+      '<div class="form-row" style="grid-template-columns:2fr 1.3fr 1.2fr auto;align-items:end;">' +
+        '<div class="field"><label>New keyword or phrase</label><input id="kwNew" placeholder="e.g. waste collection bin"></div>' +
+        '<div class="field"><label>Category</label><select id="kwNewCat">'+cats.map(k=>'<option value="'+k+'">'+E(OPP_CATEGORY_NAMES[k])+'</option>').join('')+'</select></div>' +
+        '<div class="field"><label>Strength</label><select id="kwNewStrength"><option value="product">Product phrase (strong)</option><option value="topic">Topic (medium)</option><option value="procurement">Procurement wording</option></select></div>' +
+        '<button class="btn btn-primary btn-sm" onclick="OppFinder.kwTest()">Test keyword</button></div>' +
+      '<div id="kwTestOut"></div>' +
+      '<h4 style="margin:16px 0 6px;">All keywords</h4>' +
+      '<div class="form-row" style="grid-template-columns:2fr 1.3fr 1fr;"><div class="field"><label>Search</label><input id="kwQ" value="'+E(this.kw.q)+'" oninput="clearTimeout(OppFinder._kt);OppFinder._kt=setTimeout(()=>OppFinder.kwSetFilter(),250)"></div>' +
+        '<div class="field"><label>Category</label><select id="kwCat" onchange="OppFinder.kwSetFilter()"><option value="">All</option>'+cats.map(k=>'<option value="'+k+'" '+(this.kw.cat===k?'selected':'')+'>'+E(OPP_CATEGORY_NAMES[k])+'</option>').join('')+'</select></div>' +
+        '<div class="field"><label>Show</label><select id="kwState" onchange="OppFinder.kwSetFilter()">'+[['all','All'],['on','Enabled'],['off','Disabled']].map(o=>'<option value="'+o[0]+'" '+(this.kw.state===o[0]?'selected':'')+'>'+o[1]+'</option>').join('')+'</select></div></div>' +
+      '<div id="kwTable"></div><div id="kwScanOut"></div>' +
+      '<h4 style="margin:16px 0 6px;">Too-common words</h4>' +
+      '<div class="hint" style="margin-bottom:6px;">Single words that are too common to count as evidence on their own (they still count inside a full phrase). Separate with commas.</div>' +
+      '<div class="form-row" style="grid-template-columns:1fr 1fr;"><div class="field"><label>Extra generic words</label><textarea id="kwGeneric" rows="2">'+E(d.generic.join(', '))+'</textarea></div>' +
+        '<div class="field"><label>Built-in generic words to allow again</label><textarea id="kwNonGeneric" rows="2">'+E(d.nonGeneric.join(', '))+'</textarea></div></div>' +
+      '<button class="btn btn-outline btn-sm" onclick="OppFinder.kwSaveGeneric()">Save &amp; apply</button>' +
+      '<h4 style="margin:16px 0 6px;">Review Unmatched projects</h4>' +
+      '<button class="btn btn-outline btn-sm" onclick="OppFinder.kwDiscover()">Find missing terms</button><div id="kwDiscOut"></div></div>';
   },
   resetFilters(){
-    this.filters = { q:'', type:'ALL', district:'', localbody:'', minscore:0, status:'', from:'', to:'', band:'' };
+    this.filters = { q:'', type:'ALL', type2:'ALL', rel:'possible', anyWord:false, district:'', localbody:'', minscore:0, status:'', from:'', to:'', band:'' };
     this.render();
   },
   districtOptions(){ return [...new Set(Store.data.oppProjects.map(r=>r['District']).filter(Boolean))].sort(); },
@@ -16075,6 +16812,7 @@ const OppFinder = {
         '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">Category</div>'+E(OPP_CATEGORY_NAMES[r.type])+'</div>' +
         '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">Matched Keywords</div>'+r.hits.map(x=>'<span class="badge badge-gray">'+E(x)+'</span>').join(' ')+'</div>' +
       '</div>' +
+      this.matchPanelHTML(r) +
       '<h4 style="margin:14px 0 6px;">Why this scored '+r.score+'% ('+oppBandOf(r.score)+')</h4>' +
       '<ul id="oppReasonList" style="margin:0 0 10px 18px;font-size:12.5px;">'+oppReasons(r).map(x=>'<li>'+E(x)+'</li>').join('')+'</ul>' +
       (r.scoreBreakdown ? 
@@ -16137,6 +16875,7 @@ const OppFinder = {
     const keywords = document.getElementById('oppProdKeywords').value.trim();
     if(!name || !keywords){ UI.toast('Enter both a name and keywords'); return; }
     Store.data.oppProducts.push({name, keywords});
+    OppMatch.invalidate();
     const ok = await Store.save('oppProducts');
     if(ok) await Activity.log('Project-matching product added', name);
     this.render();
@@ -16144,6 +16883,7 @@ const OppFinder = {
   async removeProductAt(i){
     const p = Store.data.oppProducts[i]; if(!p) return;
     Store.data.oppProducts.splice(i,1);
+    OppMatch.invalidate();
     const ok = await Store.save('oppProducts');
     if(ok) await Activity.log('Project-matching product removed', p.name);
     this.render();
@@ -16155,6 +16895,7 @@ const OppFinder = {
     const words = document.getElementById('oppKwWords').value.split(',').map(w=>w.trim()).filter(Boolean);
     if(!tier || !category || !words.length){ UI.toast('Enter a tier, category and at least one word'); return; }
     Store.data.oppKeywordGroups.push({tier, weight, category, words});
+    OppMatch.invalidate();
     const ok = await Store.save('oppKeywordGroups');
     if(ok) await Activity.log('Opportunity keyword group added', tier+' ('+words.length+' word(s))');
     this.render();
@@ -16163,6 +16904,7 @@ const OppFinder = {
     const g = Store.data.oppKeywordGroups[i]; if(!g) return;
     if(!confirm('Delete the "'+g.tier+'" group with '+g.words.length+' word(s)? This affects future scoring immediately.')) return;
     Store.data.oppKeywordGroups.splice(i,1);
+    OppMatch.invalidate();
     const ok = await Store.save('oppKeywordGroups');
     if(ok) await Activity.log('Opportunity keyword group removed', g.tier);
     this.render();
@@ -16276,12 +17018,14 @@ const OppFinder = {
       : this.tab==='products' ? this.renderProducts()
       : this.renderReports();
     document.getElementById('content').innerHTML = this.switcherHTML() + body;
+    if(this.tab==='products') this.renderKwTable();
   },
 
   renderDashboard(){
     const rows = Store.data.oppProjects;
     const counts = {}; Object.keys(OPP_CATEGORY_NAMES).forEach(k=>counts[k]=0);
-    rows.forEach(r=>{ counts[r.type] = (counts[r.type]||0) + 1; });
+    // a project counts in every category where it reaches at least "Possible" (so one project can be in several)
+    rows.forEach(r=>{ const m = OppMatch.get(r); m.cats.forEach(x=>{ if(OppEngine.BAND_RANK[x.b] >= 2) counts[x.c] = (counts[x.c]||0) + 1; }); if(m.unmatched) counts.OTHER++; });
     const unmatchedCount = counts.OTHER||0;
     const districts = {}; rows.forEach(r=>{ const d=r['District']||'Unknown'; districts[d]=(districts[d]||0)+1; });
     const topDistricts = Object.entries(districts).sort((a,b)=>b[1]-a[1]).slice(0,8);
@@ -16292,7 +17036,7 @@ const OppFinder = {
     return dashboardCardsHTML('Project Opportunity Dashboard', [
       {label:'Total Projects', value:rows.length},
       {label:'Waste Opportunities', value:counts.WASTE||0, color:'var(--green,#16a34a)'},
-      {label:'Purchase Opportunities', value:counts.PURCHASE||0, color:'var(--blue,#2563eb)'},
+      {label:'Purchase Opportunities (procurement wording)', value:counts.PURCHASE||0, color:'var(--blue,#2563eb)'},
       {label:'Excellent match ('+oppBands().excellent+'%+)', value:rows.filter(r=>oppBandOf(r.score)==='Excellent').length, color:'var(--green,#16a34a)'},
       {label:'Good match ('+oppBands().good+'%+)', value:rows.filter(r=>oppBandOf(r.score)==='Good').length, color:'var(--blue,#2563eb)'},
       {label:'Possible ('+oppBands().possible+'%+)', value:rows.filter(r=>oppBandOf(r.score)==='Possible').length, color:'var(--amber,#d97706)'},
@@ -16334,7 +17078,7 @@ const OppFinder = {
       '</div>' +
       '<div class="form-row" style="grid-template-columns:2fr 1fr 1fr 1fr 1fr;margin-top:10px;">' +
         '<div class="field"><label>Search all project data</label><input id="oppSearch" placeholder="e.g. waste bins malappuram panchayat" value="'+Util.escapeHtml(f.q)+'" oninput="OppFinder.render()"></div>' +
-        '<div class="field"><label>Category</label><select id="oppType" onchange="OppFinder.render()">' +
+        '<div class="field"><label>Category</label><select id="oppType" onchange="Paginate.get(\'oppfinder\').page=1;OppFinder.render()">' +
           '<option value="ALL" '+(f.type==='ALL'?'selected':'')+'>All categories</option>' +
           Object.keys(OPP_CATEGORY_NAMES).map(t=>'<option value="'+t+'" '+(f.type===t?'selected':'')+'>'+OPP_CATEGORY_NAMES[t]+'</option>').join('') + '</select></div>' +
         '<div class="field"><label>District</label><select id="oppDistrict" onchange="OppFinder.onDistrictChange()"><option value="">All districts</option>' +
@@ -16344,19 +17088,27 @@ const OppFinder = {
         '<div class="field"><label>Minimum score</label><select id="oppMinScore" onchange="OppFinder.render()">' +
           [0,40,60,80,90].map(v=>'<option value="'+v+'" '+(f.minscore===v?'selected':'')+'>'+(v?v+'+':'All')+'</option>').join('') + '</select></div>' +
       '</div>' +
-      '<div class="form-row" style="grid-template-columns:1fr 1fr 1fr 1fr 1fr;margin-top:8px;">' +
+      '<div class="form-row" style="grid-template-columns:1fr 1fr 1fr 1fr;margin-top:8px;">' +
+        '<div class="field"><label>Relevance <span class="hint">(match strength in the category)</span></label><select id="oppRel" onchange="Paginate.get(\'oppfinder\').page=1;OppFinder.render()">' +
+          Object.keys(this.REL_LABEL).map(k=>'<option value="'+k+'" '+(f.rel===k?'selected':'')+'>'+this.REL_LABEL[k]+'</option>').join('') + '</select></div>' +
+        '<div class="field"><label>Also in category</label><select id="oppType2" onchange="Paginate.get(\'oppfinder\').page=1;OppFinder.render()"><option value="ALL">Any</option>' +
+          Object.keys(OPP_CATEGORY_NAMES).map(t=>'<option value="'+t+'" '+(f.type2===t?'selected':'')+'>'+OPP_CATEGORY_NAMES[t]+'</option>').join('') + '</select></div>' +
+        '<div class="field"><label>&nbsp;</label><label class="chk"><input type="checkbox" id="oppAny" '+(f.anyWord?'checked':'')+' onchange="OppFinder.render()"> Search: match <b>any</b> word</label></div>' +
         '<div class="field"><label>Match band</label><select id="oppBand" onchange="OppFinder.render()"><option value="">All bands</option>' +
           ['Excellent','Good','Possible','Low','No match'].map(b=>'<option value="'+b+'" '+(f.band===b?'selected':'')+'>'+b+'</option>').join('') + '</select></div>' +
+      '</div><div class="form-row" style="grid-template-columns:1fr 1fr 1fr 1fr;margin-top:8px;">' +
         '<div class="field"><label>Status</label><select id="oppStatus" onchange="OppFinder.render()"><option value="">All Status</option>' +
           OPP_STATUSES.map(s=>'<option '+(f.status===s?'selected':'')+'>'+s+'</option>').join('') + '</select></div>' +
         '<div class="field"><label>From Date</label><input type="date" id="oppFrom" value="'+f.from+'" onchange="OppFinder.render()"></div>' +
         '<div class="field"><label>To Date</label><input type="date" id="oppTo" value="'+f.to+'" onchange="OppFinder.render()"></div>' +
         '<div class="field"><label>Quick Date</label><select onchange="OppFinder.quickDate(this.value)"><option value="">Select</option><option value="today">Today</option><option value="week">This Week</option><option value="month">This Month</option><option value="30">Last 30 Days</option></select></div>' +
       '</div>' +
-      '<div class="toolbar" style="margin-top:10px;"><div class="toolbar-spacer"></div><button class="btn btn-outline btn-sm" onclick="OppFinder.downloadPDF()">Download PDF</button><button class="btn btn-outline btn-sm" onclick="OppFinder.exportCSV(false)">Export CSV</button></div>' +
+      (f.type!=='ALL' && f.type!=='OTHER' ? '<div class="hint" style="margin-top:10px;">In <b>'+Util.escapeHtml(OPP_CATEGORY_NAMES[f.type])+'</b> (all projects passing the other filters): ' +
+          [['high','H','High'],['medium','M','Medium'],['possible','P','Possible'],['all','W','Weak']].map(c=>'<a href="#" onclick="OppFinder.setRel(\''+c[0]+'\');return false;" style="margin-right:10px;color:'+this.BAND_COLOR[c[1]]+';font-weight:600;">'+c[2]+' '+(this.bandCount[c[1]]||0)+'</a>').join('') + '<span class="hint">click to change the relevance filter</span></div>' : '') +
+      '<div class="toolbar" style="margin-top:10px;"><div class="toolbar-spacer"></div><button class="btn btn-outline btn-sm" onclick="OppFinder.downloadPDF()">Download PDF</button><button class="btn btn-outline btn-sm" onclick="OppFinder.exportCSV(false)">Export CSV</button><button class="btn btn-outline btn-sm" onclick="OppFinder.exportMatchCSV()">Export with match details</button></div>' +
     '</div>' +
     '<div class="card"><div class="card-pad" style="padding-bottom:0;"><span class="hint">'+this.filtered.length+' results \u2022 total value \u20B9'+this.filtered.reduce((s,r)=>s+oppMoney(r['FundTotal']),0).toLocaleString('en-IN')+'</span></div>' +
-    '<div class="table-wrap"><table><thead><tr><th class="col-actions">Actions</th><th>Score</th><th>Opportunity</th><th>Project No</th><th>Impl Code</th><th>Project Name</th><th>Local Body</th><th>District</th><th>Sector</th><th>Status</th><th>Fund Total</th><th>Matched Keywords</th></tr></thead><tbody>' +
+    '<div class="table-wrap"><table><thead><tr><th class="col-actions">Actions</th><th>Score</th><th>Category &amp; relevance</th><th>Project No</th><th>Impl Code</th><th>Project Name</th><th>Local Body</th><th>District</th><th>Sector</th><th>Status</th><th>Fund Total</th><th>Why it matched</th></tr></thead><tbody>' +
       (info.pageItems.length ? info.pageItems.map(r=>{
         const key = oppKeyOf(r);
         const tr = Store.data.oppTracking[key] || {};
@@ -16367,16 +17119,16 @@ const OppFinder = {
             '<div style="color:'+cls(r.score)+';font-weight:700;">'+r.score+'% <span class="hint" style="color:'+OPP_BAND_COLORS[oppBandOf(r.score)]+';font-weight:600;">'+oppBandOf(r.score)+'</span></div>' +
             '<div style="background:var(--border,#e5e7eb);border-radius:6px;height:5px;margin-top:3px;overflow:hidden;"><div style="width:'+r.score+'%;height:100%;background:'+cls(r.score)+';"></div></div>' +
           '</td>' +
-          '<td><span class="badge badge-blue">'+OPP_CATEGORY_NAMES[r.type]+'</span>'+(tr.status?' <span class="badge badge-green">'+Util.escapeHtml(tr.status)+'</span>':'')+'</td>' +
+          '<td>'+this.catBadges(r, OppMatch.get(r), f.type)+(tr.status?' <span class="badge badge-green">'+Util.escapeHtml(tr.status)+'</span>':'')+'</td>' +
           '<td class="cell-mute">'+Util.escapeHtml(r['Project No']||'')+'</td>' +
           '<td class="cell-mute">'+Util.escapeHtml(r['Impl Code']||'')+'</td>' +
-          '<td class="cell-main">'+name+'</td>' +
+          '<td class="cell-main">'+name+(r['Project Name Mal']?'<div class="cell-mute" style="font-size:11px;white-space:normal;">'+Util.escapeHtml(r['Project Name Mal'])+'</div>':'')+'</td>' +
           '<td class="cell-mute">'+Util.escapeHtml(r['LB Name']||'')+'</td>' +
           '<td class="cell-mute">'+Util.escapeHtml(r['District']||'')+'</td>' +
           '<td class="cell-mute">'+Util.escapeHtml(r['Sector']||'')+'</td>' +
           '<td class="cell-mute">'+Util.escapeHtml(tr.status||'New')+'</td>' +
           '<td class="mono">\u20B9'+oppMoney(r['FundTotal']).toLocaleString('en-IN')+'</td>' +
-          '<td>'+r.hits.slice(0,4).map(x=>'<span class="badge badge-gray">'+Util.escapeHtml(x)+'</span>').join(' ')+'</td>' +
+          '<td>'+this.whyCell(r, OppMatch.get(r), f.type)+'</td>' +
         '</tr>';
       }).join('') : '<tr><td colspan="12" class="cell-mute" style="text-align:center;padding:20px;">No matching projects found.</td></tr>') +
     '</tbody></table></div>' + Paginate.controlsHTML('oppfinder', info, "OppFinder.render()") + '</div>';
@@ -16510,6 +17262,7 @@ const OppFinder = {
     if(!(ex>gd && gd>ps && ps>=1 && ex<=100)){ UI.toast('Bands must go down: Excellent > Good > Possible, between 1 and 100'); return; }
     Store.data.settings.oppBands = { excellent:ex, good:gd, possible:ps };
     Store.data.settings.oppSynonyms = document.getElementById('oppSynonyms').value;
+    OppMatch.invalidate();
     const ok = await Store.save('settings');
     if(ok){ await Activity.log('Opportunity match settings changed', ex+'/'+gd+'/'+ps); UI.toast('Saved'); }
     this.render();
@@ -16534,6 +17287,7 @@ const OppFinder = {
     '</div>' +
 
     this.matchSettingsHTML() +
+    this.renderMatchEngine() +
     '<div class="card card-pad" style="margin-bottom:14px;">' +
       '<h3 style="margin-top:0;font-size:14px;">Keyword Matching Library</h3>' +
       '<div class="hint" style="margin-bottom:8px;">Controls the Opportunity Score. Higher weight = counts more toward a match. Add new terms here any time \u2014 no code changes needed.' +
@@ -16562,15 +17316,15 @@ const OppFinder = {
     const rows = Store.data.oppProjects;
     const make = obj => Object.entries(obj).sort((a,b)=>b[1]-a[1]).map(([k,v])=>
       '<div style="display:flex;justify-content:space-between;margin:7px 0;font-size:13px;"><span>'+Util.escapeHtml(k)+'</span><b>'+v+'</b></div>').join('') || '<div class="hint">No data</div>';
-    const c = {}; rows.forEach(r=>c[OPP_CATEGORY_NAMES[r.type]] = (c[OPP_CATEGORY_NAMES[r.type]]||0)+1);
+    const c = {}; rows.forEach(r=>{ const m = OppMatch.get(r); m.cats.forEach(x=>{ if(OppEngine.BAND_RANK[x.b] >= 2){ const n = OPP_CATEGORY_NAMES[x.c]||x.c; c[n] = (c[n]||0)+1; } }); if(m.unmatched) c[OPP_CATEGORY_NAMES.OTHER] = (c[OPP_CATEGORY_NAMES.OTHER]||0)+1; });
     const s = {}; rows.forEach(r=>{ const st = (Store.data.oppTracking[oppKeyOf(r)]||{}).status || 'New'; s[st]=(s[st]||0)+1; });
     return '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">' +
-      '<div class="card card-pad"><h3 style="margin:0 0 8px;font-size:14px;">Projects by Category</h3>'+make(c)+'</div>' +
+      '<div class="card card-pad"><h3 style="margin:0 0 8px;font-size:14px;">Projects by Category</h3><div class="hint" style="margin-bottom:6px;">Possible-or-better matches; one project can appear in several categories.</div>'+make(c)+'</div>' +
       '<div class="card card-pad"><h3 style="margin:0 0 8px;font-size:14px;">Projects by Status</h3>'+make(s)+'</div>' +
     '</div>';
   }
 };
-Views.oppfinder = ()=>OppFinder.seedKeywordGroups().then(()=>OppFinder.render());
+Views.oppfinder = ()=>OppFinder.seedKeywordGroups().then(()=>OppFinder.prepare()).then(()=>OppFinder.render());
 
 const Reports = {
   render(){
