@@ -3785,7 +3785,7 @@ const Customers = {
             <td class="cell-mute">${Util.escapeHtml(x.panchayath||'—')}</td>
             <td class="cell-mute">${Util.escapeHtml(x.assignedTo||'—')}</td>
             <td>${statusBadge(x.status)}</td>
-            <td class="cell-mute" style="white-space:normal;max-width:220px;">${x.notes? Util.escapeHtml(x.notes.length>80? x.notes.slice(0,80)+'…' : x.notes) : '—'}</td>
+            <td class="cell-mute" style="white-space:normal;max-width:${/^Project:/.test(x.notes||'')?'340px':'220px'};${/^Project:/.test(x.notes||'')?'white-space:pre-line;':''}">${x.notes? (/^Project:/.test(x.notes) ? Util.escapeHtml(x.notes.split('\n').filter(l=>/^(Project: |Impl Code:)/.test(l)).join('\n')) : Util.escapeHtml(x.notes.length>80? x.notes.slice(0,80)+'…' : x.notes)) : '—'}</td>
             <td class="cell-mute">${Util.fmtDate(x.lastContact)}</td>
           </tr>`).join('')}
           </tbody></table>
@@ -4138,6 +4138,11 @@ const Customers = {
             <div><div class="cell-mute" style="font-size:11px;">AREA</div><div>${Util.escapeHtml(x.panchayath||'—')}</div></div>
             <div><div class="cell-mute" style="font-size:11px;">ASSIGNED TO</div><div>${Util.escapeHtml(x.assignedTo||'—')}</div></div>
             <div><div class="cell-mute" style="font-size:11px;">LAST CONTACT</div><div>${Util.fmtDate(x.lastContact)}</div></div>
+            ${(()=>{ const n=String(x.notes||''); if(!/^Project:/.test(n)) return ''; const g=k=>{ const m=n.match(new RegExp('^'+k+': (.*)$','m')); return m?m[1]:''; };
+              return '<div style="grid-column:1/-1;"><div class="cell-mute" style="font-size:11px;">PROJECT</div><div>'+Util.escapeHtml(g('Project'))+'</div></div>' +
+                (g('Project \\(Mal\\)')?'<div style="grid-column:1/-1;"><div class="cell-mute" style="font-size:11px;">PROJECT (MALAYALAM)</div><div>'+Util.escapeHtml(g('Project \\(Mal\\)'))+'</div></div>':'') +
+                '<div><div class="cell-mute" style="font-size:11px;">IMPL CODE</div><div class="mono">'+Util.escapeHtml(g('Impl Code'))+'</div></div>' +
+                (g('Impl Officer')?'<div><div class="cell-mute" style="font-size:11px;">IMPL OFFICER</div><div>'+Util.escapeHtml(g('Impl Officer'))+'</div></div>':''); })()}
           </div>
           <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;">
             <button class="btn btn-wa btn-sm" style="flex:1;" onclick="Customers.sendWhatsApp('${x.id}')">&#128172; WhatsApp</button>
@@ -16261,7 +16266,7 @@ GRANT EXECUTE ON FUNCTION public.opp_sync_blob() TO authenticated;
 const OppFinder = {
   tab: 'dashboard',
   filtered: [],
-  filters: { q:'', type:'ALL', type2:'ALL', rel:'possible', anyWord:false, district:'', localbody:'', minscore:0, status:'', from:'', to:'', band:'' },
+  filters: { q:'', type:'ALL', type2:'ALL', rel:'possible', anyWord:false, district:'', localbody:'', impl:'', minscore:0, status:'', from:'', to:'', band:'' },
 
   setTab(t){ this.tab = t; this.render(); },
   /* first visit: analyse every project once (in small slices so the page never freezes), then show the screen */
@@ -16287,13 +16292,15 @@ const OppFinder = {
      save so nothing is silently lost. */
   setMsg(t){ const m=document.getElementById('oppMsg'); if(m) m.textContent=t; },
   async mergeChunked(rows, label){
-    const SIZE = 1000; let n=0, u=0; const failed=[];
+    // 2,000 rows per request with a random 2-5 second rest between requests, so the database is never hit by a continuous burst
+    const SIZE = 2000; let n=0, u=0; const failed=[];
     for(let i=0;i<rows.length;i+=SIZE){
       const part = rows.slice(i,i+SIZE);
       let res = await Store.mergeOppBatch(part);
-      if(!res) res = await Store.mergeOppBatch(part);
+      if(!res){ await new Promise(r=>setTimeout(r, 3000)); res = await Store.mergeOppBatch(part); }
       if(res){ n += res.newCount||0; u += res.updatedCount||0; } else failed.push.apply(failed, part);
       this.setMsg(label+' '+Math.min(i+SIZE,rows.length)+' / '+rows.length+(failed.length?' ('+failed.length+' failed)':'')+'\u2026');
+      if(i+SIZE < rows.length) await new Promise(r=>setTimeout(r, 2000 + Math.random()*3000));
     }
     return { newCount:n, updatedCount:u, failed };
   },
@@ -16309,8 +16316,14 @@ const OppFinder = {
       UI.toast('Save failed \u2014 check your connection and try again.');
       return false;
     }
-    // Re-pull the merged collection so the dashboard/table reflect the save.
-    Store.data.oppProjects = await Store.loadOppProjects();
+    // Apply the saved rows to the list already in memory (same key rule as the server) instead of downloading the whole table again after every import.
+    {
+      const failedSet = new Set(res.failed), map = new Map(); Store.data.oppProjects.forEach(r=>map.set(oppKeyOf(r), r));
+      for(const row of incoming){ if(failedSet.has(row)) continue; const k = oppKeyOf(row), old = map.get(k);
+        if(old) Object.assign(old, row); else { Store.data.oppProjects.push(row); map.set(k, row); } }
+      try{ OppMatch.invalidate(); }catch(e){}
+      Store.oppCacheSet(Store.data.oppProjects);
+    }
     this.health = null;
     const added = res.newCount, updated = res.updatedCount;
     Store.data.oppImportHistory.unshift({date:new Date().toISOString(), source:source||'Excel Import',
@@ -16529,7 +16542,7 @@ const OppFinder = {
     this.filters = {
       q: oppNormMl(g('oppSearch')), band: g('oppBand'), type: g('oppType')||'ALL', type2: g('oppType2')||'ALL', rel: g('oppRel')||'possible',
       anyWord: !!(document.getElementById('oppAny') && document.getElementById('oppAny').checked), district: g('oppDistrict'),
-      localbody: g('oppLocalBody'), minscore: Number(g('oppMinScore')||0),
+      localbody: g('oppLocalBody'), impl: g('oppImpl'), minscore: Number(g('oppMinScore')||0),
       status: g('oppStatus'), from: g('oppFrom'), to: g('oppTo')
     };
   },
@@ -16578,6 +16591,7 @@ const OppFinder = {
       const m = OppMatch.get(r);
       if(f.district && r['District']!==f.district) continue;
       if(f.localbody && r['LB Name']!==f.localbody) continue;
+      if(f.impl && String(r['Impl Code']||'').trim()!==f.impl) continue;
       if(f.q && !this.textMatch(this.rowBlob(r), f.q, f.anyWord)) continue;
       const tr = Store.data.oppTracking[oppKeyOf(r)] || {};
       if(f.status && (tr.status || 'New')!==f.status) continue;
@@ -16896,8 +16910,34 @@ const OppFinder = {
     this.delStatus('<b>Done.</b> Deleted '+Number(cnt).toLocaleString()+' project(s) of '+Util.escapeHtml(d)+'. '+Store.data.oppProjects.length.toLocaleString()+' projects remain. A backup file was downloaded.');
   },
   resetFilters(){
-    this.filters = { q:'', type:'ALL', type2:'ALL', rel:'possible', anyWord:false, district:'', localbody:'', minscore:0, status:'', from:'', to:'', band:'' };
+    this.filters = { q:'', type:'ALL', type2:'ALL', rel:'possible', anyWord:false, district:'', localbody:'', impl:'', minscore:0, status:'', from:'', to:'', band:'' };
     this.render();
+  },
+  implOptions(district, lb){
+    const c = new Map();
+    Store.data.oppProjects.forEach(r=>{ if(district && r['District']!==district) return; if(lb && r['LB Name']!==lb) return; const k = String(r['Impl Code']||'').trim(); if(k) c.set(k,(c.get(k)||0)+1); });
+    return [...c.entries()].sort((a,b)=>a[0].localeCompare(b[0]));
+  },
+  /* all matched projects with the same Impl Code in the same local body (unmatched ones are never listed) */
+  sameImpl(key){
+    const r = Store.data.oppProjects.find(x=>oppKeyOf(x)===key); if(!r) return null;
+    const code = String(r['Impl Code']||'').trim(); if(!code) return { r, code, list:[], hidden:0 };
+    const same = Store.data.oppProjects.filter(x=>x!==r && String(x['Impl Code']||'').trim()===code && x['LB Name']===r['LB Name'] && x['District']===r['District']);
+    const list = same.filter(x=>!OppMatch.get(x).unmatched);
+    list.sort((a,b)=>b.score-a.score);
+    return { r, code, list, hidden: same.length-list.length };
+  },
+  viewSameImpl(key){
+    const d = this.sameImpl(key); if(!d) return;
+    const E = Util.escapeHtml, r = d.r;
+    const body = '<div class="hint" style="margin-bottom:8px;">Impl Code <b>'+E(d.code||'—')+'</b> &middot; Local body <b>'+E(r['LB Name']||'—')+'</b> &middot; '+E(r['District']||'')+'. Only projects that match a JAYS category are listed.</div>' +
+      (d.list.length ? '<div class="table-wrap"><table><thead><tr><th>Project No</th><th>Project</th><th>Category &amp; relevance</th><th>Fund</th><th>Status</th><th></th></tr></thead><tbody>' +
+        d.list.map(x=>{ const m = OppMatch.get(x), k = oppKeyOf(x);
+          return '<tr><td class="mono">'+E(x['Project No']||'')+'</td><td style="white-space:normal;min-width:240px;"><b>'+E(x['Project Name Eng']||'')+'</b><div class="hint">'+E(x['Project Name Mal']||'')+'</div></td><td>'+this.catBadges(x,m,'ALL')+'</td><td>'+E(x['FundTotal']||'')+'</td><td>'+E(x['Status']||'')+'</td>' +
+          '<td><button class="btn btn-outline btn-sm" data-k="'+E(k)+'" onclick="OppFinder.viewProject(this.dataset.k)">View</button></td></tr>'; }).join('') + '</tbody></table></div>'
+        : '<div class="empty-state"><div class="t">No other matching projects</div><div class="d">No other project of this Impl Code in this local body matches a JAYS category.</div></div>');
+    UI.openModal('Same Impl Code in '+(r['LB Name']||'this local body')+' ('+d.list.length+')', body,
+      '<button class="btn btn-outline" data-k="'+E(key)+'" onclick="OppFinder.viewProject(this.dataset.k)">&larr; Back to project</button><button class="btn btn-outline" onclick="UI.closeModal()">Close</button>', true);
   },
   districtOptions(){ return [...new Set(Store.data.oppProjects.map(r=>r['District']).filter(Boolean))].sort(); },
   localBodyOptions(district){
@@ -16977,6 +17017,7 @@ const OppFinder = {
       '<div>' + (productMatches.length ? productMatches.map(x=>'<span class="badge badge-blue">'+E(x)+'</span>').join(' ') :
         '<span class="hint">Add products below to enable product matching.</span>') + '</div>',
       '<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>' +
+      (r['Impl Code'] ? '<button class="btn btn-outline" onclick="OppFinder.viewSameImpl(\''+key+'\')">&#128221; Same Impl Code in this local body ('+this.sameImpl(key).list.length+')</button>' : '') +
       '<button class="btn btn-outline" onclick="OppFinder.removeTracking(\''+key+'\')">Remove from My Opportunities</button>' +
       '<button class="btn btn-outline" onclick="OppFinder.convertToLead(\''+key+'\')">&#8594; Convert to Lead</button>' +
       '<button class="btn btn-primary" onclick="OppFinder.saveTracking(\''+key+'\')">\u2b50 Save Opportunity</button>', true);
@@ -16994,6 +17035,12 @@ const OppFinder = {
       id: Util.uid('C', Store.data.customers), name, phone:'', email:'',
       district: r['District']||'', panchayath: r['LB Name']||'',
       assignedTo: by, status:'New Lead', lastContact: Util.todayISO(), createdDate: Util.todayISO(),
+      leadSource:'Government Project',
+      notes: ['Project: '+(r['Project Name Eng']||r['Project Name Mal']||'—'),
+              r['Project Name Eng'] && r['Project Name Mal'] ? 'Project (Mal): '+r['Project Name Mal'] : '',
+              'Impl Code: '+(r['Impl Code']||'—'),
+              r['Impl Officer Name'] ? 'Impl Officer: '+r['Impl Officer Name'] : '',
+              r['FundTotal'] ? 'Fund: '+r['FundTotal'] : ''].filter(Boolean).join('\n'),
       timeline:[{id:'T'+Date.now(), date:Util.todayISO(), stage:'First Contact',
         note:'Converted from Project Opportunity: '+(r['Project Name Eng']||r['Project Name Mal']||'')+' ('+r.score+'% match, '+OPP_CATEGORY_NAMES[r.type]+')',
         by}]
@@ -17228,6 +17275,8 @@ const OppFinder = {
           this.districtOptions().map(d=>'<option '+(f.district===d?'selected':'')+'>'+Util.escapeHtml(d)+'</option>').join('') + '</select></div>' +
         '<div class="field"><label>Local Body</label><select id="oppLocalBody" onchange="OppFinder.render()"><option value="">All Local Bodies</option>' +
           this.localBodyOptions(f.district).map(l=>'<option '+(f.localbody===l?'selected':'')+'>'+Util.escapeHtml(l)+'</option>').join('') + '</select></div>' +
+        '<div class="field"><label>Impl Code</label><select id="oppImpl" onchange="OppFinder.render()"><option value="">All Impl Codes</option>' +
+          this.implOptions(f.district, f.localbody).map(([c,n])=>'<option value="'+Util.escapeHtml(c)+'" '+(f.impl===c?'selected':'')+'>'+Util.escapeHtml(c)+' ('+n+')</option>').join('') + '</select></div>' +
         '<div class="field"><label>Minimum score</label><select id="oppMinScore" onchange="OppFinder.render()">' +
           [0,40,60,80,90].map(v=>'<option value="'+v+'" '+(f.minscore===v?'selected':'')+'>'+(v?v+'+':'All')+'</option>').join('') + '</select></div>' +
       '</div>' +
