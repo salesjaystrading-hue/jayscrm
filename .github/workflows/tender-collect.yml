@@ -61,11 +61,25 @@ jobs:
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           echo "Mode: $mode" >> "$GITHUB_STEP_SUMMARY"
       - name: Collect GeM (open bids, keyword driven)
+        id: gem
         continue-on-error: true
-        run: python scraper/run_scraper.py --source gem --keywords-file terms.txt --out-dir out/gem
+        run: |
+          mkdir -p out/gem
+          set -o pipefail
+          python scraper/run_scraper.py --source gem --keywords-file terms.txt --out-dir out/gem 2>&1 | tee out/gem.log
       - name: Collect CPPP
+        id: cppp
         continue-on-error: true
-        run: python scraper/run_scraper.py --source cppp --keywords-file terms.txt --max-pages "${{ github.event.inputs.cppp_max_pages || '100' }}" --out-dir out/cppp
+        run: |
+          mkdir -p out/cppp
+          set -o pipefail
+          python scraper/run_scraper.py --source cppp --keywords-file terms.txt --max-pages "${{ github.event.inputs.cppp_max_pages || '100' }}" --out-dir out/cppp 2>&1 | tee out/cppp.log
+      - name: Scraper outcome (shown in summary)
+        if: always()
+        run: |
+          { echo "### Scraper steps"; echo "GeM: ${{ steps.gem.outcome }}  |  CPPP: ${{ steps.cppp.outcome }}";
+            echo "GeM CSV files: $(ls out/gem/*.csv 2>/dev/null | wc -l)  |  CPPP CSV files: $(ls out/cppp/*.csv 2>/dev/null | wc -l)";
+            for f in gem cppp; do echo; echo "#### $f log (last 25 lines)"; echo '```'; tail -n 25 out/$f.log 2>/dev/null | cut -c1-300; echo '```'; done; } >> "$GITHUB_STEP_SUMMARY"
       - name: Validate, score and ${{ steps.mode.outputs.mode }}
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
