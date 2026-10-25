@@ -6932,7 +6932,7 @@ const TenderCentre = {
 
   /* ----------------------------------------------------- page */
   async render(){
-    const tabs = [['tenders','Tenders'],['runs','Import Runs'],['sources','Sources']];
+    const tabs = [['tenders','Tenders'],['runs','Collection Runs'],['sources','Sources']];
     const head = `<div class="toolbar" style="gap:6px;flex-wrap:wrap;">${tabs.map(([k,l])=>`<button class="btn ${this.tab===k?'btn-primary':'btn-outline'} btn-sm" onclick="TenderCentre.setTab('${k}')">${l}</button>`).join('')}<div class="toolbar-spacer"></div></div>`;
     document.getElementById('content').innerHTML = head + '<div class="card card-pad"><div class="cell-mute">Loading tenders&hellip;</div></div>';
     try{
@@ -7036,23 +7036,54 @@ const TenderCentre = {
   },
 
   /* ----------------------------------------------------- runs + sources tabs */
+  runF: {portal:'', status:''},
+  setRunFilter(k, v){ this.runF[k] = v; this.render(); },
+  /* Browsers never scrape portals and never hold a service key. Automatic collection runs in GitHub Actions
+     (collector/ + .github/workflows/tender-collect.yml); this screen only shows its results. */
+  AUTOMATED: {GEM:true, CPPP:true},
+  ACTIONS_URL: 'https://github.com/salesjaystrading-hue/jayscrm/actions/workflows/tender-collect.yml',
+  sourceState(s){
+    if(!this.AUTOMATED[s.portal_code]) return {label:'Not configured', color:'gray', note:'Manual import / entry only'};
+    const m = {running:['Running','blue'], success:['Successful','green'], partial:['Partially successful','amber'], failed:['Failed','red']}[s.last_run_status];
+    if(m) return {label:m[0], color:m[1], note:''};
+    return {label:'Ready for dry run', color:'blue', note:'Run a dry run in GitHub Actions first'};
+  },
   async runsHTML(){
-    const { data, error } = await sb.from('tender_collection_runs').select('*').order('started_at', {ascending:false}).limit(50);
+    let qb = sb.from('tender_collection_runs').select('*').order('started_at', {ascending:false}).limit(100);
+    if(this.runF.portal) qb = qb.eq('portal_code', this.runF.portal);
+    if(this.runF.status) qb = qb.eq('status', this.runF.status);
+    const [{ data, error }, src] = await Promise.all([qb, sb.from('tender_sources').select('portal_code').order('portal_code')]);
     if(error) throw new Error(error.message);
+    this._runs = data || [];
     const color = {success:'green', partial:'amber', failed:'red', running:'blue', cancelled:'gray'};
-    return `<div class="card"><div class="table-wrap">${(data||[]).length ? `<table><thead><tr><th>When</th><th>Source</th><th>File</th><th>Result</th><th>Found</th><th>New</th><th>Updated</th><th>Unchanged</th><th>Rejected</th></tr></thead><tbody>
-      ${data.map(r=>`<tr><td class="cell-mute">${tenderFmtDateTime(r.started_at)}</td><td>${Util.escapeHtml(r.portal_code)}</td><td class="cell-mute">${Util.escapeHtml(r.file_name||r.trigger_type)}</td>
-        <td><span class="badge badge-${color[r.status]||'gray'}">${Util.escapeHtml(r.status)}</span></td><td>${r.records_found}</td><td>${r.records_inserted}</td><td>${r.records_updated}</td><td>${r.duplicates_skipped}</td><td>${r.records_rejected}</td></tr>`).join('')}
-      </tbody></table>` : `<div class="empty-state"><div class="ic">&#128203;</div><div class="t">No imports yet</div><div class="d">Every import and manual entry is logged here.</div></div>`}</div></div>`;
+    const opt = (list, cur, all)=>`<option value="">${all}</option>` + list.map(([v,l])=>`<option value="${Util.escapeHtml(v)}" ${v===cur?'selected':''}>${Util.escapeHtml(l)}</option>`).join('');
+    const errOf = r=>{ const e = r.error_summary; if(!e) return ''; const first = Array.isArray(e) ? e[0] : e; return first ? (first.reason || (typeof first==='string' ? first : JSON.stringify(first))) : ''; };
+    return `<div class="toolbar" style="gap:6px;flex-wrap:wrap;margin-bottom:8px;">
+        <select onchange="TenderCentre.setRunFilter('portal',this.value)">${opt((src.data||[]).map(x=>[x.portal_code,x.portal_code]), this.runF.portal, 'All sources')}</select>
+        <select onchange="TenderCentre.setRunFilter('status',this.value)">${opt([['success','Successful'],['partial','Partially successful'],['failed','Failed'],['running','Running']], this.runF.status, 'All results')}</select>
+        <div class="toolbar-spacer"></div><button class="btn btn-outline btn-sm" onclick="TenderCentre.exportRuns()">Export runs (CSV)</button></div>
+      <div class="card"><div class="table-wrap">${this._runs.length ? `<table><thead><tr><th>When</th><th>Source</th><th>Trigger</th><th>Result</th><th>Found</th><th>New</th><th>Updated</th><th>Unchanged</th><th>Rejected</th><th>First problem</th></tr></thead><tbody>
+      ${this._runs.map(r=>`<tr><td class="cell-mute">${tenderFmtDateTime(r.started_at)}</td><td>${Util.escapeHtml(r.portal_code)}</td><td class="cell-mute">${Util.escapeHtml(r.trigger_type)}${r.file_name?' &middot; '+Util.escapeHtml(r.file_name):''}</td>
+        <td><span class="badge badge-${color[r.status]||'gray'}">${Util.escapeHtml(r.status)}</span></td><td>${Number(r.records_found)||0}</td><td>${Number(r.records_inserted)||0}</td><td>${Number(r.records_updated)||0}</td><td>${Number(r.duplicates_skipped)||0}</td><td>${Number(r.records_rejected)||0}</td><td class="cell-mute" style="max-width:260px;">${Util.escapeHtml(String(errOf(r)).slice(0,160))}</td></tr>`).join('')}
+      </tbody></table>` : `<div class="empty-state"><div class="ic">&#128203;</div><div class="t">No runs match</div><div class="d">Every import, manual entry and automatic collection is logged here.</div></div>`}</div></div>`;
+  },
+  exportRuns(){
+    const cell = v=>'"' + String(v==null?'':v).replace(/"/g,'""').replace(/^([=+\-@])/, "'$1") + '"';
+    const head = ['started_at','portal_code','trigger_type','status','records_found','records_inserted','records_updated','duplicates_skipped','records_rejected','file_name'];
+    const csv = '﻿' + [head, ...(this._runs||[]).map(r=>head.map(h=>r[h]))].map(r=>r.map(cell).join(',')).join('\r\n');
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], {type:'text/csv'})); a.download = 'tender-runs-'+Util.todayISO()+'.csv'; a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 5000);
   },
   async sourcesHTML(){
     const { data, error } = await sb.from('tender_sources').select('*').order('portal_code');
     if(error) throw new Error(error.message);
-    return `<div class="card card-pad" style="margin-bottom:12px;"><b>Collection is import-only.</b>
-      <div class="cell-mute" style="font-size:12.5px;margin-top:4px;">No portal is scraped or polled automatically. GeM, CPPP and Kerala e-Tender do not offer a verified, permitted automatic feed for this CRM, so lists are brought in through Excel / CSV import or manual entry. An automatic adapter can be added per source later, once its access terms are confirmed.</div></div>
-      <div class="card"><div class="table-wrap"><table><thead><tr><th>Code</th><th>Source</th><th>Method</th><th>Last attempt</th><th>Last success</th><th>Last result</th></tr></thead><tbody>
-      ${(data||[]).filter(s=>s.enabled).map(s=>`<tr><td class="mono">${Util.escapeHtml(s.portal_code)}</td><td class="cell-main">${Util.escapeHtml(s.portal_name)}${tenderSafeUrl(s.base_url)?` <a href="${Util.escapeHtml(s.base_url)}" target="_blank" rel="noopener noreferrer">&#8599;</a>`:''}</td>
-        <td><span class="badge badge-gray">${Util.escapeHtml(s.collection_method)}</span></td><td class="cell-mute">${tenderFmtDateTime(s.last_attempt_at)}</td><td class="cell-mute">${tenderFmtDateTime(s.last_success_at)}</td><td class="cell-mute">${Util.escapeHtml(s.last_run_message||'—')}</td></tr>`).join('')}
+    const admin = typeof Auth!=='undefined' && Auth.isAdmin();
+    return `<div class="card card-pad" style="margin-bottom:12px;"><b>How collection works</b>
+      <div class="cell-mute" style="font-size:12.5px;margin-top:4px;">GeM and CPPP can be collected automatically by a separate GitHub Actions job (dry run first; nothing is written until production writes are switched on). This page never scrapes portals itself. Kerala e-Tender and other CAPTCHA-protected portals are <b>not</b> automated and are never bypassed - bring them in by Excel / CSV import or manual entry.
+      ${admin?`<div style="margin-top:8px;"><a class="btn btn-outline btn-sm" href="${Util.escapeHtml(this.ACTIONS_URL)}" target="_blank" rel="noopener noreferrer">Open collector in GitHub Actions (dry run / run now) &#8599;</a></div>`:''}</div></div>
+      <div class="card"><div class="table-wrap"><table><thead><tr><th>Code</th><th>Source</th><th>Method</th><th>Status</th><th>Last attempt</th><th>Last success</th><th>Last result</th></tr></thead><tbody>
+      ${(data||[]).filter(s=>s.enabled).map(s=>{ const st = this.sourceState(s); return `<tr><td class="mono">${Util.escapeHtml(s.portal_code)}</td><td class="cell-main">${Util.escapeHtml(s.portal_name)}${tenderSafeUrl(s.base_url)?` <a href="${Util.escapeHtml(s.base_url)}" target="_blank" rel="noopener noreferrer">&#8599;</a>`:''}</td>
+        <td><span class="badge badge-gray">${Util.escapeHtml(s.collection_method)}</span></td><td><span class="badge badge-${st.color}">${st.label}</span>${st.note?`<div class="cell-mute" style="font-size:11px;">${st.note}</div>`:''}</td><td class="cell-mute">${tenderFmtDateTime(s.last_attempt_at)}</td><td class="cell-mute">${tenderFmtDateTime(s.last_success_at)}</td><td class="cell-mute">${Util.escapeHtml(s.last_run_message||'—')}</td></tr>`; }).join('')}
       </tbody></table></div></div>`;
   },
 
