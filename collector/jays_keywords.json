@@ -1,0 +1,171 @@
+{
+  "version": 1,
+  "_help": "Edit this file to change what is collected - no code change needed. 'exact' phrases are strong signals on their own. 'broad' words only count when 2+ different broad words (or 1 broad word + a buyer type) appear. 'generic_words' alone never match. 'excluded' phrases drop a tender.",
+  "generic_words": [
+    "supply",
+    "supplies",
+    "equipment",
+    "equipments",
+    "machine",
+    "machines",
+    "machinery",
+    "material",
+    "materials",
+    "item",
+    "items",
+    "service",
+    "services",
+    "work",
+    "works",
+    "purchase",
+    "procurement",
+    "tender",
+    "bid",
+    "goods",
+    "product",
+    "products",
+    "kit",
+    "set"
+  ],
+  "groups": [
+    {
+      "id": "waste_bins",
+      "label": "Waste bins",
+      "weight": 40,
+      "exact": [
+        "waste bin",
+        "dustbin",
+        "dust bin",
+        "garbage bin",
+        "wheelie bin",
+        "litter bin",
+        "segregation bin",
+        "waste container",
+        "garbage container",
+        "compost bin",
+        "bio bin",
+        "bio-bin",
+        "pedal bin"
+      ],
+      "broad": [
+        "bin",
+        "container",
+        "bucket",
+        "trolley",
+        "waste",
+        "garbage"
+      ]
+    },
+    {
+      "id": "balers_shredders",
+      "label": "Balers / shredders / conveyors",
+      "weight": 45,
+      "exact": [
+        "baler",
+        "baling machine",
+        "bailing machine",
+        "plastic shredder",
+        "waste shredder",
+        "shredder machine",
+        "conveyor belt",
+        "sorting conveyor",
+        "mrf machinery",
+        "mcf machinery",
+        "mrf equipment",
+        "mcf equipment",
+        "waste processing machinery",
+        "waste segregation machine",
+        "bottle crusher",
+        "glass crusher",
+        "pet bottle crusher"
+      ],
+      "broad": [
+        "shredder",
+        "conveyor",
+        "crusher",
+        "baling",
+        "segregation",
+        "recycling",
+        "composting"
+      ]
+    },
+    {
+      "id": "hks_supplies",
+      "label": "Haritha Karma Sena supplies",
+      "weight": 35,
+      "exact": [
+        "haritha karma sena",
+        "harita karma sena",
+        "hks uniform",
+        "safety shoes",
+        "safety gloves",
+        "hand gloves",
+        "gumboot",
+        "gum boot",
+        "rain coat",
+        "raincoat",
+        "reflective jacket",
+        "ppe kit",
+        "apron"
+      ],
+      "broad": [
+        "uniform",
+        "shoes",
+        "gloves",
+        "boots",
+        "mask",
+        "cap",
+        "bag"
+      ]
+    },
+    {
+      "id": "it_office",
+      "label": "IT / office equipment",
+      "weight": 30,
+      "exact": [
+        "laptop",
+        "desktop computer",
+        "tablet pc",
+        "printer",
+        "multifunction printer",
+        "photocopier",
+        "scanner",
+        "ups",
+        "cctv camera",
+        "projector",
+        "smart phone",
+        "smartphone",
+        "biometric attendance"
+      ],
+      "broad": [
+        "computer",
+        "keyboard",
+        "mouse",
+        "toner"
+      ]
+    }
+  ],
+  "buyer_types": [
+    "grama panchayat",
+    "gram panchayat",
+    "block panchayat",
+    "district panchayat",
+    "municipality",
+    "municipal corporation",
+    "corporation",
+    "lsgd",
+    "local self government",
+    "suchitwa mission",
+    "clean kerala",
+    "nagar palika",
+    "nagar panchayat",
+    "urban local body"
+  ],
+  "excluded": [
+    "scrap sale",
+    "auction of",
+    "cloud based web application"
+  ],
+  "min_broad_hits": 2,
+  "relevant_if_score_at_least": 30
+}

@@ -1,0 +1,4 @@
+# Pinned dependencies for the third-party Tender_Scraper (checked out at a pinned commit by the workflow)
+aiohttp==3.12.15
+beautifulsoup4==4.12.3
+flask==3.0.3

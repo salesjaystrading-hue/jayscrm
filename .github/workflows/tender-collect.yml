@@ -1,0 +1,82 @@
+name: Tender collection
+
+# 06:00 IST daily = 00:30 UTC (GitHub cron is UTC). Also runnable by hand.
+# SAFE BY DEFAULT: runs are DRY-RUN (nothing is written to the CRM database) unless the repository
+# variable ENABLE_PRODUCTION_WRITES is set to the exact value "true" (Settings > Secrets and variables > Actions > Variables).
+on:
+  # Scheduled run is intentionally DISABLED until the manual dry-run and security checks pass (Phase 5).
+  # schedule:
+  #   - cron: "30 0 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "dry-run (default, writes nothing) or ingest (needs ENABLE_PRODUCTION_WRITES=true)"
+        type: choice
+        options: [dry-run, ingest]
+        default: dry-run
+      cppp_max_pages:
+        description: "CPPP listing pages to scan (10 tenders/page)"
+        default: "100"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tender-collect
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      # Pinned commit of PranavTamada/Tender_Scraper that was audited. Update deliberately after re-review.
+      SCRAPER_SHA: b0a29a293cabd86e84bf80e9386f3ab6c68a3a24
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: PranavTamada/Tender_Scraper
+          ref: ${{ env.SCRAPER_SHA }}
+          path: scraper
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: collector/requirements-scraper.txt
+      - run: pip install -r collector/requirements-scraper.txt
+      - name: Unit tests
+        run: python -m unittest discover -s collector/tests -v
+      - name: Build search terms from collector/jays_keywords.json
+        run: python -c "import sys;sys.path.insert(0,'collector');from relevance import Relevance;print('\n'.join(Relevance().search_terms()))" > terms.txt
+      - name: Decide mode
+        id: mode
+        env:
+          WRITES: ${{ vars.ENABLE_PRODUCTION_WRITES }}
+          REQ: ${{ github.event.inputs.mode }}
+        run: |
+          mode=dry-run
+          if [ "$WRITES" = "true" ] && { [ "$REQ" = "ingest" ] || [ "$GITHUB_EVENT_NAME" = "schedule" ]; }; then mode=ingest; fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Mode: $mode" >> "$GITHUB_STEP_SUMMARY"
+      - name: Collect GeM (open bids, keyword driven)
+        continue-on-error: true
+        run: python scraper/run_scraper.py --source gem --keywords-file terms.txt --out-dir out/gem
+      - name: Collect CPPP
+        continue-on-error: true
+        run: python scraper/run_scraper.py --source cppp --keywords-file terms.txt --max-pages "${{ github.event.inputs.cppp_max_pages || '100' }}" --out-dir out/cppp
+      - name: Validate, score and ${{ steps.mode.outputs.mode }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          mkdir -p out/all && cp out/gem/*.csv out/cppp/*.csv out/all/ 2>/dev/null || true
+          trigger=manual; [ "$GITHUB_EVENT_NAME" = "schedule" ] && trigger=scheduled
+          python collector/ingest.py out/all --mode "${{ steps.mode.outputs.mode }}" --trigger "$trigger" --report collector_report.json
+          { echo '### Collector report'; echo '```json'; head -c 6000 collector_report.json; echo; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: collector-report
+          path: collector_report.json
+          if-no-files-found: ignore
