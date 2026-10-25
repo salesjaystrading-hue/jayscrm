@@ -1382,10 +1382,13 @@ const Paginate = {
     const st = this.get(module);
     const total = list.length;
     const totalPages = Math.max(1, Math.ceil(total/st.perPage));
-    if(st.page>totalPages) st.page = totalPages;
     if(st.page<1) st.page = 1;
-    const start = (st.page-1)*st.perPage;
-    return { pageItems: list.slice(start, start+st.perPage), page: st.page, perPage: st.perPage, total, totalPages, start: total?start+1:0, end: Math.min(start+st.perPage, total) };
+    /* Clamp for DISPLAY only. The remembered page is not overwritten: when a list is briefly short or empty
+       (data still loading in the background, a re-render before filters are read) the user's page must survive,
+       otherwise coming back from a detail view dropped them to page 1. */
+    const page = Math.min(st.page, totalPages);
+    const start = (page-1)*st.perPage;
+    return { pageItems: list.slice(start, start+st.perPage), page, perPage: st.perPage, total, totalPages, start: total?start+1:0, end: Math.min(start+st.perPage, total) };
   },
   setPage(module, p, rerender){ this.get(module).page = Number(p); rerender(); },
   setPerPage(module, n, rerender){ const st=this.get(module); st.perPage=Number(n); st.page=1; rerender(); },
@@ -16582,6 +16585,9 @@ const OppFinder = {
 
   /* ---------------- filtering ---------------- */
   readFilters(){
+    /* If the filter controls are not on screen (view re-rendered while loading, or coming back from a detail
+       view) keep the filters the user had instead of resetting them to defaults. */
+    if(!document.getElementById('oppType') && this.filters) return;
     const g = id => { const el = document.getElementById(id); return el ? el.value : ''; };
     this.filters = {
       q: oppNormMl(g('oppSearch')), band: g('oppBand'), type: g('oppType')||'ALL', type2: g('oppType2')||'ALL', rel: g('oppRel')||'possible',
