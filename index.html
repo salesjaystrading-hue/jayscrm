@@ -15624,6 +15624,17 @@ function oppReasons(r){
   if(b.zeroExpenditure) out.push('Zero expenditure so far +'+b.zeroExpenditure);
   return out;
 }
+/* Expenditure completed % = Expenditure / FundTotal * 100 (same rule as the database function opp_exp_pct).
+   An explicit percentage column wins if the file has one. Returns null when blank/invalid -> kept for review. */
+function oppExpPct(r){
+  const num = v=>{ const t = String(v==null?'':v).replace(/[%,\s]/g,''); return /^[0-9]+(\.[0-9]+)?$/.test(t) ? Number(t) : null; };
+  for(const k of ['Expenditure Completed %','Expenditure %','Expenditure Percentage','Expenditure Completed','Expenditure Completed Percentage']){
+    if(r[k]!==undefined && String(r[k]).trim()!=='') return num(r[k]);
+  }
+  const e = num(r['Expenditure']), f = num(r['FundTotal']);
+  if(e===null || f===null || f<=0) return null;
+  return e*100/f;
+}
 function oppMoney(v){ const n = Number(String(v==null?'':v).replace(/[,\u20B9\s]/g,'')); return isNaN(n)?0:n; }
 /* Finds a value on a row by trying several likely header names, first
    as an exact match, then case/punctuation-insensitively against the
@@ -16366,6 +16377,17 @@ const OppFinder = {
   async importIncoming(incoming, source, skipped){
     if(!incoming.length){ this.setMsg('No rows detected.'); return false; }
     skipped = skipped||0;
+    // Rule: expenditure completed >= 70% is never stored. Unknown (blank/invalid) values are kept for review.
+    const totalRows = incoming.length;
+    const doneSet = new Set(incoming.filter(r=>{ const p=oppExpPct(r); return p!==null && p>=70; }));
+    const completedN = doneSet.size, reviewN = incoming.filter(r=>oppExpPct(r)===null).length;
+    if(completedN) incoming = incoming.filter(r=>!doneSet.has(r));
+    if(!incoming.length){
+      this.setMsg('Nothing imported: all '+totalRows+' row(s) have expenditure completed at 70% or above. Projects with expenditure completed at 70% or above were skipped.');
+      Store.data.oppImportHistory.unshift({date:new Date().toISOString(), source:source||'Excel Import', records:totalRows, newCount:0, updated:0, duplicates:0, skipped, skippedCompleted:completedN, review:reviewN, failed:0});
+      Store.data.oppImportHistory = Store.data.oppImportHistory.slice(0,30); await Store.save('oppImportHistory');
+      return true;
+    }
     this.setMsg('Saving to database\u2026');
     const res = await this.mergeChunked(incoming, 'Saving');
     const failedN = res.failed.length;
@@ -16385,7 +16407,7 @@ const OppFinder = {
     this.health = null;
     const added = res.newCount, updated = res.updatedCount;
     Store.data.oppImportHistory.unshift({date:new Date().toISOString(), source:source||'Excel Import',
-      records:incoming.length, newCount:added, updated, duplicates:updated, skipped, failed:failedN});
+      records:totalRows, newCount:added, updated, duplicates:updated, skipped, skippedCompleted:completedN, review:reviewN, failed:failedN});
     Store.data.oppImportHistory = Store.data.oppImportHistory.slice(0,30);
     const ok2 = await Store.save('oppImportHistory');
     if(ok2) await Activity.log('Project opportunity data imported', incoming.length+' row(s), '+added+' new, '+updated+' updated'+(skipped?', '+skipped+' skipped':'')+(failedN?', '+failedN+' FAILED':''));
@@ -16401,7 +16423,7 @@ const OppFinder = {
       return false;
     }
     this.render();
-    this.setMsg('Imported '+incoming.length+' rows \u2022 '+added+' new \u2022 '+updated+' updated'+(skipped?' \u2022 '+skipped+' skipped (no ID)':'')+' (merged server-side).');
+    this.setMsg('Processed '+totalRows+' rows \u2022 '+added+' new \u2022 '+updated+' existing updated'+(skipped?' \u2022 '+skipped+' skipped (no ID)':'')+' \u2022 '+completedN+' skipped (expenditure \u226570%)'+' \u2022 '+reviewN+' need expenditure review \u2022 0 failed. Projects with expenditure completed at 70% or above were skipped.');
     return true;
   },
   /* Re-render dashboards without wiping the retry box */
@@ -16470,6 +16492,8 @@ const OppFinder = {
           '<div><div style="font-size:19px;font-weight:700;'+(invalid.length?'color:var(--red,#dc2626);':'')+'">'+invalid.length+'</div><div class="hint">Invalid (no ID)</div></div>' +
         '</div>' +
         mapHTML +
+        (()=>{ const done = incoming.filter(r=>{ const p=oppExpPct(r); return p!==null && p>=70; }).length, rev = incoming.filter(r=>oppExpPct(r)===null).length;
+          return '<div class="hint" style="margin-top:8px;"><b>'+done.toLocaleString()+'</b> project(s) with expenditure completed at 70% or above will be skipped.'+(rev?' <b>'+rev.toLocaleString()+'</b> row(s) have a blank or invalid expenditure value and are imported for review.':'')+'</div>'; })() +
         (invalid.length ? '<div class="hint" style="margin-top:8px;">Invalid rows have neither a Project No nor an LB Name, so they can\'t be safely matched against existing records \u2014 they will be skipped. <a href="#" onclick="OppFinder.downloadInvalid();return false;">Download these '+invalid.length+' skipped row(s) as CSV</a></div>' : '') +
         (severeCollision ? '<div class="card card-pad" style="margin-top:10px;border-left:4px solid var(--red,#dc2626);">' +
           '<b style="color:var(--red,#dc2626);">&#9888; '+incoming.length+' rows only produced '+uniqueBatchKeys+' unique record(s).</b>' +
@@ -16908,7 +16932,75 @@ const OppFinder = {
       '<p class="hint" style="margin:0 0 14px;">Pick a district and delete every saved project of that district (all categories). A backup file is downloaded first and you must type the district name to confirm. Other districts, My Opportunities tracking and keywords are not affected. This cannot be undone.</p>' +
       '<div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;"><div class="field" style="min-width:260px;margin:0;"><label>Filter by district</label><select id="delDistrict" onchange="OppFinder.delPreview()"><option value="">Select a district&hellip;</option>'+opts+'</select></div>' +
       '<button id="delBtn" class="btn btn-sm" style="background:#dc2626;color:#fff;" onclick="OppFinder.deleteDistrict()">Delete data</button></div>' +
-      '<div id="delInfo" class="hint" style="margin-top:12px;">Total saved projects: '+Store.data.oppProjects.length.toLocaleString()+'</div></div>';
+      '<div id="delInfo" class="hint" style="margin-top:12px;">Total saved projects: '+Store.data.oppProjects.length.toLocaleString()+'</div></div>' + this.cleanCardHTML();
+  },
+  /* ---- Completed-project cleanup: expenditure completed >= 70% (Admin only, preview -> backup file -> delete) ---- */
+  cleanCardHTML(){
+    return '<div class="card card-pad" style="margin-top:16px;"><h3 style="margin:0 0 6px;">Remove completed projects (expenditure 70% or more) <span class="badge" style="background:#fee2e2;color:#b91c1c;">Admin only</span></h3>' +
+      '<p class="hint" style="margin:0 0 12px;">Expenditure completed = Expenditure \u00F7 Fund Total. Projects at 70% or above are removed from Project Opportunities only. Projects with a blank or invalid value are never removed. Projects saved in My Opportunities are protected. Step 1 preview \u2192 step 2 download a backup file \u2192 step 3 delete.</p>' +
+      '<div class="toolbar"><button class="btn btn-outline btn-sm" onclick="OppFinder.cleanPreview()">1. Preview (nothing is deleted)</button></div><div id="cleanBox" style="margin-top:12px;"></div></div>';
+  },
+  cleanMsg(html, bad){ const b=document.getElementById('cleanBox'); if(b) b.innerHTML = '<div style="padding:10px 12px;border-radius:8px;font-size:13px;'+(bad?'background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;':'background:#f0fdf4;color:#166534;border:1px solid #bbf7d0;')+'">'+html+'</div>'; },
+  async cleanPreview(){
+    if(!Auth.isAdmin()){ UI.toast('Admin only'); return; }
+    this.cleanMsg('Checking the database\u2026');
+    const { data, error } = await sb.rpc('opp_cleanup_preview');
+    if(error){ this.cleanMsg('Preview failed: '+Util.escapeHtml(error.message), true); return; }
+    this._clean = { expected: data.eligible, backedUp: 0, keys: null };
+    const n = x=>Number(x||0).toLocaleString('en-IN'), E = Util.escapeHtml;
+    const rows = (data.sample||[]).map(x=>'<tr><td class="mono">'+E(x.project_no||'')+'</td><td>'+E(x.name||'')+'</td><td>'+E(x.lb||'')+'</td><td class="mono">'+E(x.fund||'')+'</td><td class="mono">'+E(x.expenditure||'')+'</td><td><b>'+E(x.pct)+'%</b></td></tr>').join('');
+    document.getElementById('cleanBox').innerHTML =
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:10px;">' +
+        [['Projects checked',data.total,''],['Will be removed (\u226570%)',data.eligible,'color:#b91c1c;'],['Kept (below 70%)',data.below_70,'color:#166534;'],['Kept for review (blank/invalid)',data.review_blank_invalid,'color:#b45309;'],['Protected (saved in My Opportunities)',data.tracked_protected,'']]
+        .map(c=>'<div class="card card-pad" style="padding:9px;text-align:center;"><div style="font-size:19px;font-weight:700;'+c[2]+'">'+n(c[1])+'</div><div class="hint">'+c[0]+'</div></div>').join('') + '</div>' +
+      '<div class="hint">Estimated data in the rows to remove: about '+(Number(data.eligible_bytes||0)/1048576).toFixed(1)+' MB (actual database savings may differ). '+(data.over_100? n(data.over_100)+' of them show expenditure above the fund total (data oddity).':'')+'</div>' +
+      (data.eligible ? '<div class="table-wrap" style="margin-top:8px;max-height:260px;overflow:auto;"><table><thead><tr><th>Project No</th><th>Project</th><th>Local body</th><th>Fund</th><th>Expenditure</th><th>Spent</th></tr></thead><tbody>'+rows+'</tbody></table></div><div class="hint">First 25 of '+n(data.eligible)+' shown (highest % first).</div>' +
+        '<div class="toolbar" style="margin-top:10px;"><button class="btn btn-outline btn-sm" id="cleanBackupBtn" onclick="OppFinder.cleanBackup()">2. Download backup file</button><button class="btn btn-sm" id="cleanDelBtn" style="background:#dc2626;color:#fff;opacity:.5;" disabled onclick="OppFinder.cleanDeleteAsk()">3. Delete '+n(data.eligible)+' project(s)</button></div><div id="cleanProg" class="hint" style="margin-top:6px;"></div>'
+        : '<div style="margin-top:8px;">Nothing to remove.</div>');
+  },
+  async cleanBackup(){
+    const c = this._clean; if(!c) return; const prog = document.getElementById('cleanProg'), all = [];
+    try{
+      let after = null;
+      for(let g=0; g<200; g++){
+        const { data, error } = await sb.rpc('opp_cleanup_page', { p_after_key: after, p_limit: 1000 });
+        if(error) throw error;
+        if(!data || !data.length) break;
+        all.push.apply(all, data); after = data[data.length-1].key;
+        if(prog) prog.textContent = 'Backing up\u2026 '+all.length.toLocaleString()+' / '+Number(c.expected).toLocaleString();
+      }
+      if(all.length !== Number(c.expected)) throw new Error('Backup has '+all.length+' rows but '+c.expected+' were expected. Run the preview again.');
+      const blob = new Blob([JSON.stringify(all)], {type:'application/json'});
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'opportunity-completed-70pct-backup-'+new Date().toISOString().slice(0,10)+'.json'; document.body.appendChild(a); a.click(); a.remove();
+      c.backedUp = all.length; c.keys = new Set(all.map(x=>x.key));
+      if(prog) prog.innerHTML = '<b style="color:#166534;">Backup downloaded ('+all.length.toLocaleString()+' projects).</b> Keep the file safe, then press step 3.';
+      const d = document.getElementById('cleanDelBtn'); if(d){ d.disabled = false; d.style.opacity = 1; }
+    }catch(e){ console.error(e); if(prog) prog.innerHTML = '<span style="color:#b91c1c;">Backup failed: '+Util.escapeHtml(e.message||String(e))+'. Nothing was deleted.</span>'; }
+  },
+  cleanDeleteAsk(){
+    const c = this._clean; if(!c || !c.backedUp){ UI.toast('Download the backup first'); return; }
+    UI.openModal('Delete completed projects', '<p style="margin:0 0 10px;">This permanently removes <b>'+Number(c.backedUp).toLocaleString()+'</b> project(s) with expenditure completed at 70% or above from Project Opportunities. Other CRM data is not touched.</p><div class="field"><label>Type DELETE to confirm</label><input id="cleanConfirm" autocomplete="off" placeholder="DELETE"></div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn" style="background:#dc2626;color:#fff;" onclick="OppFinder.cleanDelete()">Delete permanently</button>');
+  },
+  async cleanDelete(){
+    const c = this._clean; if(!Auth.isAdmin() || !c || !c.backedUp) return;
+    if(((document.getElementById('cleanConfirm')||{}).value||'').trim() !== 'DELETE'){ UI.toast('Type DELETE to confirm - nothing was deleted'); return; }
+    UI.closeModal(); const prog = document.getElementById('cleanProg'); let total = 0, first = true;
+    try{
+      for(let g=0; g<100; g++){
+        const { data, error } = await sb.rpc('opp_cleanup_delete', { p_expected: first ? c.expected : null, p_limit: 3000 });
+        if(error) throw error;
+        first = false; total += (data && data.deleted) || 0;
+        if(prog) prog.textContent = 'Deleting\u2026 '+total.toLocaleString()+' of '+Number(c.expected).toLocaleString()+' removed.';
+        if(!data || !data.deleted || !data.remaining_eligible) break;
+      }
+      Store.data.oppProjects = Store.data.oppProjects.filter(r=>!c.keys.has(oppKeyOf(r)));
+      try{ OppMatch.invalidate(); }catch(e){} try{ Store.oppCacheClear(); }catch(e){}
+      this.health = null;
+      await Activity.log('Completed projects removed (expenditure >= 70%)', total+' project(s)');
+      this._clean = null;
+      this.cleanMsg('<b>Done.</b> '+total.toLocaleString()+' completed project(s) removed. '+Store.data.oppProjects.length.toLocaleString()+' projects remain. You can run the preview again safely at any time.');
+    }catch(e){ console.error(e); if(prog) prog.innerHTML = '<span style="color:#b91c1c;">Stopped: '+Util.escapeHtml(e.message||String(e))+'. '+total.toLocaleString()+' removed so far. Run the preview again.</span>'; }
   },
   delPreview(){
     const d = (document.getElementById('delDistrict')||{}).value || '', el = document.getElementById('delInfo'); if(!el) return;
@@ -17051,6 +17143,7 @@ const OppFinder = {
         OPP_FIELDS.filter(f=>r[f]!==undefined && r[f]!=='').map(f=>
           '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">'+E(f)+'</div>'+E(r[f])+'</div>').join('') +
         '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">Opportunity Score</div><b>'+r.score+'%</b> <span class="badge badge-gray">'+oppBandOf(r.score)+'</span></div>' +
+        '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">Expenditure Completed</div>'+(()=>{ const p = oppExpPct(r); return p===null ? '<span class="hint">Not available - review</span>' : '<b>'+(Math.round(p*10)/10)+'%</b>'; })()+'</div>' +
         '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">Category</div>'+E(OPP_CATEGORY_NAMES[r.type])+'</div>' +
         '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">Matched Keywords</div>'+r.hits.map(x=>'<span class="badge badge-gray">'+E(x)+'</span>').join(' ')+'</div>' +
       '</div>' +
@@ -17392,7 +17485,7 @@ const OppFinder = {
           '<td class="cell-mute">'+Util.escapeHtml(r['District']||'')+'</td>' +
           '<td class="cell-mute">'+Util.escapeHtml(r['Sector']||'')+'</td>' +
           '<td class="cell-mute">'+Util.escapeHtml(tr.status||'New')+'</td>' +
-          '<td class="mono">\u20B9'+oppMoney(r['FundTotal']).toLocaleString('en-IN')+'</td>' +
+          '<td class="mono">\u20B9'+oppMoney(r['FundTotal']).toLocaleString('en-IN')+(()=>{ const p = oppExpPct(r); return p===null ? '' : '<div class="hint">'+(Math.round(p*10)/10)+'% spent</div>'; })()+'</td>' +
           '<td>'+this.whyCell(r, OppMatch.get(r), f.type)+'</td>' +
         '</tr>';
       }).join('') : '<tr><td colspan="12" class="cell-mute" style="text-align:center;padding:20px;">No matching projects found.</td></tr>') +
