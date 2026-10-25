@@ -2740,8 +2740,13 @@ const UI = {
     document.getElementById('modalFoot').innerHTML = footHtml || '';
     document.getElementById('modalBox').className = 'modal' + (wide? ' wide':'');
     document.getElementById('modalOverlay').style.display='flex';
+    /* Phone / browser Back button should close the pop-up, not leave the page and lose the list position. */
+    if(!this._modalHist){ try{ history.pushState({jaysModal:1}, ''); this._modalHist = true; }catch(e){} }
   },
-  closeModal(){ document.getElementById('modalOverlay').style.display='none'; },
+  closeModal(){
+    document.getElementById('modalOverlay').style.display='none';
+    if(this._modalHist){ this._modalHist = false; this._skipPop = true; try{ history.back(); }catch(e){ this._skipPop = false; } }
+  },
   openDrawer(html){
     document.getElementById('drawerBox').innerHTML = html;
     document.getElementById('drawerOverlay').style.display='block';
@@ -3689,6 +3694,12 @@ const QuickCreate = {
 document.addEventListener('click', function(e){
   if(e.target.closest && e.target.closest('.qc-wrap')) return;
   QuickCreate.close();
+});
+
+window.addEventListener('popstate', function(){
+  if(UI._skipPop){ UI._skipPop = false; return; }
+  const modal = document.getElementById('modalOverlay');
+  if(modal && modal.style.display !== 'none' && modal.style.display !== ''){ UI._modalHist = false; modal.style.display = 'none'; }
 });
 
 document.addEventListener('keydown', function(e){
@@ -17249,6 +17260,17 @@ const OppFinder = {
       tabs.map(([id,label])=>'<button class="'+(this.tab===id?'active':'')+'" onclick="OppFinder.setTab(\''+id+'\')">'+label+'</button>').join('') +
     '</div>';
   },
+  /* Remember tab, filters and page for this browser tab so a reload / Back never drops you to page 1. */
+  saveState(){ try{ sessionStorage.setItem('jays_opp_state_v1', JSON.stringify({tab:this.tab, filters:this.filters, page:Paginate.get('oppfinder').page, perPage:Paginate.get('oppfinder').perPage})); }catch(e){} },
+  restoreState(){
+    if(this._restored) return; this._restored = true;
+    try{
+      const st = JSON.parse(sessionStorage.getItem('jays_opp_state_v1')||'null'); if(!st) return;
+      if(st.tab) this.tab = st.tab;
+      if(st.filters && typeof st.filters==='object') this.filters = Object.assign({}, this.filters, st.filters);
+      const p = Paginate.get('oppfinder'); if(st.perPage) p.perPage = Number(st.perPage)||p.perPage; if(st.page) p.page = Number(st.page)||1;
+    }catch(e){}
+  },
   render(){
     const body = this.tab==='dashboard' ? this.renderDashboard()
       : this.tab==='projects' ? this.renderProjects()
@@ -17259,6 +17281,7 @@ const OppFinder = {
       : this.renderReports();
     document.getElementById('content').innerHTML = this.switcherHTML() + body;
     if(this.tab==='products') this.renderKwTable();
+    this.saveState();
   },
 
   renderDashboard(){
@@ -17566,7 +17589,7 @@ const OppFinder = {
     '</div>';
   }
 };
-Views.oppfinder = ()=>OppFinder.seedKeywordGroups().then(()=>OppFinder.prepare()).then(()=>OppFinder.render());
+Views.oppfinder = ()=>OppFinder.seedKeywordGroups().then(()=>OppFinder.prepare()).then(()=>{ OppFinder.restoreState(); OppFinder.render(); });
 
 const Reports = {
   render(){
