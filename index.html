@@ -7243,6 +7243,7 @@ const TenderCentre = {
   },
   async convert(id){
     if(this.busy) return; this.busy = true;
+    let claimed = null;
     const btn = document.getElementById('tc_convBtn'); if(btn) btn.disabled = true;
     try{
       const { data: t, error } = await sb.from('tenders').select('*').eq('id', id).maybeSingle();
@@ -7262,13 +7263,25 @@ const TenderCentre = {
         publishedDate: tenderIstDate(t.published_at), startDate: tenderIstDate(t.published_at), endDate: tenderIstDate(t.closing_at), openingDate:'', offerValidity:'',
         status:'New', assignedTo: t.assigned_to||'', sourceUrl: tenderSafeUrl(t.source_url)
       };
-      // Link the tender FIRST: if this succeeds and the bid save fails, the worst case is a
-      // retryable tender marked converted - never two bids for one tender.
-      const up = await sb.from('tenders').update({linked_bid_id: bidId, review_status:'converted', changed_since_review:false}).eq('id', t.id).is('linked_bid_id', null);
+      // Claim the tender FIRST, atomically (only if nobody linked it meanwhile). If the claim matched no row,
+      // another user/tab got there first - stop, so one tender can never produce two bids.
+      const prevReview = t.review_status;
+      const up = await sb.from('tenders').update({linked_bid_id: bidId, review_status:'converted', changed_since_review:false}).eq('id', t.id).is('linked_bid_id', null).select('id');
       if(up.error) throw new Error(up.error.message);
+      if(!up.data || up.data.length!==1) throw new Error('This tender was just converted by someone else');
+      claimed = {id:t.id, prevReview};
       Store.data.bids.unshift(bid);
       Store.data.counters.bidNext = (Store.data.counters.bidNext||1)+1;
-      await Store.save('counters'); await Store.save('bids');
+      try{
+        await Store.save('counters'); await Store.save('bids');
+      }catch(saveErr){
+        // Bid could not be saved: undo the in-memory bid and release the tender so the user can retry.
+        Store.data.bids = Store.data.bids.filter(b=>b.id!==bidId);
+        Store.data.counters.bidNext = Math.max(1,(Store.data.counters.bidNext||1)-1);
+        await sb.from('tenders').update({linked_bid_id:null, review_status:prevReview}).eq('id', t.id).eq('linked_bid_id', bidId);
+        claimed = null;
+        throw saveErr;
+      }
       await Activity.log('Tender converted to bid', bidId+' ← '+t.title);
       UI.closeModal(); UI.toast('Bid created');
       go('bidsearch'); setTimeout(()=>BidSearch.openDetail(bidId), 80);
