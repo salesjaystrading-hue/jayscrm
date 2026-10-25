@@ -4,9 +4,9 @@ name: Tender collection
 # SAFE BY DEFAULT: runs are DRY-RUN (nothing is written to the CRM database) unless the repository
 # variable ENABLE_PRODUCTION_WRITES is set to the exact value "true" (Settings > Secrets and variables > Actions > Variables).
 on:
-  # Scheduled run is intentionally DISABLED until the manual dry-run and security checks pass (Phase 5).
-  # schedule:
-  #   - cron: "30 0 * * *"
+  # 06:00 IST. The scheduled job does NOTHING unless repository variable ENABLE_SCHEDULE = "true".
+  schedule:
+    - cron: "30 0 * * *"
   workflow_dispatch:
     inputs:
       mode:
@@ -27,6 +27,7 @@ concurrency:
 
 jobs:
   collect:
+    if: github.event_name != 'schedule' || vars.ENABLE_SCHEDULE == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:

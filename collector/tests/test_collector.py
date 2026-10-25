@@ -45,6 +45,10 @@ class T(unittest.TestCase):
     def test_no_secret_in_source(self):
         src = open(os.path.join(os.path.dirname(__file__), "..", "ingest.py")).read()
         self.assertNotIn("eyJ", src); self.assertNotIn("print(key", src)
+    def test_silent_sources(self):
+        from ingest import silent_sources
+        self.assertEqual(silent_sources([{'source':'gem'}]), ['CPPP'])
+        self.assertEqual(silent_sources([]), ['GEM','CPPP'])
     def test_config_valid(self):
         self.assertTrue(len(R.search_terms()) > 20)
 

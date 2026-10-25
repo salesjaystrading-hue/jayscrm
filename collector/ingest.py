@@ -29,6 +29,33 @@ def rpc(url, key, portal, rows, trigger, dry):
         raise RuntimeError("ingest HTTP %s: %s" % (e.code, e.read().decode()[:300]))  # body only, never headers
 
 
+def rest(url, key, method, path, payload=None):
+    req = urllib.request.Request(url.rstrip("/") + "/rest/v1/" + path, method=method,
+                                 data=None if payload is None else json.dumps(payload).encode(),
+                                 headers={"apikey": key, "Authorization": "Bearer " + key, "Content-Type": "application/json", "Prefer": "return=representation"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        raise RuntimeError("REST HTTP %s: %s" % (e.code, e.read().decode()[:300]))
+
+
+def silent_sources(recs, expected=("gem", "cppp")):
+    """Automated sources that returned zero rows (blocked, down or scraper failure)."""
+    seen = {(r.get("source") or "").strip().lower() for r in recs}
+    return [s.upper() for s in expected if s not in seen]
+
+
+def record_failed_run(url, key, portal, trigger, reason):
+    src = rest(url, key, "GET", "tender_sources?select=id&portal_code=eq." + portal)
+    if not src:
+        return
+    rest(url, key, "POST", "tender_collection_runs", {"source_id": src[0]["id"], "portal_code": portal, "finished_at": __import__("datetime").datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+         "trigger_type": trigger, "status": "failed", "file_name": "github-actions", "records_found": 0, "records_inserted": 0, "records_updated": 0,
+         "duplicates_skipped": 0, "records_rejected": 0, "error_summary": [{"row": 0, "reason": reason}]})
+    rest(url, key, "PATCH", "tender_sources?id=eq." + src[0]["id"], {"last_attempt_at": __import__("datetime").datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"), "last_run_status": "failed", "last_run_message": reason[:200]})
+
+
 def main(folder, mode="dry-run", trigger="manual", report="collector_report.json"):
     dry = mode != "ingest"
     rel = Relevance()
@@ -42,6 +69,11 @@ def main(folder, mode="dry-run", trigger="manual", report="collector_report.json
         by_portal.setdefault(row.pop("portal"), []).append(row)
     summary = {"mode": mode, "scraped": len(recs), "skipped": skipped, "portals": {}}
     url, key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    summary["silent_sources"] = silent_sources(recs)
+    if summary["silent_sources"] and not dry and url and key:
+        for portal in summary["silent_sources"]:
+            record_failed_run(url, key, portal, trigger if trigger in ("manual", "scheduled") else "manual",
+                              "No rows scraped - portal blocked, down, or scraper error. Nothing was changed.")
     for portal, rows in by_portal.items():
         # the DB rejects rows with INVALID: dates and records the reason; strip the marker value to null-safe string
         agg = {"sent": len(rows), "inserted": 0, "updated": 0, "duplicates_skipped": 0, "rejected": 0, "errors": []}
