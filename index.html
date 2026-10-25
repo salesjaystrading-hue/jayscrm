@@ -6805,22 +6805,22 @@ const DailySummary = {
 const TENDER_REVIEW_LABEL = {new:'New', under_review:'Under Review', shortlisted:'Shortlisted', rejected:'Rejected', converted:'Converted'};
 const TENDER_REVIEW_COLOR = {new:'blue', under_review:'amber', shortlisted:'green', rejected:'red', converted:'gray'};
 const TENDER_FIELDS = [
-  {k:'portal_tender_id', label:'Portal Tender / Bid ID', alias:['bid number','bid no','bid id','tender id','tender id ref','portal tender id','reference no','reference number','ref no']},
+  {k:'portal_tender_id', label:'Portal Tender / Bid ID', alias:['bid number','bid no','tender id ref no','bid number','bid no','bid id','tender id','tender id ref','portal tender id','reference no','reference number','ref no']},
   {k:'tender_number', label:'Tender Number', alias:['tender number','tender no','tender ref','nit no','nit number','nit','tender reference','e tender no']},
-  {k:'title', label:'Title', req:true, alias:['title','tender title','bid title','items','item','item category','work description','name of work','description of work','work name','tender description','subject']},
+  {k:'title', label:'Title', req:true, alias:['item category items','items category','item category items','bid items','items description','title and ref no tender id','name of the work','work title','title','tender title','bid title','items','item','item category','work description','name of work','description of work','work name','tender description','subject']},
   {k:'description', label:'Description', alias:['details','long description','scope','bid details','remarks']},
-  {k:'buyer_name', label:'Buyer / Department', alias:['department','department name','organisation','organization','organisation name','buyer','buyer name','ministry','tendering authority','tender inviting authority','office','tender owner']},
+  {k:'buyer_name', label:'Buyer / Department', alias:['department name and address','department name address','organisation chain','organization chain','organization name','ministry department','ministry state department','buyer department','department','department name','organisation','organization','organisation name','buyer','buyer name','ministry','tendering authority','tender inviting authority','office','tender owner']},
   {k:'buyer_location', label:'Buyer Location', alias:['buyer location','office location','delivery location','consignee location','place']},
   {k:'state', label:'State', alias:['state']},
   {k:'district', label:'District', alias:['district','dist']},
   {k:'category', label:'Category', alias:['category','product category','item category','tender category','type of work','work category']},
-  {k:'published_at', label:'Published Date', type:'date', alias:['published date','publish date','start date','bid start date','published on','tender published date','bid publish date','publication date']},
-  {k:'closing_at', label:'Closing Date', type:'date', alias:['closing date','end date','bid end date','bid submission end date','submission end date','due date','last date','bid closing date','closing on','bid end date time']},
-  {k:'estimated_value', label:'Estimated Value (₹)', type:'num', alias:['estimated value','tender value','value','estimated cost','estimated bid value','epc','tender value in','estimated amount','contract value']},
+  {k:'published_at', label:'Published Date', type:'date', alias:['bid start date time','start date time','e published date','epublished date','bid published date','bid start date and time','published date','publish date','start date','bid start date','published on','tender published date','bid publish date','publication date']},
+  {k:'closing_at', label:'Closing Date', type:'date', alias:['end date time','bid end date time','bid closing date time','closing date time','bid submission closing date','bid end date and time','closing date','end date','bid end date','bid submission end date','submission end date','due date','last date','bid closing date','closing on','bid end date time']},
+  {k:'estimated_value', label:'Estimated Value (₹)', type:'num', alias:['estimated bid value in rs','tender value in rs','estimated cost in rs','estimated value','tender value','value','estimated cost','estimated bid value','epc','tender value in','estimated amount','contract value']},
   {k:'emd_amount', label:'EMD (₹)', type:'num', alias:['emd','emd amount','earnest money','earnest money deposit','emd value']},
   {k:'tender_fee', label:'Tender Fee (₹)', type:'num', alias:['tender fee','document fee','bid fee','tender document fee','fee']},
   {k:'bid_type', label:'Bid Type', alias:['bid type','tender type','type','procurement type','mode']},
-  {k:'source_url', label:'Official Source URL', type:'url', alias:['url','link','source url','bid url','tender url','official link','document link','web link']},
+  {k:'source_url', label:'Official Source URL', type:'url', alias:['bid document','document url','detail link','tender link','url','link','source url','bid url','tender url','official link','document link','web link']},
   {k:'source_status', label:'Portal Status', alias:['status','bid status','tender status','portal status']}
 ];
 function tenderNormHeader(h){ return String(h==null?'':h).toLowerCase().replace(/[^a-z0-9]+/g,' ').trim(); }

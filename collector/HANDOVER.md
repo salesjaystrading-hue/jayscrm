@@ -1,5 +1,7 @@
 # Tender collection - handover
 
+> **Result of the first dry run (25 Oct 2026):** GitHub's servers could not reach GeM (connection refused) or CPPP (timeout), so 0 tenders were collected. The chosen working method is **Excel/CSV import in Tender Centre** (Import button). The GitHub collector below stays switched off (`ENABLE_SCHEDULE`/`ENABLE_PRODUCTION_WRITES` unset) unless it is moved to a machine in India.
+
 ## What is automated
 | Portal | Status |
 |---|---|
