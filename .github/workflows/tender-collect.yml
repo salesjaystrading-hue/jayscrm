@@ -89,6 +89,22 @@ jobs:
           trigger=manual; [ "$GITHUB_EVENT_NAME" = "schedule" ] && trigger=scheduled
           python collector/ingest.py out/all --mode "${{ steps.mode.outputs.mode }}" --trigger "$trigger" --report collector_report.json
           { echo '### Collector report'; echo '```json'; head -c 6000 collector_report.json; echo; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish readable notices (annotations)
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, os, glob
+          def esc(t): return t.replace('%','%25').replace('\r','').replace('\n','%0A')
+          for f in ('gem','cppp'):
+              lp = f'out/{f}.log'
+              tail = ''.join(open(lp, errors='replace').readlines()[-20:])[-1500:] if os.path.exists(lp) else '(no log)'
+              print(f"::notice title=Scraper {f.upper()} (csv files: {len(glob.glob(f'out/{f}/*.csv'))})::{esc(tail)}")
+          try:
+              r = json.load(open('collector_report.json'))
+              print('::notice title=Collector report::' + esc(json.dumps(r)[:3500]))
+          except Exception as e:
+              print('::warning title=Collector report::missing: ' + esc(str(e)))
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
