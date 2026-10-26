@@ -1382,13 +1382,10 @@ const Paginate = {
     const st = this.get(module);
     const total = list.length;
     const totalPages = Math.max(1, Math.ceil(total/st.perPage));
+    if(st.page>totalPages) st.page = totalPages;
     if(st.page<1) st.page = 1;
-    /* Clamp for DISPLAY only. The remembered page is not overwritten: when a list is briefly short or empty
-       (data still loading in the background, a re-render before filters are read) the user's page must survive,
-       otherwise coming back from a detail view dropped them to page 1. */
-    const page = Math.min(st.page, totalPages);
-    const start = (page-1)*st.perPage;
-    return { pageItems: list.slice(start, start+st.perPage), page, perPage: st.perPage, total, totalPages, start: total?start+1:0, end: Math.min(start+st.perPage, total) };
+    const start = (st.page-1)*st.perPage;
+    return { pageItems: list.slice(start, start+st.perPage), page: st.page, perPage: st.perPage, total, totalPages, start: total?start+1:0, end: Math.min(start+st.perPage, total) };
   },
   setPage(module, p, rerender){ this.get(module).page = Number(p); rerender(); },
   setPerPage(module, n, rerender){ const st=this.get(module); st.perPage=Number(n); st.page=1; rerender(); },
@@ -2740,13 +2737,8 @@ const UI = {
     document.getElementById('modalFoot').innerHTML = footHtml || '';
     document.getElementById('modalBox').className = 'modal' + (wide? ' wide':'');
     document.getElementById('modalOverlay').style.display='flex';
-    /* Phone / browser Back button should close the pop-up, not leave the page and lose the list position. */
-    if(!this._modalHist){ try{ history.pushState({jaysModal:1}, ''); this._modalHist = true; }catch(e){} }
   },
-  closeModal(){
-    document.getElementById('modalOverlay').style.display='none';
-    if(this._modalHist){ this._modalHist = false; this._skipPop = true; try{ history.back(); }catch(e){ this._skipPop = false; } }
-  },
+  closeModal(){ document.getElementById('modalOverlay').style.display='none'; },
   openDrawer(html){
     document.getElementById('drawerBox').innerHTML = html;
     document.getElementById('drawerOverlay').style.display='block';
@@ -3694,12 +3686,6 @@ const QuickCreate = {
 document.addEventListener('click', function(e){
   if(e.target.closest && e.target.closest('.qc-wrap')) return;
   QuickCreate.close();
-});
-
-window.addEventListener('popstate', function(){
-  if(UI._skipPop){ UI._skipPop = false; return; }
-  const modal = document.getElementById('modalOverlay');
-  if(modal && modal.style.display !== 'none' && modal.style.display !== ''){ UI._modalHist = false; modal.style.display = 'none'; }
 });
 
 document.addEventListener('keydown', function(e){
@@ -6816,22 +6802,22 @@ const DailySummary = {
 const TENDER_REVIEW_LABEL = {new:'New', under_review:'Under Review', shortlisted:'Shortlisted', rejected:'Rejected', converted:'Converted'};
 const TENDER_REVIEW_COLOR = {new:'blue', under_review:'amber', shortlisted:'green', rejected:'red', converted:'gray'};
 const TENDER_FIELDS = [
-  {k:'portal_tender_id', label:'Portal Tender / Bid ID', alias:['bid number','bid no','tender id ref no','bid number','bid no','bid id','tender id','tender id ref','portal tender id','reference no','reference number','ref no']},
+  {k:'portal_tender_id', label:'Portal Tender / Bid ID', alias:['bid number','bid no','bid id','tender id','tender id ref','portal tender id','reference no','reference number','ref no']},
   {k:'tender_number', label:'Tender Number', alias:['tender number','tender no','tender ref','nit no','nit number','nit','tender reference','e tender no']},
-  {k:'title', label:'Title', req:true, alias:['item category items','items category','item category items','bid items','items description','title and ref no tender id','name of the work','work title','title','tender title','bid title','items','item','item category','work description','name of work','description of work','work name','tender description','subject']},
+  {k:'title', label:'Title', req:true, alias:['title','tender title','bid title','items','item','item category','work description','name of work','description of work','work name','tender description','subject']},
   {k:'description', label:'Description', alias:['details','long description','scope','bid details','remarks']},
-  {k:'buyer_name', label:'Buyer / Department', alias:['department name and address','department name address','organisation chain','organization chain','organization name','ministry department','ministry state department','buyer department','department','department name','organisation','organization','organisation name','buyer','buyer name','ministry','tendering authority','tender inviting authority','office','tender owner']},
+  {k:'buyer_name', label:'Buyer / Department', alias:['department','department name','organisation','organization','organisation name','buyer','buyer name','ministry','tendering authority','tender inviting authority','office','tender owner']},
   {k:'buyer_location', label:'Buyer Location', alias:['buyer location','office location','delivery location','consignee location','place']},
   {k:'state', label:'State', alias:['state']},
   {k:'district', label:'District', alias:['district','dist']},
   {k:'category', label:'Category', alias:['category','product category','item category','tender category','type of work','work category']},
-  {k:'published_at', label:'Published Date', type:'date', alias:['bid start date time','start date time','e published date','epublished date','bid published date','bid start date and time','published date','publish date','start date','bid start date','published on','tender published date','bid publish date','publication date']},
-  {k:'closing_at', label:'Closing Date', type:'date', alias:['end date time','bid end date time','bid closing date time','closing date time','bid submission closing date','bid end date and time','closing date','end date','bid end date','bid submission end date','submission end date','due date','last date','bid closing date','closing on','bid end date time']},
-  {k:'estimated_value', label:'Estimated Value (₹)', type:'num', alias:['estimated bid value in rs','tender value in rs','estimated cost in rs','estimated value','tender value','value','estimated cost','estimated bid value','epc','tender value in','estimated amount','contract value']},
+  {k:'published_at', label:'Published Date', type:'date', alias:['published date','publish date','start date','bid start date','published on','tender published date','bid publish date','publication date']},
+  {k:'closing_at', label:'Closing Date', type:'date', alias:['closing date','end date','bid end date','bid submission end date','submission end date','due date','last date','bid closing date','closing on','bid end date time']},
+  {k:'estimated_value', label:'Estimated Value (₹)', type:'num', alias:['estimated value','tender value','value','estimated cost','estimated bid value','epc','tender value in','estimated amount','contract value']},
   {k:'emd_amount', label:'EMD (₹)', type:'num', alias:['emd','emd amount','earnest money','earnest money deposit','emd value']},
   {k:'tender_fee', label:'Tender Fee (₹)', type:'num', alias:['tender fee','document fee','bid fee','tender document fee','fee']},
   {k:'bid_type', label:'Bid Type', alias:['bid type','tender type','type','procurement type','mode']},
-  {k:'source_url', label:'Official Source URL', type:'url', alias:['bid document','document url','detail link','tender link','url','link','source url','bid url','tender url','official link','document link','web link']},
+  {k:'source_url', label:'Official Source URL', type:'url', alias:['url','link','source url','bid url','tender url','official link','document link','web link']},
   {k:'source_status', label:'Portal Status', alias:['status','bid status','tender status','portal status']}
 ];
 function tenderNormHeader(h){ return String(h==null?'':h).toLowerCase().replace(/[^a-z0-9]+/g,' ').trim(); }
@@ -6946,7 +6932,7 @@ const TenderCentre = {
 
   /* ----------------------------------------------------- page */
   async render(){
-    const tabs = [['tenders','Tenders'],['runs','Collection Runs'],['sources','Sources']];
+    const tabs = [['tenders','Tenders'],['runs','Import Runs'],['sources','Sources']];
     const head = `<div class="toolbar" style="gap:6px;flex-wrap:wrap;">${tabs.map(([k,l])=>`<button class="btn ${this.tab===k?'btn-primary':'btn-outline'} btn-sm" onclick="TenderCentre.setTab('${k}')">${l}</button>`).join('')}<div class="toolbar-spacer"></div></div>`;
     document.getElementById('content').innerHTML = head + '<div class="card card-pad"><div class="cell-mute">Loading tenders&hellip;</div></div>';
     try{
@@ -7050,54 +7036,23 @@ const TenderCentre = {
   },
 
   /* ----------------------------------------------------- runs + sources tabs */
-  runF: {portal:'', status:''},
-  setRunFilter(k, v){ this.runF[k] = v; this.render(); },
-  /* Browsers never scrape portals and never hold a service key. Automatic collection runs in GitHub Actions
-     (collector/ + .github/workflows/tender-collect.yml); this screen only shows its results. */
-  AUTOMATED: {GEM:true, CPPP:true},
-  ACTIONS_URL: 'https://github.com/salesjaystrading-hue/jayscrm/actions/workflows/tender-collect.yml',
-  sourceState(s){
-    if(!this.AUTOMATED[s.portal_code]) return {label:'Not configured', color:'gray', note:'Manual import / entry only'};
-    const m = {running:['Running','blue'], success:['Successful','green'], partial:['Partially successful','amber'], failed:['Failed','red']}[s.last_run_status];
-    if(m) return {label:m[0], color:m[1], note:''};
-    return {label:'Ready for dry run', color:'blue', note:'Run a dry run in GitHub Actions first'};
-  },
   async runsHTML(){
-    let qb = sb.from('tender_collection_runs').select('*').order('started_at', {ascending:false}).limit(100);
-    if(this.runF.portal) qb = qb.eq('portal_code', this.runF.portal);
-    if(this.runF.status) qb = qb.eq('status', this.runF.status);
-    const [{ data, error }, src] = await Promise.all([qb, sb.from('tender_sources').select('portal_code').order('portal_code')]);
+    const { data, error } = await sb.from('tender_collection_runs').select('*').order('started_at', {ascending:false}).limit(50);
     if(error) throw new Error(error.message);
-    this._runs = data || [];
     const color = {success:'green', partial:'amber', failed:'red', running:'blue', cancelled:'gray'};
-    const opt = (list, cur, all)=>`<option value="">${all}</option>` + list.map(([v,l])=>`<option value="${Util.escapeHtml(v)}" ${v===cur?'selected':''}>${Util.escapeHtml(l)}</option>`).join('');
-    const errOf = r=>{ const e = r.error_summary; if(!e) return ''; const first = Array.isArray(e) ? e[0] : e; return first ? (first.reason || (typeof first==='string' ? first : JSON.stringify(first))) : ''; };
-    return `<div class="toolbar" style="gap:6px;flex-wrap:wrap;margin-bottom:8px;">
-        <select onchange="TenderCentre.setRunFilter('portal',this.value)">${opt((src.data||[]).map(x=>[x.portal_code,x.portal_code]), this.runF.portal, 'All sources')}</select>
-        <select onchange="TenderCentre.setRunFilter('status',this.value)">${opt([['success','Successful'],['partial','Partially successful'],['failed','Failed'],['running','Running']], this.runF.status, 'All results')}</select>
-        <div class="toolbar-spacer"></div><button class="btn btn-outline btn-sm" onclick="TenderCentre.exportRuns()">Export runs (CSV)</button></div>
-      <div class="card"><div class="table-wrap">${this._runs.length ? `<table><thead><tr><th>When</th><th>Source</th><th>Trigger</th><th>Result</th><th>Found</th><th>New</th><th>Updated</th><th>Unchanged</th><th>Rejected</th><th>First problem</th></tr></thead><tbody>
-      ${this._runs.map(r=>`<tr><td class="cell-mute">${tenderFmtDateTime(r.started_at)}</td><td>${Util.escapeHtml(r.portal_code)}</td><td class="cell-mute">${Util.escapeHtml(r.trigger_type)}${r.file_name?' &middot; '+Util.escapeHtml(r.file_name):''}</td>
-        <td><span class="badge badge-${color[r.status]||'gray'}">${Util.escapeHtml(r.status)}</span></td><td>${Number(r.records_found)||0}</td><td>${Number(r.records_inserted)||0}</td><td>${Number(r.records_updated)||0}</td><td>${Number(r.duplicates_skipped)||0}</td><td>${Number(r.records_rejected)||0}</td><td class="cell-mute" style="max-width:260px;">${Util.escapeHtml(String(errOf(r)).slice(0,160))}</td></tr>`).join('')}
-      </tbody></table>` : `<div class="empty-state"><div class="ic">&#128203;</div><div class="t">No runs match</div><div class="d">Every import, manual entry and automatic collection is logged here.</div></div>`}</div></div>`;
-  },
-  exportRuns(){
-    const cell = v=>'"' + String(v==null?'':v).replace(/"/g,'""').replace(/^([=+\-@])/, "'$1") + '"';
-    const head = ['started_at','portal_code','trigger_type','status','records_found','records_inserted','records_updated','duplicates_skipped','records_rejected','file_name'];
-    const csv = '﻿' + [head, ...(this._runs||[]).map(r=>head.map(h=>r[h]))].map(r=>r.map(cell).join(',')).join('\r\n');
-    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], {type:'text/csv'})); a.download = 'tender-runs-'+Util.todayISO()+'.csv'; a.click();
-    setTimeout(()=>URL.revokeObjectURL(a.href), 5000);
+    return `<div class="card"><div class="table-wrap">${(data||[]).length ? `<table><thead><tr><th>When</th><th>Source</th><th>File</th><th>Result</th><th>Found</th><th>New</th><th>Updated</th><th>Unchanged</th><th>Rejected</th></tr></thead><tbody>
+      ${data.map(r=>`<tr><td class="cell-mute">${tenderFmtDateTime(r.started_at)}</td><td>${Util.escapeHtml(r.portal_code)}</td><td class="cell-mute">${Util.escapeHtml(r.file_name||r.trigger_type)}</td>
+        <td><span class="badge badge-${color[r.status]||'gray'}">${Util.escapeHtml(r.status)}</span></td><td>${r.records_found}</td><td>${r.records_inserted}</td><td>${r.records_updated}</td><td>${r.duplicates_skipped}</td><td>${r.records_rejected}</td></tr>`).join('')}
+      </tbody></table>` : `<div class="empty-state"><div class="ic">&#128203;</div><div class="t">No imports yet</div><div class="d">Every import and manual entry is logged here.</div></div>`}</div></div>`;
   },
   async sourcesHTML(){
     const { data, error } = await sb.from('tender_sources').select('*').order('portal_code');
     if(error) throw new Error(error.message);
-    const admin = typeof Auth!=='undefined' && Auth.isAdmin();
-    return `<div class="card card-pad" style="margin-bottom:12px;"><b>How collection works</b>
-      <div class="cell-mute" style="font-size:12.5px;margin-top:4px;">GeM and CPPP can be collected automatically by a separate GitHub Actions job (dry run first; nothing is written until production writes are switched on). This page never scrapes portals itself. Kerala e-Tender and other CAPTCHA-protected portals are <b>not</b> automated and are never bypassed - bring them in by Excel / CSV import or manual entry.
-      ${admin?`<div style="margin-top:8px;"><a class="btn btn-outline btn-sm" href="${Util.escapeHtml(this.ACTIONS_URL)}" target="_blank" rel="noopener noreferrer">Open collector in GitHub Actions (dry run / run now) &#8599;</a></div>`:''}</div></div>
-      <div class="card"><div class="table-wrap"><table><thead><tr><th>Code</th><th>Source</th><th>Method</th><th>Status</th><th>Last attempt</th><th>Last success</th><th>Last result</th></tr></thead><tbody>
-      ${(data||[]).filter(s=>s.enabled).map(s=>{ const st = this.sourceState(s); return `<tr><td class="mono">${Util.escapeHtml(s.portal_code)}</td><td class="cell-main">${Util.escapeHtml(s.portal_name)}${tenderSafeUrl(s.base_url)?` <a href="${Util.escapeHtml(s.base_url)}" target="_blank" rel="noopener noreferrer">&#8599;</a>`:''}</td>
-        <td><span class="badge badge-gray">${Util.escapeHtml(s.collection_method)}</span></td><td><span class="badge badge-${st.color}">${st.label}</span>${st.note?`<div class="cell-mute" style="font-size:11px;">${st.note}</div>`:''}</td><td class="cell-mute">${tenderFmtDateTime(s.last_attempt_at)}</td><td class="cell-mute">${tenderFmtDateTime(s.last_success_at)}</td><td class="cell-mute">${Util.escapeHtml(s.last_run_message||'—')}</td></tr>`; }).join('')}
+    return `<div class="card card-pad" style="margin-bottom:12px;"><b>Collection is import-only.</b>
+      <div class="cell-mute" style="font-size:12.5px;margin-top:4px;">No portal is scraped or polled automatically. GeM, CPPP and Kerala e-Tender do not offer a verified, permitted automatic feed for this CRM, so lists are brought in through Excel / CSV import or manual entry. An automatic adapter can be added per source later, once its access terms are confirmed.</div></div>
+      <div class="card"><div class="table-wrap"><table><thead><tr><th>Code</th><th>Source</th><th>Method</th><th>Last attempt</th><th>Last success</th><th>Last result</th></tr></thead><tbody>
+      ${(data||[]).filter(s=>s.enabled).map(s=>`<tr><td class="mono">${Util.escapeHtml(s.portal_code)}</td><td class="cell-main">${Util.escapeHtml(s.portal_name)}${tenderSafeUrl(s.base_url)?` <a href="${Util.escapeHtml(s.base_url)}" target="_blank" rel="noopener noreferrer">&#8599;</a>`:''}</td>
+        <td><span class="badge badge-gray">${Util.escapeHtml(s.collection_method)}</span></td><td class="cell-mute">${tenderFmtDateTime(s.last_attempt_at)}</td><td class="cell-mute">${tenderFmtDateTime(s.last_success_at)}</td><td class="cell-mute">${Util.escapeHtml(s.last_run_message||'—')}</td></tr>`).join('')}
       </tbody></table></div></div>`;
   },
 
@@ -7257,7 +7212,6 @@ const TenderCentre = {
   },
   async convert(id){
     if(this.busy) return; this.busy = true;
-    let claimed = null;
     const btn = document.getElementById('tc_convBtn'); if(btn) btn.disabled = true;
     try{
       const { data: t, error } = await sb.from('tenders').select('*').eq('id', id).maybeSingle();
@@ -7277,25 +7231,13 @@ const TenderCentre = {
         publishedDate: tenderIstDate(t.published_at), startDate: tenderIstDate(t.published_at), endDate: tenderIstDate(t.closing_at), openingDate:'', offerValidity:'',
         status:'New', assignedTo: t.assigned_to||'', sourceUrl: tenderSafeUrl(t.source_url)
       };
-      // Claim the tender FIRST, atomically (only if nobody linked it meanwhile). If the claim matched no row,
-      // another user/tab got there first - stop, so one tender can never produce two bids.
-      const prevReview = t.review_status;
-      const up = await sb.from('tenders').update({linked_bid_id: bidId, review_status:'converted', changed_since_review:false}).eq('id', t.id).is('linked_bid_id', null).select('id');
+      // Link the tender FIRST: if this succeeds and the bid save fails, the worst case is a
+      // retryable tender marked converted - never two bids for one tender.
+      const up = await sb.from('tenders').update({linked_bid_id: bidId, review_status:'converted', changed_since_review:false}).eq('id', t.id).is('linked_bid_id', null);
       if(up.error) throw new Error(up.error.message);
-      if(!up.data || up.data.length!==1) throw new Error('This tender was just converted by someone else');
-      claimed = {id:t.id, prevReview};
       Store.data.bids.unshift(bid);
       Store.data.counters.bidNext = (Store.data.counters.bidNext||1)+1;
-      try{
-        await Store.save('counters'); await Store.save('bids');
-      }catch(saveErr){
-        // Bid could not be saved: undo the in-memory bid and release the tender so the user can retry.
-        Store.data.bids = Store.data.bids.filter(b=>b.id!==bidId);
-        Store.data.counters.bidNext = Math.max(1,(Store.data.counters.bidNext||1)-1);
-        await sb.from('tenders').update({linked_bid_id:null, review_status:prevReview}).eq('id', t.id).eq('linked_bid_id', bidId);
-        claimed = null;
-        throw saveErr;
-      }
+      await Store.save('counters'); await Store.save('bids');
       await Activity.log('Tender converted to bid', bidId+' ← '+t.title);
       UI.closeModal(); UI.toast('Bid created');
       go('bidsearch'); setTimeout(()=>BidSearch.openDetail(bidId), 80);
@@ -15624,17 +15566,6 @@ function oppReasons(r){
   if(b.zeroExpenditure) out.push('Zero expenditure so far +'+b.zeroExpenditure);
   return out;
 }
-/* Expenditure completed % = Expenditure / FundTotal * 100 (same rule as the database function opp_exp_pct).
-   An explicit percentage column wins if the file has one. Returns null when blank/invalid -> kept for review. */
-function oppExpPct(r){
-  const num = v=>{ const t = String(v==null?'':v).replace(/[%,\s]/g,''); return /^[0-9]+(\.[0-9]+)?$/.test(t) ? Number(t) : null; };
-  for(const k of ['Expenditure Completed %','Expenditure %','Expenditure Percentage','Expenditure Completed','Expenditure Completed Percentage']){
-    if(r[k]!==undefined && String(r[k]).trim()!=='') return num(r[k]);
-  }
-  const e = num(r['Expenditure']), f = num(r['FundTotal']);
-  if(e===null || f===null || f<=0) return null;
-  return e*100/f;
-}
 function oppMoney(v){ const n = Number(String(v==null?'':v).replace(/[,\u20B9\s]/g,'')); return isNaN(n)?0:n; }
 /* Finds a value on a row by trying several likely header names, first
    as an exact match, then case/punctuation-insensitively against the
@@ -16332,6 +16263,24 @@ END;
 REVOKE ALL ON FUNCTION public.opp_sync_blob() FROM public, anon;
 GRANT EXECUTE ON FUNCTION public.opp_sync_blob() TO authenticated;
 `;
+const OPP_DELETE_KEYS_SQL = `-- Run once in Supabase > SQL Editor. Admin-only. Deletes project rows by key (used by "Remove completed projects").
+CREATE OR REPLACE FUNCTION public.opp_delete_keys(p_keys text[])
+ RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'public' SET statement_timeout TO '25000'
+AS \$function\$
+DECLARE v_deleted int;
+BEGIN
+  IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Authentication required'; END IF;
+  IF NOT public.is_admin() THEN RAISE EXCEPTION 'Admin role required to delete project opportunity data'; END IF;
+  IF p_keys IS NULL OR array_length(p_keys,1) IS NULL THEN RETURN jsonb_build_object('deleted',0); END IF;
+  IF array_length(p_keys,1) > 2000 THEN RAISE EXCEPTION 'Too many keys in one call (max 2000)'; END IF;
+  DELETE FROM opp_projects_rows WHERE key = ANY(p_keys);
+  GET DIAGNOSTICS v_deleted = ROW_COUNT;
+  RETURN jsonb_build_object('deleted', v_deleted);
+END;
+\$function\$;
+REVOKE ALL ON FUNCTION public.opp_delete_keys(text[]) FROM public, anon;
+GRANT EXECUTE ON FUNCTION public.opp_delete_keys(text[]) TO authenticated;
+`;
 const OppFinder = {
   tab: 'dashboard',
   filtered: [],
@@ -16377,16 +16326,13 @@ const OppFinder = {
   async importIncoming(incoming, source, skipped){
     if(!incoming.length){ this.setMsg('No rows detected.'); return false; }
     skipped = skipped||0;
-    // Rule: expenditure completed >= 70% is never stored. Unknown (blank/invalid) values are kept for review.
-    const totalRows = incoming.length;
-    const doneSet = new Set(incoming.filter(r=>{ const p=oppExpPct(r); return p!==null && p>=70; }));
-    const completedN = doneSet.size, reviewN = incoming.filter(r=>oppExpPct(r)===null).length;
-    if(completedN) incoming = incoming.filter(r=>!doneSet.has(r));
-    if(!incoming.length){
-      this.setMsg('Nothing imported: all '+totalRows+' row(s) have expenditure completed at 70% or above. Projects with expenditure completed at 70% or above were skipped.');
-      Store.data.oppImportHistory.unshift({date:new Date().toISOString(), source:source||'Excel Import', records:totalRows, newCount:0, updated:0, duplicates:0, skipped, skippedCompleted:completedN, review:reviewN, failed:0});
-      Store.data.oppImportHistory = Store.data.oppImportHistory.slice(0,30); await Store.save('oppImportHistory');
-      return true;
+    // completed projects (expenditure >= limit of fund total) are not saved; blank/invalid values and My Opportunities projects always are
+    if((Store.data.settings||{}).oppSkipCompleted !== false){
+      const trk = Store.data.oppTracking || {}, th = this.completedThreshold(), before = incoming.length;
+      incoming = incoming.filter(r=>!(this.isCompletedRow(r, th) && !trk[oppKeyOf(r)]));
+      const dropped = before - incoming.length;
+      this._skippedCompleted = dropped; if(dropped){ UI.toast(dropped.toLocaleString()+' completed project(s) (\u2265 '+th+'%) were not imported'); }
+      if(!incoming.length){ this.setMsg('Nothing imported: all '+before.toLocaleString()+' rows are completed projects (\u2265 '+th+'%).'); return false; }
     }
     this.setMsg('Saving to database\u2026');
     const res = await this.mergeChunked(incoming, 'Saving');
@@ -16407,7 +16353,7 @@ const OppFinder = {
     this.health = null;
     const added = res.newCount, updated = res.updatedCount;
     Store.data.oppImportHistory.unshift({date:new Date().toISOString(), source:source||'Excel Import',
-      records:totalRows, newCount:added, updated, duplicates:updated, skipped, skippedCompleted:completedN, review:reviewN, failed:failedN});
+      records:incoming.length, newCount:added, updated, duplicates:updated, skipped, failed:failedN});
     Store.data.oppImportHistory = Store.data.oppImportHistory.slice(0,30);
     const ok2 = await Store.save('oppImportHistory');
     if(ok2) await Activity.log('Project opportunity data imported', incoming.length+' row(s), '+added+' new, '+updated+' updated'+(skipped?', '+skipped+' skipped':'')+(failedN?', '+failedN+' FAILED':''));
@@ -16423,7 +16369,7 @@ const OppFinder = {
       return false;
     }
     this.render();
-    this.setMsg('Processed '+totalRows+' rows \u2022 '+added+' new \u2022 '+updated+' existing updated'+(skipped?' \u2022 '+skipped+' skipped (no ID)':'')+' \u2022 '+completedN+' skipped (expenditure \u226570%)'+' \u2022 '+reviewN+' need expenditure review \u2022 0 failed. Projects with expenditure completed at 70% or above were skipped.');
+    this.setMsg('Imported '+incoming.length+' rows \u2022 '+added+' new \u2022 '+updated+' updated'+(skipped?' \u2022 '+skipped+' skipped (no ID)':'')+(this._skippedCompleted?' \u2022 '+this._skippedCompleted+' completed project(s) not imported':'')+' (merged server-side).');
     return true;
   },
   /* Re-render dashboards without wiping the retry box */
@@ -16492,8 +16438,6 @@ const OppFinder = {
           '<div><div style="font-size:19px;font-weight:700;'+(invalid.length?'color:var(--red,#dc2626);':'')+'">'+invalid.length+'</div><div class="hint">Invalid (no ID)</div></div>' +
         '</div>' +
         mapHTML +
-        (()=>{ const done = incoming.filter(r=>{ const p=oppExpPct(r); return p!==null && p>=70; }).length, rev = incoming.filter(r=>oppExpPct(r)===null).length;
-          return '<div class="hint" style="margin-top:8px;"><b>'+done.toLocaleString()+'</b> project(s) with expenditure completed at 70% or above will be skipped.'+(rev?' <b>'+rev.toLocaleString()+'</b> row(s) have a blank or invalid expenditure value and are imported for review.':'')+'</div>'; })() +
         (invalid.length ? '<div class="hint" style="margin-top:8px;">Invalid rows have neither a Project No nor an LB Name, so they can\'t be safely matched against existing records \u2014 they will be skipped. <a href="#" onclick="OppFinder.downloadInvalid();return false;">Download these '+invalid.length+' skipped row(s) as CSV</a></div>' : '') +
         (severeCollision ? '<div class="card card-pad" style="margin-top:10px;border-left:4px solid var(--red,#dc2626);">' +
           '<b style="color:var(--red,#dc2626);">&#9888; '+incoming.length+' rows only produced '+uniqueBatchKeys+' unique record(s).</b>' +
@@ -16620,9 +16564,6 @@ const OppFinder = {
 
   /* ---------------- filtering ---------------- */
   readFilters(){
-    /* If the filter controls are not on screen (view re-rendered while loading, or coming back from a detail
-       view) keep the filters the user had instead of resetting them to defaults. */
-    if(!document.getElementById('oppType') && this.filters) return;
     const g = id => { const el = document.getElementById(id); return el ? el.value : ''; };
     this.filters = {
       q: oppNormMl(g('oppSearch')), band: g('oppBand'), type: g('oppType')||'ALL', type2: g('oppType2')||'ALL', rel: g('oppRel')||'possible',
@@ -16932,75 +16873,114 @@ const OppFinder = {
       '<p class="hint" style="margin:0 0 14px;">Pick a district and delete every saved project of that district (all categories). A backup file is downloaded first and you must type the district name to confirm. Other districts, My Opportunities tracking and keywords are not affected. This cannot be undone.</p>' +
       '<div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;"><div class="field" style="min-width:260px;margin:0;"><label>Filter by district</label><select id="delDistrict" onchange="OppFinder.delPreview()"><option value="">Select a district&hellip;</option>'+opts+'</select></div>' +
       '<button id="delBtn" class="btn btn-sm" style="background:#dc2626;color:#fff;" onclick="OppFinder.deleteDistrict()">Delete data</button></div>' +
-      '<div id="delInfo" class="hint" style="margin-top:12px;">Total saved projects: '+Store.data.oppProjects.length.toLocaleString()+'</div></div>' + this.cleanCardHTML();
+      '<div id="delInfo" class="hint" style="margin-top:12px;">Total saved projects: '+Store.data.oppProjects.length.toLocaleString()+'</div></div>' + this.completedCardHTML();
   },
-  /* ---- Completed-project cleanup: expenditure completed >= 70% (Admin only, preview -> backup file -> delete) ---- */
-  cleanCardHTML(){
-    return '<div class="card card-pad" style="margin-top:16px;"><h3 style="margin:0 0 6px;">Remove completed projects (expenditure 70% or more) <span class="badge" style="background:#fee2e2;color:#b91c1c;">Admin only</span></h3>' +
-      '<p class="hint" style="margin:0 0 12px;">Expenditure completed = Expenditure \u00F7 Fund Total. Projects at 70% or above are removed from Project Opportunities only. Projects with a blank or invalid value are never removed. Projects saved in My Opportunities are protected. Step 1 preview \u2192 step 2 download a backup file \u2192 step 3 delete.</p>' +
-      '<div class="toolbar"><button class="btn btn-outline btn-sm" onclick="OppFinder.cleanPreview()">1. Preview (nothing is deleted)</button></div><div id="cleanBox" style="margin-top:12px;"></div></div>';
+  /* ---------------- remove completed projects (expenditure / fund total >= threshold) ---------------- */
+  numStrict(v){
+    const t = String(v==null?'':v).replace(/[,\u20B9\s]/g,'');
+    if(t==='' || !/^-?\d+(\.\d+)?$/.test(t)) return null;
+    return Number(t);
   },
-  cleanMsg(html, bad){ const b=document.getElementById('cleanBox'); if(b) b.innerHTML = '<div style="padding:10px 12px;border-radius:8px;font-size:13px;'+(bad?'background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;':'background:#f0fdf4;color:#166534;border:1px solid #bbf7d0;')+'">'+html+'</div>'; },
-  async cleanPreview(){
-    if(!Auth.isAdmin()){ UI.toast('Admin only'); return; }
-    this.cleanMsg('Checking the database\u2026');
-    const { data, error } = await sb.rpc('opp_cleanup_preview');
-    if(error){ this.cleanMsg('Preview failed: '+Util.escapeHtml(error.message), true); return; }
-    this._clean = { expected: data.eligible, backedUp: 0, keys: null };
-    const n = x=>Number(x||0).toLocaleString('en-IN'), E = Util.escapeHtml;
-    const rows = (data.sample||[]).map(x=>'<tr><td class="mono">'+E(x.project_no||'')+'</td><td>'+E(x.name||'')+'</td><td>'+E(x.lb||'')+'</td><td class="mono">'+E(x.fund||'')+'</td><td class="mono">'+E(x.expenditure||'')+'</td><td><b>'+E(x.pct)+'%</b></td></tr>').join('');
-    document.getElementById('cleanBox').innerHTML =
-      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:10px;">' +
-        [['Projects checked',data.total,''],['Will be removed (\u226570%)',data.eligible,'color:#b91c1c;'],['Kept (below 70%)',data.below_70,'color:#166534;'],['Kept for review (blank/invalid)',data.review_blank_invalid,'color:#b45309;'],['Protected (saved in My Opportunities)',data.tracked_protected,'']]
-        .map(c=>'<div class="card card-pad" style="padding:9px;text-align:center;"><div style="font-size:19px;font-weight:700;'+c[2]+'">'+n(c[1])+'</div><div class="hint">'+c[0]+'</div></div>').join('') + '</div>' +
-      '<div class="hint">Estimated data in the rows to remove: about '+(Number(data.eligible_bytes||0)/1048576).toFixed(1)+' MB (actual database savings may differ). '+(data.over_100? n(data.over_100)+' of them show expenditure above the fund total (data oddity).':'')+'</div>' +
-      (data.eligible ? '<div class="table-wrap" style="margin-top:8px;max-height:260px;overflow:auto;"><table><thead><tr><th>Project No</th><th>Project</th><th>Local body</th><th>Fund</th><th>Expenditure</th><th>Spent</th></tr></thead><tbody>'+rows+'</tbody></table></div><div class="hint">First 25 of '+n(data.eligible)+' shown (highest % first).</div>' +
-        '<div class="toolbar" style="margin-top:10px;"><button class="btn btn-outline btn-sm" id="cleanBackupBtn" onclick="OppFinder.cleanBackup()">2. Download backup file</button><button class="btn btn-sm" id="cleanDelBtn" style="background:#dc2626;color:#fff;opacity:.5;" disabled onclick="OppFinder.cleanDeleteAsk()">3. Delete '+n(data.eligible)+' project(s)</button></div><div id="cleanProg" class="hint" style="margin-top:6px;"></div>'
-        : '<div style="margin-top:8px;">Nothing to remove.</div>');
+  /* % of the fund already spent, or null when either value is blank / not a number / fund is not above zero (those projects are never removed) */
+  completedPct(r){
+    const f = this.numStrict(r['FundTotal']), e = this.numStrict(r['Expenditure']);
+    if(f===null || e===null || !(f>0) || e<0) return null;
+    return e / f * 100;
   },
-  async cleanBackup(){
-    const c = this._clean; if(!c) return; const prog = document.getElementById('cleanProg'), all = [];
+  completedThreshold(){ const t = Number((Store.data.settings||{}).oppCompletedPct); return t>0 && t<=1000 ? t : 70; },
+  isCompletedRow(r, th){ const p = this.completedPct(r); return p!==null && p >= (th||this.completedThreshold()); },
+  completedCardHTML(){
+    const th = this.completedThreshold(), skip = (Store.data.settings||{}).oppSkipCompleted !== false;
+    return '<div class="card card-pad" style="margin-top:14px;"><h3 style="margin:0 0 6px;">Remove completed projects <span class="badge" style="background:#fee2e2;color:#b91c1c;">Admin only</span></h3>' +
+      '<p class="hint" style="margin:0 0 10px;">Completed % = Expenditure &divide; Fund Total. Projects at or above the limit are removed from Project Opportunities only. A project with a blank or invalid Expenditure or Fund Total is never removed, and projects saved in My Opportunities are protected.</p>' +
+      '<div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;"><div class="field" style="margin:0;width:140px;"><label>Completed % limit</label><input id="cpLimit" type="number" min="1" max="1000" value="'+th+'"></div>' +
+      '<label class="chk" style="margin-bottom:6px;"><input type="checkbox" id="cpSkip" '+(skip?'checked':'')+' onchange="OppFinder.saveCompletedCfg()"> Skip completed projects in future imports</label></div>' +
+      '<div class="toolbar" style="margin-top:12px;gap:8px;flex-wrap:wrap;"><button class="btn btn-outline btn-sm" onclick="OppFinder.completedPreview()">1. Preview (nothing is deleted)</button>' +
+      '<button id="cpBackupBtn" class="btn btn-outline btn-sm" disabled onclick="OppFinder.completedBackup()">2. Download backup file</button>' +
+      '<button id="cpDeleteBtn" class="btn btn-sm" disabled style="background:#dc2626;color:#fff;" onclick="OppFinder.completedDelete()">3. Delete</button></div>' +
+      '<div id="cpOut" style="margin-top:12px;"></div></div>';
+  },
+  async saveCompletedCfg(){
+    const lim = Number((document.getElementById('cpLimit')||{}).value);
+    Store.data.settings.oppCompletedPct = lim>0 && lim<=1000 ? lim : 70;
+    Store.data.settings.oppSkipCompleted = !!(document.getElementById('cpSkip')||{}).checked;
+    await Store.save('settings');
+  },
+  cpMsg(html, bad){ const el = document.getElementById('cpOut'); if(el) el.innerHTML = '<div style="padding:10px 12px;border-radius:8px;font-size:13px;'+(bad?'background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;':'background:#f0f9ff;color:#075985;border:1px solid #bae6fd;')+'">'+html+'</div>'; },
+  async completedPreview(){
+    if(!Auth.isAdmin()){ UI.toast('Only an Admin can use this'); return; }
+    await this.saveCompletedCfg();
+    const th = this.completedThreshold(), E = Util.escapeHtml, rows = Store.data.oppProjects, trk = Store.data.oppTracking || {};
+    const eligible = [], prot = []; let invalid = 0, below = 0; const byD = {};
+    rows.forEach(r=>{
+      const p = this.completedPct(r);
+      if(p===null){ invalid++; return; }
+      if(p < th){ below++; return; }
+      if(trk[oppKeyOf(r)]){ prot.push(r); return; }
+      eligible.push(r); const d = r['District']||'Unknown'; byD[d] = (byD[d]||0)+1;
+    });
+    this._cp = { eligible, th, backedUp:false };
+    const bd = document.getElementById('cpBackupBtn'), dl = document.getElementById('cpDeleteBtn');
+    if(bd) bd.disabled = !eligible.length; if(dl) dl.disabled = true;
+    this.cpMsg('<b>Preview &mdash; nothing has been deleted.</b><br>Total projects: <b>'+rows.length.toLocaleString()+'</b><br>' +
+      'Will be removed (completed &ge; '+th+'%): <b style="color:#b91c1c;">'+eligible.length.toLocaleString()+'</b><br>' +
+      'Kept &mdash; below '+th+'%: '+below.toLocaleString()+'<br>Kept &mdash; blank or invalid Expenditure / Fund Total: '+invalid.toLocaleString()+'<br>' +
+      'Kept &mdash; protected (saved in My Opportunities): '+prot.length.toLocaleString() +
+      (eligible.length ? '<br><br>By district: '+Object.entries(byD).sort((a,b)=>b[1]-a[1]).map(([d,n])=>E(d)+' '+n.toLocaleString()).join(' &middot; ') +
+        '<div class="table-wrap" style="margin-top:8px;"><table><thead><tr><th>Project</th><th>Local body</th><th>Fund Total</th><th>Expenditure</th><th>%</th></tr></thead><tbody>' +
+        eligible.slice(0,8).map(r=>'<tr><td style="white-space:normal;">'+E(r['Project Name Eng']||r['Project Name Mal']||'')+'</td><td>'+E(r['LB Name']||'')+'</td><td>'+E(r['FundTotal']||'')+'</td><td>'+E(r['Expenditure']||'')+'</td><td>'+Math.round(this.completedPct(r))+'%</td></tr>').join('') + '</tbody></table></div>' +
+        '<div class="hint" style="margin-top:6px;">Showing the first 8. Now download the backup file (step 2), then Delete (step 3).</div>' : '<br><br>Nothing to remove.'));
+  },
+  completedBackup(){
+    const c = this._cp; if(!c || !c.eligible.length){ UI.toast('Run the preview first'); return; }
     try{
-      let after = null;
-      for(let g=0; g<200; g++){
-        const { data, error } = await sb.rpc('opp_cleanup_page', { p_after_key: after, p_limit: 1000 });
-        if(error) throw error;
-        if(!data || !data.length) break;
-        all.push.apply(all, data); after = data[data.length-1].key;
-        if(prog) prog.textContent = 'Backing up\u2026 '+all.length.toLocaleString()+' / '+Number(c.expected).toLocaleString();
-      }
-      if(all.length !== Number(c.expected)) throw new Error('Backup has '+all.length+' rows but '+c.expected+' were expected. Run the preview again.');
-      const blob = new Blob([JSON.stringify(all)], {type:'application/json'});
-      const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'opportunity-completed-70pct-backup-'+new Date().toISOString().slice(0,10)+'.json'; document.body.appendChild(a); a.click(); a.remove();
-      c.backedUp = all.length; c.keys = new Set(all.map(x=>x.key));
-      if(prog) prog.innerHTML = '<b style="color:#166534;">Backup downloaded ('+all.length.toLocaleString()+' projects).</b> Keep the file safe, then press step 3.';
-      const d = document.getElementById('cleanDelBtn'); if(d){ d.disabled = false; d.style.opacity = 1; }
-    }catch(e){ console.error(e); if(prog) prog.innerHTML = '<span style="color:#b91c1c;">Backup failed: '+Util.escapeHtml(e.message||String(e))+'. Nothing was deleted.</span>'; }
+      const blob = new Blob([JSON.stringify(c.eligible)], {type:'application/json'});
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+      a.download = 'completed-projects-backup-'+new Date().toISOString().slice(0,10)+'-'+c.eligible.length+'-rows.json'; document.body.appendChild(a); a.click(); a.remove();
+      c.backedUp = true; const dl = document.getElementById('cpDeleteBtn'); if(dl) dl.disabled = false;
+      UI.toast('Backup downloaded ('+c.eligible.length+' projects) - Delete is now enabled');
+    }catch(e){ console.error(e); UI.toast('Backup could not be created - nothing deleted'); }
   },
-  cleanDeleteAsk(){
-    const c = this._clean; if(!c || !c.backedUp){ UI.toast('Download the backup first'); return; }
-    UI.openModal('Delete completed projects', '<p style="margin:0 0 10px;">This permanently removes <b>'+Number(c.backedUp).toLocaleString()+'</b> project(s) with expenditure completed at 70% or above from Project Opportunities. Other CRM data is not touched.</p><div class="field"><label>Type DELETE to confirm</label><input id="cleanConfirm" autocomplete="off" placeholder="DELETE"></div>',
-      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn" style="background:#dc2626;color:#fff;" onclick="OppFinder.cleanDelete()">Delete permanently</button>');
+  completedDelete(){
+    const c = this._cp; if(!Auth.isAdmin() || !c || !c.backedUp){ UI.toast('Preview and download the backup first'); return; }
+    UI.openModal('Delete '+c.eligible.length.toLocaleString()+' completed projects',
+      '<p style="margin:0 0 10px;">This permanently removes <b>'+c.eligible.length.toLocaleString()+'</b> projects with expenditure of <b>'+c.th+'%</b> or more from Project Opportunities. Your backup file is the only way to bring them back.</p>' +
+      '<div class="field"><label>Type DELETE to confirm</label><input id="cpConfirm" autocomplete="off" placeholder="DELETE"></div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn" style="background:#dc2626;color:#fff;" onclick="OppFinder.completedRun()">Delete permanently</button>');
   },
-  async cleanDelete(){
-    const c = this._clean; if(!Auth.isAdmin() || !c || !c.backedUp) return;
-    if(((document.getElementById('cleanConfirm')||{}).value||'').trim() !== 'DELETE'){ UI.toast('Type DELETE to confirm - nothing was deleted'); return; }
-    UI.closeModal(); const prog = document.getElementById('cleanProg'); let total = 0, first = true;
-    try{
-      for(let g=0; g<100; g++){
-        const { data, error } = await sb.rpc('opp_cleanup_delete', { p_expected: first ? c.expected : null, p_limit: 3000 });
-        if(error) throw error;
-        first = false; total += (data && data.deleted) || 0;
-        if(prog) prog.textContent = 'Deleting\u2026 '+total.toLocaleString()+' of '+Number(c.expected).toLocaleString()+' removed.';
-        if(!data || !data.deleted || !data.remaining_eligible) break;
-      }
-      Store.data.oppProjects = Store.data.oppProjects.filter(r=>!c.keys.has(oppKeyOf(r)));
-      try{ OppMatch.invalidate(); }catch(e){} try{ Store.oppCacheClear(); }catch(e){}
-      this.health = null;
-      await Activity.log('Completed projects removed (expenditure >= 70%)', total+' project(s)');
-      this._clean = null;
-      this.cleanMsg('<b>Done.</b> '+total.toLocaleString()+' completed project(s) removed. '+Store.data.oppProjects.length.toLocaleString()+' projects remain. You can run the preview again safely at any time.');
-    }catch(e){ console.error(e); if(prog) prog.innerHTML = '<span style="color:#b91c1c;">Stopped: '+Util.escapeHtml(e.message||String(e))+'. '+total.toLocaleString()+' removed so far. Run the preview again.</span>'; }
+  async completedRun(){
+    const c = this._cp; if(!Auth.isAdmin() || !c || !c.backedUp) return;
+    if(((document.getElementById('cpConfirm')||{}).value||'').trim().toUpperCase()!=='DELETE'){ UI.toast('Type DELETE to confirm - nothing was deleted'); return; }
+    UI.closeModal();
+    const trk = Store.data.oppTracking || {};
+    // re-check right before deleting: still completed, still not protected
+    const rows = c.eligible.filter(r=>this.isCompletedRow(r, c.th) && !trk[oppKeyOf(r)]);
+    const keys = rows.map(oppKeyOf); let done = 0, removedKeys = new Set(), err = null;
+    const dl = document.getElementById('cpDeleteBtn'); if(dl) dl.disabled = true;
+    for(let i=0;i<keys.length;i+=1000){
+      const part = keys.slice(i,i+1000); let res;
+      try{ res = await sb.rpc('opp_delete_keys', { p_keys: part }); }catch(e){ res = { error:e }; }
+      if(res.error){ err = res.error; break; }
+      part.forEach(k=>removedKeys.add(k)); done += (res.data && res.data.deleted) || 0;
+      this.cpMsg('Deleting&hellip; '+Math.min(i+1000,keys.length).toLocaleString()+' of '+keys.length.toLocaleString()+' processed.');
+      if(i+1000 < keys.length) await new Promise(r=>setTimeout(r, 1500 + Math.random()*1500));
+    }
+    if(removedKeys.size){
+      Store.data.oppProjects = Store.data.oppProjects.filter(r=>!removedKeys.has(oppKeyOf(r)));
+      try{ OppMatch.invalidate(); }catch(e){}
+      Store.oppCacheSet(Store.data.oppProjects);
+      try{ await Activity.log('Completed projects removed', done+' project(s) at '+c.th+'% or more'); }catch(e){}
+    }
+    if(err){
+      const msg = String(err.message||err);
+      if(/could not find|does not exist|schema cache/i.test(msg) && !removedKeys.size)
+        this.cpMsg('<b>Not deleted.</b> The delete function is not installed on the server yet. Open Supabase &rarr; SQL Editor, paste the text below, click Run, then try again.<textarea readonly rows="8" style="width:100%;margin-top:8px;font-family:monospace;font-size:11px;" onclick="this.select()">'+Util.escapeHtml(OPP_DELETE_KEYS_SQL)+'</textarea>', true);
+      else this.cpMsg('<b>Stopped part-way:</b> '+done.toLocaleString()+' removed, then: '+Util.escapeHtml(msg)+'. Run the preview again to see what is left.', true);
+      return;
+    }
+    const note = done < keys.length ? '<br>'+(keys.length-done).toLocaleString()+' were not found on the server (already removed or a different key) &mdash; use Reload from Database to check.' : '';
+    this.cpMsg('<b>Done.</b> Removed '+done.toLocaleString()+' completed project(s). '+Store.data.oppProjects.length.toLocaleString()+' projects remain.'+note);
+    this._cp = null;
   },
   delPreview(){
     const d = (document.getElementById('delDistrict')||{}).value || '', el = document.getElementById('delInfo'); if(!el) return;
@@ -17143,7 +17123,6 @@ const OppFinder = {
         OPP_FIELDS.filter(f=>r[f]!==undefined && r[f]!=='').map(f=>
           '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">'+E(f)+'</div>'+E(r[f])+'</div>').join('') +
         '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">Opportunity Score</div><b>'+r.score+'%</b> <span class="badge badge-gray">'+oppBandOf(r.score)+'</span></div>' +
-        '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">Expenditure Completed</div>'+(()=>{ const p = oppExpPct(r); return p===null ? '<span class="hint">Not available - review</span>' : '<b>'+(Math.round(p*10)/10)+'%</b>'; })()+'</div>' +
         '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">Category</div>'+E(OPP_CATEGORY_NAMES[r.type])+'</div>' +
         '<div class="card card-pad" style="padding:9px;"><div class="hint" style="text-transform:uppercase;font-weight:700;margin-bottom:3px;">Matched Keywords</div>'+r.hits.map(x=>'<span class="badge badge-gray">'+E(x)+'</span>').join(' ')+'</div>' +
       '</div>' +
@@ -17353,17 +17332,6 @@ const OppFinder = {
       tabs.map(([id,label])=>'<button class="'+(this.tab===id?'active':'')+'" onclick="OppFinder.setTab(\''+id+'\')">'+label+'</button>').join('') +
     '</div>';
   },
-  /* Remember tab, filters and page for this browser tab so a reload / Back never drops you to page 1. */
-  saveState(){ try{ sessionStorage.setItem('jays_opp_state_v1', JSON.stringify({tab:this.tab, filters:this.filters, page:Paginate.get('oppfinder').page, perPage:Paginate.get('oppfinder').perPage})); }catch(e){} },
-  restoreState(){
-    if(this._restored) return; this._restored = true;
-    try{
-      const st = JSON.parse(sessionStorage.getItem('jays_opp_state_v1')||'null'); if(!st) return;
-      if(st.tab) this.tab = st.tab;
-      if(st.filters && typeof st.filters==='object') this.filters = Object.assign({}, this.filters, st.filters);
-      const p = Paginate.get('oppfinder'); if(st.perPage) p.perPage = Number(st.perPage)||p.perPage; if(st.page) p.page = Number(st.page)||1;
-    }catch(e){}
-  },
   render(){
     const body = this.tab==='dashboard' ? this.renderDashboard()
       : this.tab==='projects' ? this.renderProjects()
@@ -17374,7 +17342,6 @@ const OppFinder = {
       : this.renderReports();
     document.getElementById('content').innerHTML = this.switcherHTML() + body;
     if(this.tab==='products') this.renderKwTable();
-    this.saveState();
   },
 
   renderDashboard(){
@@ -17485,7 +17452,7 @@ const OppFinder = {
           '<td class="cell-mute">'+Util.escapeHtml(r['District']||'')+'</td>' +
           '<td class="cell-mute">'+Util.escapeHtml(r['Sector']||'')+'</td>' +
           '<td class="cell-mute">'+Util.escapeHtml(tr.status||'New')+'</td>' +
-          '<td class="mono">\u20B9'+oppMoney(r['FundTotal']).toLocaleString('en-IN')+(()=>{ const p = oppExpPct(r); return p===null ? '' : '<div class="hint">'+(Math.round(p*10)/10)+'% spent</div>'; })()+'</td>' +
+          '<td class="mono">\u20B9'+oppMoney(r['FundTotal']).toLocaleString('en-IN')+'</td>' +
           '<td>'+this.whyCell(r, OppMatch.get(r), f.type)+'</td>' +
         '</tr>';
       }).join('') : '<tr><td colspan="12" class="cell-mute" style="text-align:center;padding:20px;">No matching projects found.</td></tr>') +
@@ -17682,7 +17649,7 @@ const OppFinder = {
     '</div>';
   }
 };
-Views.oppfinder = ()=>OppFinder.seedKeywordGroups().then(()=>OppFinder.prepare()).then(()=>{ OppFinder.restoreState(); OppFinder.render(); });
+Views.oppfinder = ()=>OppFinder.seedKeywordGroups().then(()=>OppFinder.prepare()).then(()=>OppFinder.render());
 
 const Reports = {
   render(){
