@@ -17255,7 +17255,7 @@ const OppFinder = {
           '<td><button class="btn btn-outline btn-sm" data-k="'+E(k)+'" onclick="OppFinder.viewProject(this.dataset.k)">View</button></td></tr>'; }).join('') + '</tbody></table></div>'
         : '<div class="empty-state"><div class="t">No other matching projects</div><div class="d">No other project of this Impl Code in this local body matches a JAYS category.</div></div>');
     UI.openModal('Same Impl Code in '+(r['LB Name']||'this local body')+' ('+d.list.length+')', body,
-      '<button class="btn btn-outline" data-k="'+E(key)+'" onclick="OppFinder.viewProject(this.dataset.k)">&larr; Back to project</button><button class="btn btn-outline" onclick="UI.closeModal()">Close</button>', true);
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>', true);
   },
   districtOptions(){ return [...new Set(Store.data.oppProjects.map(r=>r['District']).filter(Boolean))].sort(); },
   localBodyOptions(district){
@@ -17835,6 +17835,36 @@ const OppFinder = {
     '</div>';
   }
 };
+/* Back button: project details / same-Impl-Code list / local-body list remember where you came from */
+(function(){
+  ['viewProject','viewSameImpl','viewBoardLB'].forEach(function(name){
+    const orig = OppFinder[name];
+    OppFinder[name] = function(){
+      const a = arguments, self = this;
+      const open = document.getElementById('modalOverlay').style.display === 'flex';
+      if(!self._navBack){
+        if(open && self._cur) (self._stack = self._stack||[]).push(self._cur);
+        else if(!open) self._stack = [];
+      }
+      self._cur = function(){ self._navBack = true; try{ self[name].apply(self,a); } finally { self._navBack = false; } };
+      const rv = orig.apply(self, a);
+      const foot = document.getElementById('modalFoot');
+      if(foot && document.getElementById('modalOverlay').style.display === 'flex'){
+        const b = document.createElement('button'); b.className = 'btn btn-outline'; b.innerHTML = '&larr; Back';
+        b.title = (self._stack && self._stack.length) ? 'Go back to the previous screen' : 'Back to the list';
+        b.onclick = function(){ OppFinder.navBack(); };
+        foot.insertBefore(b, foot.firstChild);
+      }
+      return rv;
+    };
+  });
+  OppFinder.navBack = function(){
+    const prev = this._stack && this._stack.pop();
+    if(prev) prev(); else { this._cur = null; UI.closeModal(); }
+  };
+  const _close = UI.closeModal.bind(UI);
+  UI.closeModal = function(){ OppFinder._cur = null; OppFinder._stack = []; return _close(); };
+})();
 Views.oppfinder = ()=>OppFinder.seedKeywordGroups().then(()=>OppFinder.prepare()).then(()=>OppFinder.render());
 
 const Reports = {
