@@ -16873,7 +16873,7 @@ const OppFinder = {
       '<p class="hint" style="margin:0 0 14px;">Pick a district and delete every saved project of that district (all categories). A backup file is downloaded first and you must type the district name to confirm. Other districts, My Opportunities tracking and keywords are not affected. This cannot be undone.</p>' +
       '<div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;"><div class="field" style="min-width:260px;margin:0;"><label>Filter by district</label><select id="delDistrict" onchange="OppFinder.delPreview()"><option value="">Select a district&hellip;</option>'+opts+'</select></div>' +
       '<button id="delBtn" class="btn btn-sm" style="background:#dc2626;color:#fff;" onclick="OppFinder.deleteDistrict()">Delete data</button></div>' +
-      '<div id="delInfo" class="hint" style="margin-top:12px;">Total saved projects: '+Store.data.oppProjects.length.toLocaleString()+'</div></div>' + this.completedCardHTML();
+      '<div id="delInfo" class="hint" style="margin-top:12px;">Total saved projects: '+Store.data.oppProjects.length.toLocaleString()+'</div></div>' + this.completedCardHTML() + this.unmatchedCardHTML();
   },
   /* ---------------- remove completed projects (expenditure / fund total >= threshold) ---------------- */
   numStrict(v){
@@ -16899,6 +16899,96 @@ const OppFinder = {
       '<button id="cpBackupBtn" class="btn btn-outline btn-sm" disabled onclick="OppFinder.completedBackup()">2. Download backup file</button>' +
       '<button id="cpDeleteBtn" class="btn btn-sm" disabled style="background:#dc2626;color:#fff;" onclick="OppFinder.completedDelete()">3. Delete</button></div>' +
       '<div id="cpOut" style="margin-top:12px;"></div></div>';
+  },
+  /* ---------------- remove unmatched projects (no JAYS category reaches "Possible") ---------------- */
+  UM_FIELDS: ['Project No','Project Name Mal','Project Name Eng','LB Name','LB Type','District','Impl Code','Impl Officer Name','Project Type','Project Category','Sector Type','Sector','Sub Sector','Impl mode','Status','Fund Description','FundTotal','Expenditure Description','Expenditure','Balance'],
+  unmatchedCardHTML(){
+    return '<div class="card card-pad" style="margin-top:14px;"><h3 style="margin:0 0 6px;">Remove unmatched projects <span class="badge" style="background:#fee2e2;color:#b91c1c;">Admin only</span></h3>' +
+      '<p class="hint" style="margin:0 0 10px;">Removes every project that matches no JAYS category (the <b>Unmatched</b> list in Projects, including projects whose only match is weak) to free database space. Matched projects and projects saved in My Opportunities are never removed. <b>Keyword changes later cannot bring removed projects back</b> &mdash; only the backup file or a re-import can.</p>' +
+      '<div class="toolbar" style="gap:8px;flex-wrap:wrap;"><button class="btn btn-outline btn-sm" onclick="OppFinder.unmatchedPreview()">1. Preview (nothing is deleted)</button>' +
+      '<button id="umBackupBtn" class="btn btn-outline btn-sm" disabled onclick="OppFinder.unmatchedBackup()">2. Download backup file (Excel/CSV)</button>' +
+      '<button id="umDeleteBtn" class="btn btn-sm" disabled style="background:#dc2626;color:#fff;" onclick="OppFinder.unmatchedDelete()">3. Delete</button></div>' +
+      '<div id="umOut" style="margin-top:12px;"></div></div>';
+  },
+  umMsg(html, bad){ const el = document.getElementById('umOut'); if(el) el.innerHTML = '<div style="padding:10px 12px;border-radius:8px;font-size:13px;'+(bad?'background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;':'background:#f0f9ff;color:#075985;border:1px solid #bae6fd;')+'">'+html+'</div>'; },
+  async unmatchedPreview(){
+    if(!Auth.isAdmin()){ UI.toast('Only an Admin can use this'); return; }
+    if(Store.loadFailed['jays_oppprojects']){ this.umMsg('The project list did not load completely. Use Reload from Database first, then preview again.', true); return; }
+    this.umMsg('Analysing all projects&hellip; please wait.');
+    try{ await OppMatch.warm(); }catch(e){}
+    const E = Util.escapeHtml, rows = Store.data.oppProjects, trk = Store.data.oppTracking || {};
+    const eligible = [], prot = []; let weak = 0, matched = 0; const byD = {};
+    rows.forEach(r=>{
+      const m = OppMatch.get(r);
+      if(!m.unmatched){ matched++; return; }
+      if(trk[oppKeyOf(r)]){ prot.push(r); return; }
+      eligible.push(r); if(m.cats.length) weak++; const d = r['District']||'Unknown'; byD[d] = (byD[d]||0)+1;
+    });
+    this._um = { eligible, backedUp:false };
+    const bd = document.getElementById('umBackupBtn'), dl = document.getElementById('umDeleteBtn');
+    if(bd) bd.disabled = !eligible.length; if(dl) dl.disabled = true;
+    this.umMsg('<b>Preview &mdash; nothing has been deleted.</b><br>Total projects: <b>'+rows.length.toLocaleString()+'</b><br>' +
+      'Matched (kept): <b>'+matched.toLocaleString()+'</b><br>Unmatched &mdash; protected in My Opportunities (kept): '+prot.length.toLocaleString()+'<br>' +
+      'Will be removed: <b style="color:#b91c1c;">'+eligible.length.toLocaleString()+'</b> (of which '+weak.toLocaleString()+' have only a weak keyword match)' +
+      (eligible.length ? '<br><br>By district: '+Object.entries(byD).sort((a,b)=>b[1]-a[1]).map(([d,n])=>E(d)+' '+n.toLocaleString()).join(' &middot; ') +
+        '<div class="table-wrap" style="margin-top:8px;"><table><thead><tr><th>Project</th><th>Local body</th><th>District</th><th>Fund Total</th></tr></thead><tbody>' +
+        eligible.slice(0,8).map(r=>'<tr><td style="white-space:normal;">'+E(r['Project Name Eng']||r['Project Name Mal']||'')+'</td><td>'+E(r['LB Name']||'')+'</td><td>'+E(r['District']||'')+'</td><td>'+E(r['FundTotal']||'')+'</td></tr>').join('') + '</tbody></table></div>' +
+        '<div class="hint" style="margin-top:6px;">Showing the first 8. Check that these really are projects you will never need, then download the backup (step 2) and delete (step 3).</div>' : '<br><br>Nothing to remove.'));
+  },
+  unmatchedBackup(){
+    const c = this._um; if(!c || !c.eligible.length){ UI.toast('Run the preview first'); return; }
+    try{
+      const q = v => { const t = String(v==null?'':v); return /[",\n\r]/.test(t) ? '"'+t.replace(/"/g,'""')+'"' : t; };
+      const parts = ['\ufeff'+this.UM_FIELDS.map(q).join(',')+'\n'];
+      for(let i=0;i<c.eligible.length;i+=5000){ parts.push(c.eligible.slice(i,i+5000).map(r=>this.UM_FIELDS.map(f=>q(r[f])).join(',')).join('\n')+'\n'); }
+      const blob = new Blob(parts, {type:'text/csv;charset=utf-8'});
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+      a.download = 'unmatched-projects-backup-'+new Date().toISOString().slice(0,10)+'-'+c.eligible.length+'-rows.csv'; document.body.appendChild(a); a.click(); a.remove();
+      c.backedUp = true; const dl = document.getElementById('umDeleteBtn'); if(dl) dl.disabled = false;
+      UI.toast('Backup downloaded ('+c.eligible.length.toLocaleString()+' projects) - check it opens, then Delete is enabled');
+    }catch(e){ console.error(e); UI.toast('Backup could not be created - nothing deleted'); }
+  },
+  unmatchedDelete(){
+    const c = this._um; if(!Auth.isAdmin() || !c || !c.backedUp){ UI.toast('Preview and download the backup first'); return; }
+    UI.openModal('Delete '+c.eligible.length.toLocaleString()+' unmatched projects',
+      '<p style="margin:0 0 10px;">This permanently removes <b>'+c.eligible.length.toLocaleString()+'</b> projects that match no JAYS category. Only your backup file (or a re-import) can bring them back.</p>' +
+      '<p class="hint" style="margin:0 0 10px;">Make sure the backup file was saved and opens correctly before you continue.</p>' +
+      '<div class="field"><label>Type DELETE to confirm</label><input id="umConfirm" autocomplete="off" placeholder="DELETE"></div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn" style="background:#dc2626;color:#fff;" onclick="OppFinder.unmatchedRun()">Delete permanently</button>');
+  },
+  async unmatchedRun(){
+    const c = this._um; if(!Auth.isAdmin() || !c || !c.backedUp) return;
+    if(((document.getElementById('umConfirm')||{}).value||'').trim().toUpperCase()!=='DELETE'){ UI.toast('Type DELETE to confirm - nothing was deleted'); return; }
+    UI.closeModal();
+    const trk = Store.data.oppTracking || {};
+    // re-check right before deleting: still unmatched, still not protected
+    const rows = c.eligible.filter(r=>OppMatch.get(r).unmatched && !trk[oppKeyOf(r)]);
+    const keys = rows.map(oppKeyOf), SIZE = 2000; let done = 0, err = null; const removed = new Set();
+    const dl = document.getElementById('umDeleteBtn'); if(dl) dl.disabled = true;
+    for(let i=0;i<keys.length;i+=SIZE){
+      const part = keys.slice(i,i+SIZE); let res;
+      try{ res = await sb.rpc('opp_delete_keys', { p_keys: part }); }catch(e){ res = { error:e }; }
+      if(res.error){ err = res.error; break; }
+      part.forEach(k=>removed.add(k)); done += (res.data && res.data.deleted) || 0;
+      this.umMsg('Deleting&hellip; '+Math.min(i+SIZE,keys.length).toLocaleString()+' of '+keys.length.toLocaleString()+' processed. Please keep this page open.');
+      if(i+SIZE < keys.length) await new Promise(r=>setTimeout(r, 2000 + Math.random()*2000));
+    }
+    if(removed.size){
+      Store.data.oppProjects = Store.data.oppProjects.filter(r=>!removed.has(oppKeyOf(r)));
+      try{ OppMatch.invalidate(); }catch(e){}
+      Store.oppCacheSet(Store.data.oppProjects);
+      try{ await Activity.log('Unmatched projects removed', done+' project(s)'); }catch(e){}
+    }
+    if(err){
+      const msg = String(err.message||err);
+      if(/could not find|does not exist|schema cache/i.test(msg) && !removed.size)
+        this.umMsg('<b>Not deleted.</b> The delete function is not installed on the server yet. Open Supabase &rarr; SQL Editor, paste the text below, click Run, then try again.<textarea readonly rows="8" style="width:100%;margin-top:8px;font-family:monospace;font-size:11px;" onclick="this.select()">'+Util.escapeHtml(OPP_DELETE_KEYS_SQL)+'</textarea>', true);
+      else this.umMsg('<b>Stopped part-way:</b> '+done.toLocaleString()+' removed, then: '+Util.escapeHtml(msg)+'. Run the preview again to see what is left.', true);
+      return;
+    }
+    const note = done < keys.length ? '<br>'+(keys.length-done).toLocaleString()+' were not found on the server (already removed or a different key) &mdash; use Reload from Database to check.' : '';
+    this.umMsg('<b>Done.</b> Removed '+done.toLocaleString()+' unmatched project(s). '+Store.data.oppProjects.length.toLocaleString()+' projects remain.'+note+'<br>The database file only shrinks after <b>VACUUM FULL opp_projects_rows;</b> is run in the Supabase SQL Editor (when nobody is using the CRM).');
+    this._um = null;
   },
   async saveCompletedCfg(){
     const lim = Number((document.getElementById('cpLimit')||{}).value);
