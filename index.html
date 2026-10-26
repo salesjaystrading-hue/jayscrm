@@ -2637,9 +2637,13 @@ const Auth = {
     const err = document.getElementById('loginError');
     if(!uRaw || !p){ err.textContent='Enter username and password.'; err.style.display='block'; return; }
     const email = uRaw.includes('@') ? uRaw.toLowerCase() : (uRaw.toLowerCase()+'@jaystrading.crm');
-    const { data, error } = await sb.auth.signInWithPassword({ email, password: p });
-    if(error || !data.session){
-      err.textContent = 'Incorrect username or password.';
+    let data = null, error = null;
+    try{ ({ data, error } = await sb.auth.signInWithPassword({ email, password: p })); }catch(e){ error = e; }
+    if(error || !data || !data.session){
+      // a wrong password is a 400 from Supabase; a dropped connection or a busy server is NOT a wrong password
+      const st = error && (error.status || error.code), msg = String((error && error.message) || '');
+      const serverSide = error && (!st || st===0 || st>=500 || /fetch|network|timeout|timed out|unavailable|gateway/i.test(msg));
+      err.textContent = serverSide ? 'Cannot reach the server right now (network problem or the database is busy). Please wait a moment and try again - your password may be fine.' : (error && error.status===429 ? 'Too many attempts. Please wait a minute and try again.' : 'Incorrect username or password.');
       err.style.display='block';
       return;
     }
@@ -2650,6 +2654,11 @@ const Auth = {
     const [ok] = await Promise.all([ this.loadProfile(data.session.user.id), Store.loadAll() ]);
     if(ok) await Access.load();
     if(!ok){
+      if(this.profileError){
+        err.textContent = 'Signed in, but the server is busy and could not load your profile. Please wait a moment and press Sign In again.';
+        err.style.display='block';
+        return;
+      }
       err.textContent = 'Your account has no CRM profile yet. Contact an admin.';
       err.style.display='block';
       await sb.auth.signOut();
@@ -2660,12 +2669,19 @@ const Auth = {
     Activity.log('Login', this.session.username+' signed in'); // fire-and-forget: boot shouldn't wait on an audit-log write
   },
   async loadProfile(userId){
-    try{
-      const { data, error } = await sb.from('profiles').select('*').eq('id', userId).maybeSingle();
-      if(error || !data) return false;
-      this.session = data;
-      return true;
-    }catch(e){ console.error('loadProfile failed', e); return false; }
+    // retried: one slow or dropped request used to look like "no profile" and sign the person out
+    this.profileError = false;
+    for(let attempt=0; attempt<3; attempt++){
+      try{
+        const { data, error } = await sb.from('profiles').select('*').eq('id', userId).maybeSingle();
+        if(error) throw error;
+        if(!data) return false;            // genuinely no profile
+        this.session = data;
+        return true;
+      }catch(e){ console.error('loadProfile attempt '+(attempt+1)+' failed', e); if(attempt<2) await new Promise(r=>setTimeout(r, 800*(attempt+1))); }
+    }
+    this.profileError = true;
+    return false;
   },
   async tryRestore(){
     try{
@@ -2674,7 +2690,7 @@ const Auth = {
       if(!session) return false;
       // Same parallelization as login() - see the comment there.
       const [ok] = await Promise.all([ this.loadProfile(session.user.id), Store.loadAll() ]);
-      if(!ok){ await sb.auth.signOut(); return false; }
+      if(!ok){ if(!this.profileError) await sb.auth.signOut(); return false; }   // keep the session when the server was just busy
       await Access.load();
       return true;
     }catch(e){ console.error('tryRestore failed', e); return false; }
@@ -16900,6 +16916,85 @@ const OppFinder = {
       '<button id="cpDeleteBtn" class="btn btn-sm" disabled style="background:#dc2626;color:#fff;" onclick="OppFinder.completedDelete()">3. Delete</button></div>' +
       '<div id="cpOut" style="margin-top:12px;"></div></div>';
   },
+  /* ---------------- follow-up board: matched projects by local body + daily call list ---------------- */
+  boardState: { view:'lb', district:'', cat:'ALL', rel:'medium', q:'' },
+  readBoard(){
+    const g = id => { const el = document.getElementById(id); return el ? el.value : null; };
+    const b = this.boardState, v = { district:g('bdDistrict'), cat:g('bdCat'), rel:g('bdRel'), q:g('bdQ') };
+    Object.keys(v).forEach(k=>{ if(v[k]!==null) b[k] = v[k]; });
+  },
+  setBoardView(v){ this.boardState.view = v; Paginate.get('oppboard').page = 1; this.render(); },
+  boardFilter(){ Paginate.get('oppboard').page = 1; this.render(); },
+  /* lead names already created from this local body (same name as the project's local body) */
+  leadLBSet(){
+    const set = new Set(); (Store.data.customers||[]).forEach(c=>{ const k = oppNorm(c.panchayath||''); if(k) set.add(k); }); return set;
+  },
+  boardData(){
+    this.readBoard();
+    const b = this.boardState, relMin = OppEngine.REL_MIN[b.rel] || 3, q = oppNormMl(b.q||'');
+    const trk = Store.data.oppTracking || {}, leads = this.leadLBSet(), groups = new Map(), projects = [];
+    Store.data.oppProjects.forEach(r=>{
+      if(b.district && r['District']!==b.district) return;
+      const m = OppMatch.get(r); if(m.unmatched) return;
+      let x;
+      if(b.cat==='ALL') x = m.cats.filter(y=>y.c!=='PURCHASE' && OppEngine.BAND_RANK[y.b] >= relMin).sort((a,c)=>c.s-a.s)[0];
+      else { x = m.cats.find(y=>y.c===b.cat); if(x && OppEngine.BAND_RANK[x.b] < relMin) x = null; }
+      if(!x) return;
+      if(q && !this.textMatch(this.rowBlob(r), q, false)) return;
+      const key = oppKeyOf(r), tr = trk[key], st = tr ? (tr.status||'New') : 'New', fund = oppMoney(r['FundTotal']);
+      const gk = (r['District']||'')+'|'+(r['LB Name']||''); let g = groups.get(gk);
+      if(!g){ g = { district:r['District']||'', lb:r['LB Name']||'—', n:0, fund:0, high:0, worked:0, hasLead: leads.has(oppNorm(r['LB Name']||'')), rows:[] }; groups.set(gk, g); }
+      g.n++; g.fund += fund; if(x.b==='H') g.high++; if(st!=='New') g.worked++; g.rows.push(r);
+      projects.push({ r, key, x, st, fund, g });
+    });
+    return { groups: [...groups.values()], projects };
+  },
+  renderBoard(){
+    const E = Util.escapeHtml, b = this.boardState, d = this.boardData();
+    const money = n => n>=10000000 ? (n/10000000).toFixed(2)+' Cr' : n>=100000 ? (n/100000).toFixed(2)+' L' : Math.round(n).toLocaleString();
+    const fil = '<div class="card card-pad" style="margin-bottom:12px;"><div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">' +
+      '<div class="field" style="margin:0;"><label>District</label><select id="bdDistrict" onchange="OppFinder.boardFilter()"><option value="">All districts</option>'+this.districtOptions().map(x=>'<option '+(b.district===x?'selected':'')+'>'+E(x)+'</option>').join('')+'</select></div>' +
+      '<div class="field" style="margin:0;"><label>Category</label><select id="bdCat" onchange="OppFinder.boardFilter()"><option value="ALL">All categories</option>'+Object.keys(OPP_CATEGORY_NAMES).filter(t=>t!=='OTHER'&&t!=='PURCHASE').map(t=>'<option value="'+t+'" '+(b.cat===t?'selected':'')+'>'+E(OPP_CATEGORY_NAMES[t])+'</option>').join('')+'</select></div>' +
+      '<div class="field" style="margin:0;"><label>Relevance</label><select id="bdRel" onchange="OppFinder.boardFilter()">'+[['high','High only'],['medium','Medium and above'],['possible','Possible and above']].map(([v,l])=>'<option value="'+v+'" '+(b.rel===v?'selected':'')+'>'+l+'</option>').join('')+'</select></div>' +
+      '<div class="field" style="margin:0;min-width:200px;"><label>Search</label><input id="bdQ" value="'+E(b.q||'')+'" placeholder="local body or project word" onchange="OppFinder.boardFilter()"></div>' +
+      '<div style="margin-left:auto;display:flex;gap:6px;"><button class="btn btn-sm '+(b.view==='lb'?'btn-primary':'btn-outline')+'" onclick="OppFinder.setBoardView(\'lb\')">Local bodies</button><button class="btn btn-sm '+(b.view==='calls'?'btn-primary':'btn-outline')+'" onclick="OppFinder.setBoardView(\'calls\')">Not contacted yet</button></div></div></div>';
+    const todo = d.projects.filter(p=>p.st==='New' && !p.g.hasLead);
+    const stats = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:12px;">' +
+      [['Local bodies',d.groups.length.toLocaleString()],['Matched projects',d.projects.length.toLocaleString()],['Matched fund',money(d.projects.reduce((a,p)=>a+p.fund,0))],['Not contacted yet',todo.length.toLocaleString()],['Local bodies with a lead',d.groups.filter(g=>g.hasLead).length.toLocaleString()]]
+      .map(([l,v])=>'<div class="card card-pad" style="padding:10px;"><div class="hint">'+l+'</div><div style="font-size:20px;font-weight:800;">'+v+'</div></div>').join('') + '</div>';
+    if(b.view==='calls'){
+      const list = todo.sort((a,c)=>(c.x.s-a.x.s) || (c.fund-a.fund));
+      const pg = Paginate.slice('oppboard', list);
+      return fil + stats + '<div class="hint" style="margin:0 0 8px;">Matched projects that are not saved in My Opportunities beyond &ldquo;New&rdquo; and whose local body has no lead yet &mdash; strongest match first.</div>' +
+        (pg.pageItems.length ? '<div class="card"><div class="table-wrap"><table><thead><tr><th>Local body</th><th>Project</th><th>Category</th><th>Fund</th><th>Impl Code</th><th></th></tr></thead><tbody>' +
+          pg.pageItems.map(p=>'<tr><td><b>'+E(p.r['LB Name']||'')+'</b><div class="hint">'+E(p.r['District']||'')+'</div></td><td style="white-space:normal;min-width:240px;">'+E(p.r['Project Name Eng']||p.r['Project Name Mal']||'')+'<div class="hint">'+E(p.r['Project Name Mal']||'')+'</div></td>' +
+            '<td><span class="badge badge-blue">'+E(OPP_CATEGORY_NAMES[p.x.c]||p.x.c)+'</span> <b style="font-size:11px;color:'+this.BAND_COLOR[p.x.b]+';">'+OppEngine.BAND_NAME[p.x.b]+'</b></td><td>'+E(p.r['FundTotal']||'')+'</td><td>'+E(p.r['Impl Code']||'')+'</td>' +
+            '<td style="white-space:nowrap;"><button class="btn btn-outline btn-sm" data-k="'+E(p.key)+'" onclick="OppFinder.viewProject(this.dataset.k)">View</button> <button class="btn btn-outline btn-sm" data-k="'+E(p.key)+'" onclick="OppFinder.markContacted(this.dataset.k)">Mark contacted</button> <button class="btn btn-primary btn-sm" data-k="'+E(p.key)+'" onclick="OppFinder.convertToLead(this.dataset.k)">Convert to Lead</button></td></tr>').join('') +
+          '</tbody></table></div>'+Paginate.controlsHTML('oppboard', pg, 'OppFinder.render()')+'</div>' : '<div class="card card-pad"><div class="empty-state"><div class="t">Nothing waiting</div><div class="d">Every matched project here is already worked on or its local body has a lead.</div></div></div>');
+    }
+    const list = d.groups.sort((a,c)=>(c.high-a.high) || (c.fund-a.fund));
+    const pg = Paginate.slice('oppboard', list);
+    return fil + stats + (pg.pageItems.length ? '<div class="card"><div class="table-wrap"><table><thead><tr><th>Local body</th><th>District</th><th>Matched projects</th><th>High</th><th>Matched fund</th><th>Worked on</th><th>Lead</th><th></th></tr></thead><tbody>' +
+      pg.pageItems.map(g=>'<tr><td><b>'+E(g.lb)+'</b></td><td>'+E(g.district)+'</td><td>'+g.n+'</td><td>'+g.high+'</td><td>'+money(g.fund)+'</td><td>'+g.worked+' / '+g.n+'</td><td>'+(g.hasLead?'<span class="badge badge-green">Lead exists</span>':'<span class="badge badge-gray">No lead</span>')+'</td>' +
+        '<td><button class="btn btn-outline btn-sm" data-d="'+E(g.district)+'" data-l="'+E(g.lb)+'" onclick="OppFinder.viewBoardLB(this.dataset.d,this.dataset.l)">Projects</button></td></tr>').join('') +
+      '</tbody></table></div>'+Paginate.controlsHTML('oppboard', pg, 'OppFinder.render()')+'</div>' : '<div class="card card-pad"><div class="empty-state"><div class="t">No matched projects</div><div class="d">Try a lower relevance or another category.</div></div></div>');
+  },
+  viewBoardLB(district, lb){
+    const d = this.boardData(), E = Util.escapeHtml, g = d.groups.find(x=>x.district===district && x.lb===lb); if(!g) return;
+    const items = d.projects.filter(p=>p.g===g).sort((a,c)=>(c.x.s-a.x.s)||(c.fund-a.fund));
+    UI.openModal(lb+' \u2014 '+items.length+' matched project(s)',
+      '<div class="hint" style="margin-bottom:8px;">'+E(district)+' &middot; '+(g.hasLead?'a lead already exists for this local body':'no lead yet')+'</div><div class="table-wrap"><table><thead><tr><th>Project</th><th>Category</th><th>Fund</th><th>Impl Code</th><th>Status</th><th></th></tr></thead><tbody>' +
+      items.map(p=>'<tr><td style="white-space:normal;min-width:220px;">'+E(p.r['Project Name Eng']||p.r['Project Name Mal']||'')+'</td><td><span class="badge badge-blue">'+E(OPP_CATEGORY_NAMES[p.x.c]||p.x.c)+'</span> <b style="font-size:11px;color:'+this.BAND_COLOR[p.x.b]+';">'+OppEngine.BAND_NAME[p.x.b]+'</b></td><td>'+E(p.r['FundTotal']||'')+'</td><td>'+E(p.r['Impl Code']||'')+'</td><td>'+E(p.st)+'</td>' +
+        '<td style="white-space:nowrap;"><button class="btn btn-outline btn-sm" data-k="'+E(p.key)+'" onclick="OppFinder.viewProject(this.dataset.k)">View</button> <button class="btn btn-primary btn-sm" data-k="'+E(p.key)+'" onclick="OppFinder.convertToLead(this.dataset.k)">Convert to Lead</button></td></tr>').join('') + '</tbody></table></div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>', true);
+  },
+  async markContacted(key){
+    const cur = Store.data.oppTracking[key] || {};
+    Store.data.oppTracking[key] = Object.assign({ priority:'Medium', staff:(Auth.session&&(Auth.session.name||Auth.session.username))||'', notes:'' }, cur, { status:'Contacted', savedAt:new Date().toISOString() });
+    const ok = await Store.save('oppTracking');
+    if(ok) await Activity.log('Project marked contacted', key);
+    UI.toast('Marked as contacted'); this.render();
+  },
   /* ---------------- remove unmatched projects (no JAYS category reaches "Possible") ---------------- */
   UM_FIELDS: ['Project No','Project Name Mal','Project Name Eng','LB Name','LB Type','District','Impl Code','Impl Officer Name','Project Type','Project Category','Sector Type','Sector','Sub Sector','Impl mode','Status','Fund Description','FundTotal','Expenditure Description','Expenditure','Balance'],
   unmatchedCardHTML(){
@@ -17416,7 +17511,7 @@ const OppFinder = {
   switcherHTML(){
     const tabs = [['dashboard','&#127968; Dashboard'],['projects','&#128269; Projects'],
       ['opportunities','&#11088; My Opportunities'],['import','&#128229; Import'],
-      ['products','&#128230; Products'],['reports','&#128202; Reports']];
+      ['board','&#128222; Follow-up Board'],['products','&#128230; Products'],['reports','&#128202; Reports']];
     if(Auth.isAdmin()) tabs.push(['deldata','&#128465; Delete Data']);
     return '<div class="rp-switcher" style="flex-wrap:wrap;">' +
       tabs.map(([id,label])=>'<button class="'+(this.tab===id?'active':'')+'" onclick="OppFinder.setTab(\''+id+'\')">'+label+'</button>').join('') +
@@ -17428,6 +17523,7 @@ const OppFinder = {
       : this.tab==='opportunities' ? this.renderOpportunities()
       : this.tab==='import' ? this.renderImport()
       : this.tab==='products' ? this.renderProducts()
+      : this.tab==='board' ? this.renderBoard()
       : this.tab==='deldata' ? this.renderDeleteData()
       : this.renderReports();
     document.getElementById('content').innerHTML = this.switcherHTML() + body;
