@@ -1874,17 +1874,23 @@ const Store = {
     const sleep = ms=>new Promise(r=>setTimeout(r, ms));
     let total = null;
     try{ const { data } = await sb.rpc('opp_get_count'); if(typeof data === 'number') total = data; }catch(e){ /* best-effort only */ }
+    this._oppDelCount = 0;                                   /* rows deleted since this count was taken */
+    const eff = ()=> total===null ? null : Math.max(0, total-(this._oppDelCount||0));
     const part = (resume && this._oppPartial) ? this._oppPartial : null;
     const all = part ? part.all : [];
     let afterKey = part ? part.afterKey : null, limit = part ? part.limit : 2000, okRun = 0;
     this._oppPartial = null;
-    this.oppLoad = { loaded:all.length, total, complete:false, loading:true };
+    this.oppLoad = { loaded:all.length, total:eff(), complete:false, loading:true };
     try{
       while(true){
         let page = null, lastErr = null;
         for(let attempt=0; attempt<6; attempt++){
           try{
-            const { data, error } = await sb.rpc('opp_get_page_v2', { p_after_key: afterKey, p_limit: limit });
+            while(this._oppPause) await sleep(300);          /* a delete is running: wait so deleted rows are not re-added */
+            const { data, error } = await Promise.race([
+              sb.rpc('opp_get_page_v2', { p_after_key: afterKey, p_limit: limit }),
+              new Promise((_,rej)=>setTimeout(()=>rej(new Error('Request timed out (server busy)')), 45000))   /* a request that never answers used to freeze the load */
+            ]);
             if(error) throw error;
             page = data || []; lastErr = null; okRun++;
             if(okRun>=3 && limit<2000){ limit = Math.min(2000, limit*2); okRun = 0; }
@@ -1892,26 +1898,30 @@ const Store = {
           }catch(e){
             lastErr = e; okRun = 0; limit = Math.max(250, Math.floor(limit/2));
             console.warn('opp page failed (attempt '+(attempt+1)+', next size '+limit+')', e);
+            this.oppLoad = Object.assign({}, this.oppLoad, { msg:'Server is slow - retrying (attempt '+(attempt+1)+' of 6)\u2026' });
+            if(typeof OppFinder!=='undefined') OppFinder.updateLoadBanner();
             if(attempt<5) await sleep(1000*(attempt+1));
           }
         }
         if(lastErr){ this._oppPartial = { all, afterKey, limit }; throw lastErr; }
         if(!page.length) break;
-        for(const row of page) all.push(row.data);
+        while(this._oppPause) await sleep(300);
+        const gone = this._oppDeleted;
+        for(const row of page){ if(gone && gone.has(row.key)) continue; all.push(row.data); }
         afterKey = page[page.length-1].key;
-        this.oppLoad = { loaded:all.length, total, complete:false, loading:true };
-        if(onProgress) onProgress(all, total);
+        this.oppLoad = { loaded:all.length, total:eff(), complete:false, loading:true };
+        if(onProgress) onProgress(all, eff());
       }
-      const complete = !(total && all.length < total*0.995);
-      this.oppLoad = { loaded:all.length, total, complete, loading:false };
+      const complete = !(eff() && all.length < eff()*0.995);
+      this.oppLoad = { loaded:all.length, total:eff(), complete, loading:false };
       this.loadFailed['jays_oppprojects'] = !complete;
-      if(complete) this.oppCacheSet(all, total);
+      if(complete) this.oppCacheSet(all, eff());
       else this._oppPartial = { all, afterKey, limit };
       return all;
     }catch(e){
       console.error('opp load failed', e);
       this.loadFailed['jays_oppprojects'] = true;
-      this.oppLoad = { loaded:all.length, total, complete:false, loading:false };
+      this.oppLoad = { loaded:all.length, total:eff(), complete:false, loading:false };
       return all;   /* keep what did load; Resume continues from the last row */
     }
   },
@@ -1958,7 +1968,8 @@ const Store = {
     }
     const prog = (soFar)=>{
       this.data.oppProjects = soFar;
-      if(UI.currentView==='dashboard' || UI.currentView==='oppfinder') Router.render(UI.currentView);
+      if(UI.currentView==='oppfinder') OppFinder.updateLoadBanner();          /* do not redraw the page: it would wipe a preview / delete message the admin is using */
+      else if(UI.currentView==='dashboard') Router.render(UI.currentView);
     };
     let rows = await this.loadOppProjects(prog);
     /* if it stopped part-way, keep going automatically from where it stopped (waits get longer each time) */
@@ -1969,7 +1980,8 @@ const Store = {
     }
     this.data.oppProjects = rows;
     try{ if(typeof OppMatch!=='undefined') await OppMatch.warm(); }catch(e){ console.warn('opp warm', e); }
-    if(UI.currentView==='dashboard' || UI.currentView==='oppfinder') Router.render(UI.currentView);
+    if(UI.currentView==='oppfinder' && typeof OppFinder!=='undefined' && OppFinder.tab==='deldata') OppFinder.updateLoadBanner();
+    else if(UI.currentView==='dashboard' || UI.currentView==='oppfinder') Router.render(UI.currentView);
   },
   /* Full replace - only for the rare occasions the ENTIRE collection
      needs rewriting at once (Recalculate All Scores, Delete All Project
@@ -17039,8 +17051,7 @@ const OppFinder = {
   umMsg(html, bad){ const el = document.getElementById('umOut'); if(el) el.innerHTML = '<div style="padding:10px 12px;border-radius:8px;font-size:13px;'+(bad?'background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;':'background:#f0f9ff;color:#075985;border:1px solid #bae6fd;')+'">'+html+'</div>'; },
   async unmatchedPreview(){
     if(!Auth.isAdmin()){ UI.toast('Only an Admin can use this'); return; }
-    if(Store.loadFailed['jays_oppprojects']){ this.umMsg('The project list did not load completely. Use Reload from Database first, then preview again.', true); return; }
-    this.umMsg('Analysing all projects&hellip; please wait.');
+    this.umMsg('Analysing the projects loaded so far&hellip; please wait.');
     try{ await OppMatch.warm(); }catch(e){}
     const E = Util.escapeHtml, rows = Store.data.oppProjects, trk = Store.data.oppTracking || {};
     const eligible = [], prot = []; let weak = 0, matched = 0; const byD = {};
@@ -17051,9 +17062,10 @@ const OppFinder = {
       eligible.push(r); if(m.cats.length) weak++; const d = r['District']||'Unknown'; byD[d] = (byD[d]||0)+1;
     });
     this._um = { eligible, backedUp:false };
+    const L = Store.oppLoad, partialNote = (L && !L.complete) ? '<div style="margin-bottom:8px;padding:8px 10px;border-radius:8px;background:#fffbeb;color:#92400e;border:1px solid #fde68a;"><b>Only '+rows.length.toLocaleString()+(L.total?' of '+L.total.toLocaleString():'')+' projects are loaded so far.</b> This list covers those only. You can delete these now and run the preview again after the rest has loaded.</div>' : '';
     const bd = document.getElementById('umBackupBtn'), dl = document.getElementById('umDeleteBtn');
     if(bd) bd.disabled = !eligible.length; if(dl) dl.disabled = true;
-    this.umMsg('<b>Preview &mdash; nothing has been deleted.</b><br>Total projects: <b>'+rows.length.toLocaleString()+'</b><br>' +
+    this.umMsg(partialNote+'<b>Preview &mdash; nothing has been deleted.</b><br>Total projects loaded: <b>'+rows.length.toLocaleString()+'</b><br>' +
       'Matched (kept): <b>'+matched.toLocaleString()+'</b><br>Unmatched &mdash; protected in My Opportunities (kept): '+prot.length.toLocaleString()+'<br>' +
       'Will be removed: <b style="color:#b91c1c;">'+eligible.length.toLocaleString()+'</b> (of which '+weak.toLocaleString()+' have only a weak keyword match)' +
       (eligible.length ? '<br><br>By district: '+Object.entries(byD).sort((a,b)=>b[1]-a[1]).map(([d,n])=>E(d)+' '+n.toLocaleString()).join(' &middot; ') +
@@ -17091,6 +17103,8 @@ const OppFinder = {
     const rows = c.eligible.filter(r=>OppMatch.get(r).unmatched && !trk[oppKeyOf(r)]);
     const keys = rows.map(oppKeyOf), SIZE = 2000; let done = 0, err = null; const removed = new Set();
     const dl = document.getElementById('umDeleteBtn'); if(dl) dl.disabled = true;
+    Store._oppPause = true;                                   /* pause a running load while rows are being deleted */
+    try{
     for(let i=0;i<keys.length;i+=SIZE){
       const part = keys.slice(i,i+SIZE); let res;
       try{ res = await sb.rpc('opp_delete_keys', { p_keys: part }); }catch(e){ res = { error:e }; }
@@ -17099,10 +17113,17 @@ const OppFinder = {
       this.umMsg('Deleting&hellip; '+Math.min(i+SIZE,keys.length).toLocaleString()+' of '+keys.length.toLocaleString()+' processed. Please keep this page open.');
       if(i+SIZE < keys.length) await new Promise(r=>setTimeout(r, 2000 + Math.random()*2000));
     }
+    } finally { Store._oppPause = false; }
     if(removed.size){
-      Store.data.oppProjects = Store.data.oppProjects.filter(r=>!removed.has(oppKeyOf(r)));
+      /* filter IN PLACE: a load that is still running keeps appending to this same array */
+      const arr = Store.data.oppProjects; let w = 0; for(let q=0;q<arr.length;q++){ if(!removed.has(oppKeyOf(arr[q]))) arr[w++] = arr[q]; } arr.length = w;
+      Store._oppDeleted = Store._oppDeleted || new Set(); removed.forEach(k=>Store._oppDeleted.add(k));
+      if(Store._oppPartial){ const pa = Store._oppPartial.all; if(pa!==arr){ let w2=0; for(let q=0;q<pa.length;q++){ if(!removed.has(oppKeyOf(pa[q]))) pa[w2++]=pa[q]; } pa.length=w2; } }
+      Store._oppDelCount = (Store._oppDelCount||0) + removed.size;
+      if(Store.oppLoad && Store.oppLoad.total) Store.oppLoad = Object.assign({}, Store.oppLoad, { total: Math.max(0, Store.oppLoad.total - removed.size), loaded: arr.length });
       try{ OppMatch.invalidate(); }catch(e){}
-      Store.oppCacheSet(Store.data.oppProjects);
+      if(!Store.oppLoad || Store.oppLoad.complete) Store.oppCacheSet(Store.data.oppProjects, Store.oppLoad && Store.oppLoad.total);   /* never cache a partial list */
+      this.updateLoadBanner();
       try{ await Activity.log('Unmatched projects removed', done+' project(s)'); }catch(e){}
     }
     if(err){
@@ -17562,21 +17583,24 @@ const OppFinder = {
   },
 
   /* shown whenever the project list is still loading or stopped before the end, so a partial list is never mistaken for the full one */
-  loadBannerHTML(){
+  loadBannerHTML(){ return '<div id="oppLoadBanner">'+this.loadBannerInner()+'</div>'; },
+  updateLoadBanner(){ const el = document.getElementById('oppLoadBanner'); if(el) el.innerHTML = this.loadBannerInner(); },
+  loadBannerInner(){
     const L = Store.oppLoad; if(!L || L.complete) return '';
     if(!L.loading && !Store.loadFailed['jays_oppprojects']) return '';
     const of = L.total ? ' of '+L.total.toLocaleString('en-IN') : '';
-    if(L.loading) return '<div class="card card-pad" style="margin-bottom:12px;border-left:4px solid var(--blue,#2563eb);"><b>Loading projects\u2026 '+L.loaded.toLocaleString('en-IN')+of+'</b><div class="hint">Counts and lists are complete only when loading finishes.</div></div>';
-    return '<div class="card card-pad" style="margin-bottom:12px;border-left:4px solid var(--amber,#d97706);display:flex;gap:10px;align-items:center;flex-wrap:wrap;"><div style="flex:1;min-width:220px;"><b>Only '+L.loaded.toLocaleString('en-IN')+of+' projects are loaded</b><div class="hint">The connection stopped part-way. Numbers and lists below are incomplete. Tap Resume to carry on from where it stopped.</div></div><button class="btn btn-primary btn-sm" onclick="OppFinder.resumeLoad()">Resume loading</button></div>';
+    const tools = Auth.isAdmin() ? '<button class="btn btn-outline btn-sm" onclick="OppFinder.setTab(\'deldata\')">Remove unmatched projects</button>' : '';
+    if(L.loading) return '<div class="card card-pad" style="margin-bottom:12px;border-left:4px solid var(--blue,#2563eb);display:flex;gap:10px;align-items:center;flex-wrap:wrap;"><div style="flex:1;min-width:220px;"><b>Loading projects\u2026 '+L.loaded.toLocaleString('en-IN')+of+'</b><div class="hint">'+Util.escapeHtml(L.msg||'Counts and lists are complete only when loading finishes.')+'</div></div>'+tools+'</div>';
+    return '<div class="card card-pad" style="margin-bottom:12px;border-left:4px solid var(--amber,#d97706);display:flex;gap:10px;align-items:center;flex-wrap:wrap;"><div style="flex:1;min-width:220px;"><b>Only '+L.loaded.toLocaleString('en-IN')+of+' projects are loaded</b><div class="hint">The connection stopped part-way. Numbers and lists below are incomplete. Tap Resume to carry on from where it stopped.</div></div>'+tools+'<button class="btn btn-primary btn-sm" onclick="OppFinder.resumeLoad()">Resume loading</button></div>';
   },
   async resumeLoad(){
-    const prog = soFar=>{ Store.data.oppProjects = soFar; if(UI.currentView==='oppfinder' && !this._resumeBusy){ this._resumeBusy = true; setTimeout(()=>{ this._resumeBusy = false; if(UI.currentView==='oppfinder' && Store.oppLoad.loading) this.render(); }, 1500); } };
+    const prog = soFar=>{ Store.data.oppProjects = soFar; this.updateLoadBanner(); };
     UI.toast('Resuming\u2026');
     Store.data.oppProjects = await Store.resumeOppLoad(prog);
     try{ await OppMatch.warm(); }catch(e){ console.warn(e); }
     if(Store.loadFailed['jays_oppprojects']) UI.toast('Still stopped at '+Store.data.oppProjects.length.toLocaleString('en-IN')+' - tap Resume again', 6000);
     else UI.toast('All '+Store.data.oppProjects.length.toLocaleString('en-IN')+' projects loaded');
-    if(UI.currentView==='oppfinder') this.render();
+    if(UI.currentView==='oppfinder'){ if(this.tab==='deldata') this.updateLoadBanner(); else this.render(); }
   },
   renderDashboard(){
     const rows = Store.data.oppProjects;
