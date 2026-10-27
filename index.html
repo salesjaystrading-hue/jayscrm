@@ -1861,43 +1861,64 @@ const Store = {
      progressive rendering — total is best-effort (from opp_get_count())
      and is null if that quick lookup itself fails, which never blocks
      the real paging. */
-  async loadOppProjects(onProgress){
-    const PAGE_SIZE = 4000;
+  /* Loads the project list in keyset pages. Built so one slow or dropped request can no longer stop the load part-way
+     (it used to give up after 3 quick retries and leave e.g. 72,000 of 157,000 rows):
+     - the page size shrinks automatically when a request fails and grows back when things are healthy,
+     - every page is retried up to 6 times with growing waits,
+     - if it still cannot continue, what has loaded is kept AND remembered (_oppPartial) so "Resume" carries on from the
+       last row instead of starting again,
+     - it only stops on an empty page (never on a "short" page), and compares the result with the database count,
+     - a partial list is never saved to the local cache. */
+  oppLoad: { loaded:0, total:null, complete:true, loading:false },
+  async loadOppProjects(onProgress, resume){
+    const sleep = ms=>new Promise(r=>setTimeout(r, ms));
     let total = null;
     try{ const { data } = await sb.rpc('opp_get_count'); if(typeof data === 'number') total = data; }catch(e){ /* best-effort only */ }
-    let afterKey = null;
-    const all = [];
+    const part = (resume && this._oppPartial) ? this._oppPartial : null;
+    const all = part ? part.all : [];
+    let afterKey = part ? part.afterKey : null, limit = part ? part.limit : 2000, okRun = 0;
+    this._oppPartial = null;
+    this.oppLoad = { loaded:all.length, total, complete:false, loading:true };
     try{
       while(true){
         let page = null, lastErr = null;
-        for(let attempt=0; attempt<3; attempt++){
+        for(let attempt=0; attempt<6; attempt++){
           try{
-            const { data, error } = await sb.rpc('opp_get_page_v2', { p_after_key: afterKey, p_limit: PAGE_SIZE });
+            const { data, error } = await sb.rpc('opp_get_page_v2', { p_after_key: afterKey, p_limit: limit });
             if(error) throw error;
-            page = data || [];
-            lastErr = null;
+            page = data || []; lastErr = null; okRun++;
+            if(okRun>=3 && limit<2000){ limit = Math.min(2000, limit*2); okRun = 0; }
             break;
-          }catch(e){ lastErr = e; if(attempt<2) await new Promise(r=>setTimeout(r, 600*(attempt+1))); }
+          }catch(e){
+            lastErr = e; okRun = 0; limit = Math.max(250, Math.floor(limit/2));
+            console.warn('opp page failed (attempt '+(attempt+1)+', next size '+limit+')', e);
+            if(attempt<5) await sleep(1000*(attempt+1));
+          }
         }
-        if(lastErr) throw lastErr;
+        if(lastErr){ this._oppPartial = { all, afterKey, limit }; throw lastErr; }
         if(!page.length) break;
         for(const row of page) all.push(row.data);
         afterKey = page[page.length-1].key;
+        this.oppLoad = { loaded:all.length, total, complete:false, loading:true };
         if(onProgress) onProgress(all, total);
-        if(page.length < PAGE_SIZE) break;
       }
-      this.loadFailed['jays_oppprojects'] = false;
-      this.oppCacheSet(all);
+      const complete = !(total && all.length < total*0.995);
+      this.oppLoad = { loaded:all.length, total, complete, loading:false };
+      this.loadFailed['jays_oppprojects'] = !complete;
+      if(complete) this.oppCacheSet(all, total);
+      else this._oppPartial = { all, afterKey, limit };
       return all;
     }catch(e){
       console.error('opp load failed', e);
       this.loadFailed['jays_oppprojects'] = true;
-      // Keep whatever pages DID load rather than discarding real data on
-      // a late failure — loadFailed=true still surfaces the warning/retry
-      // UI, this just avoids losing e.g. 30,000 good rows because the
-      // 31st page timed out three times in a row.
-      return all;
+      this.oppLoad = { loaded:all.length, total, complete:false, loading:false };
+      return all;   /* keep what did load; Resume continues from the last row */
     }
+  },
+  /* continues a stopped load from the last row it reached */
+  async resumeOppLoad(onProgress){
+    if(!this._oppPartial) return this.loadOppProjects(onProgress);
+    return this.loadOppProjects(onProgress, true);
   },
   /* Loads the (potentially huge) Project Opportunities list after boot,
      without the rest of sign-in waiting on it - see the comment above
@@ -1921,24 +1942,31 @@ const Store = {
   async oppCacheGet(){
     try{ const db = await this._oppIdb(); return await new Promise((res)=>{ const r = db.transaction('kv').objectStore('kv').get('rows'); r.onsuccess = ()=>res(r.result||null); r.onerror = ()=>res(null); }); }catch(e){ return null; }
   },
-  async oppCacheSet(rows){
-    try{ const db = await this._oppIdb(); await new Promise((res,rej)=>{ const tx = db.transaction('kv','readwrite'); tx.objectStore('kv').put({ rows, savedAt: Date.now(), n: rows.length }, 'rows'); tx.oncomplete = res; tx.onerror = ()=>rej(tx.error); }); }catch(e){ console.warn('opp cache save skipped', e); }
+  async oppCacheSet(rows, total){
+    try{ const db = await this._oppIdb(); await new Promise((res,rej)=>{ const tx = db.transaction('kv','readwrite'); tx.objectStore('kv').put({ rows, savedAt: Date.now(), n: rows.length, total: total||null }, 'rows'); tx.oncomplete = res; tx.onerror = ()=>rej(tx.error); }); }catch(e){ console.warn('opp cache save skipped', e); }
   },
   async oppCacheClear(){
     try{ const db = await this._oppIdb(); await new Promise((res)=>{ const tx = db.transaction('kv','readwrite'); tx.objectStore('kv').delete('rows'); tx.oncomplete = res; tx.onerror = res; }); }catch(e){}
   },
   async loadOppProjectsBackground(){
     const c = await this.oppCacheGet();
-    if(c && Array.isArray(c.rows) && c.rows.length && (Date.now()-c.savedAt) < this.OPP_CACHE_HOURS*3600*1000){
+    if(c && Array.isArray(c.rows) && c.rows.length && (!c.total || c.rows.length >= c.total*0.995) && (Date.now()-c.savedAt) < this.OPP_CACHE_HOURS*3600*1000){
       this.data.oppProjects = c.rows; this.loadFailed['jays_oppprojects'] = false;
       try{ if(typeof OppMatch!=='undefined') await OppMatch.warm(); }catch(e){ console.warn('opp warm', e); }
       if(UI.currentView==='dashboard' || UI.currentView==='oppfinder') Router.render(UI.currentView);
       return;
     }
-    const rows = await this.loadOppProjects((soFar)=>{
+    const prog = (soFar)=>{
       this.data.oppProjects = soFar;
       if(UI.currentView==='dashboard' || UI.currentView==='oppfinder') Router.render(UI.currentView);
-    });
+    };
+    let rows = await this.loadOppProjects(prog);
+    /* if it stopped part-way, keep going automatically from where it stopped (waits get longer each time) */
+    for(const wait of [5000, 15000, 30000, 60000]){
+      if(!this.loadFailed['jays_oppprojects'] || !navigator.onLine) break;
+      await new Promise(r=>setTimeout(r, wait));
+      rows = await this.resumeOppLoad(prog);
+    }
     this.data.oppProjects = rows;
     try{ if(typeof OppMatch!=='undefined') await OppMatch.warm(); }catch(e){ console.warn('opp warm', e); }
     if(UI.currentView==='dashboard' || UI.currentView==='oppfinder') Router.render(UI.currentView);
@@ -17529,10 +17557,27 @@ const OppFinder = {
       : this.tab==='board' ? this.renderBoard()
       : this.tab==='deldata' ? this.renderDeleteData()
       : this.renderReports();
-    document.getElementById('content').innerHTML = this.switcherHTML() + body;
+    document.getElementById('content').innerHTML = this.switcherHTML() + this.loadBannerHTML() + body;
     if(this.tab==='products') this.renderKwTable();
   },
 
+  /* shown whenever the project list is still loading or stopped before the end, so a partial list is never mistaken for the full one */
+  loadBannerHTML(){
+    const L = Store.oppLoad; if(!L || L.complete) return '';
+    if(!L.loading && !Store.loadFailed['jays_oppprojects']) return '';
+    const of = L.total ? ' of '+L.total.toLocaleString('en-IN') : '';
+    if(L.loading) return '<div class="card card-pad" style="margin-bottom:12px;border-left:4px solid var(--blue,#2563eb);"><b>Loading projects\u2026 '+L.loaded.toLocaleString('en-IN')+of+'</b><div class="hint">Counts and lists are complete only when loading finishes.</div></div>';
+    return '<div class="card card-pad" style="margin-bottom:12px;border-left:4px solid var(--amber,#d97706);display:flex;gap:10px;align-items:center;flex-wrap:wrap;"><div style="flex:1;min-width:220px;"><b>Only '+L.loaded.toLocaleString('en-IN')+of+' projects are loaded</b><div class="hint">The connection stopped part-way. Numbers and lists below are incomplete. Tap Resume to carry on from where it stopped.</div></div><button class="btn btn-primary btn-sm" onclick="OppFinder.resumeLoad()">Resume loading</button></div>';
+  },
+  async resumeLoad(){
+    const prog = soFar=>{ Store.data.oppProjects = soFar; if(UI.currentView==='oppfinder' && !this._resumeBusy){ this._resumeBusy = true; setTimeout(()=>{ this._resumeBusy = false; if(UI.currentView==='oppfinder' && Store.oppLoad.loading) this.render(); }, 1500); } };
+    UI.toast('Resuming\u2026');
+    Store.data.oppProjects = await Store.resumeOppLoad(prog);
+    try{ await OppMatch.warm(); }catch(e){ console.warn(e); }
+    if(Store.loadFailed['jays_oppprojects']) UI.toast('Still stopped at '+Store.data.oppProjects.length.toLocaleString('en-IN')+' - tap Resume again', 6000);
+    else UI.toast('All '+Store.data.oppProjects.length.toLocaleString('en-IN')+' projects loaded');
+    if(UI.currentView==='oppfinder') this.render();
+  },
   renderDashboard(){
     const rows = Store.data.oppProjects;
     const counts = {}; Object.keys(OPP_CATEGORY_NAMES).forEach(k=>counts[k]=0);
