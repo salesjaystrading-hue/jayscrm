@@ -2774,6 +2774,7 @@ const UI = {
 const NAV = [
   {sec:'My Workspace', ic:'&#127919;', items:[
     {id:'dashboard', ic:'&#127968;', label:'Dashboard'},
+    {id:'todayplan', ic:'&#128197;', label:"Today's Actions"},
     {id:'growth', ic:'&#128200;', label:'Growth Centre'},
     {id:'notifications', ic:'&#128276;', label:'Notifications'},
     {id:'mywork', ic:'&#127919;', label:'My Work'},
@@ -2883,6 +2884,7 @@ const PAGE_META = {
   tasks:['Tasks & To-Do','Team to-do list &amp; task tracking'],
   notes:['Notes','Quick notes & reminders'],
   reports:['Reports','Business performance'],
+  todayplan:["Today's Actions",'Follow-ups, quotations, payments, tasks and tender deadlines in one list'],
   fieldhome:['My Day','Today’s visits, plan and field activity'],
   visits:['Visits','Record and track every field visit'],
   requirements:['Requirements','Customer requirements collected in the field'],
@@ -2910,6 +2912,7 @@ function assignableMenus(){
    array exists, it's the source of truth. */
 function hasMenuAccess(viewId){
   if(!Auth.session) return false;
+  if(viewId==='todayplan') return true;   /* everyone's own to-do list; items inside still respect their module access */
   if(Auth.session.role==='Admin') return true;
   if(Access.menuHidden(viewId)) return false;
   const perms = Auth.session.permissions;
@@ -3064,6 +3067,8 @@ const App = {
     go('dashboard');
     Attendance.checkFirstLoginToday();
     setTimeout(()=>{ try{ Work.runAlerts(); Work.refreshBadge(); }catch(e){} }, 1500);
+    setTimeout(()=>{ try{ TenderAlerts.toastOnLogin(); }catch(e){ console.error(e); } }, 2500);
+    setTimeout(()=>{ try{ BidClean.auto(); }catch(e){ console.error(e); } }, 9000);
   }
 };
 document.getElementById('loginPass').addEventListener('keydown', e=>{ if(e.key==='Enter') Auth.login(); });
@@ -4044,10 +4049,7 @@ const Customers = {
   async sendWhatsApp(id){
     const x = Store.data.customers.find(c=>c.id===id);
     if(!x) return;
-    const msg = 'Hi '+x.name+', this is Jays Trading and Business Solution. How can we help you today?';
-    window.open(Util.waLink(x.phone, msg), '_blank');
-    await this.logTimeline(id, 'WhatsApp Sent', 'Opened WhatsApp chat', {silent:true});
-    if(document.getElementById('drawerOverlay').style.display==='block') this.openDetail(id);
+    WaQuick.customer(id);
   },
   addTimelineForm(id){
     UI.openModal('Add Timeline Entry', `
@@ -4359,8 +4361,7 @@ const Followups = {
   async quickWhatsApp(id){
     const f = Store.data.followups.find(x=>x.id===id);
     if(!f) return;
-    window.open(Util.waLink(f.phone, 'Hi '+f.customerName+', this is Jays Trading and Business Solution, following up regarding: '+(f.purpose||'your enquiry')+'.'), '_blank');
-    if(f.customerId) await Customers.logTimeline(f.customerId, 'Follow-up', 'WhatsApp follow-up sent: '+(f.purpose||''), {silent:true});
+    WaQuick.followup(id);
   },
   async markDone(id){
     const f = Store.data.followups.find(x=>x.id===id);
@@ -4560,7 +4561,7 @@ const Quotations = {
         ${Paginate.slice('quotations', list).pageItems.map(q=>`<tr>
           <td class="col-actions"><div class="row-action-btns">
             <button class="icon-btn" title="Print" onclick="Quotations.print('${q.id}')">&#128424;</button>
-            <a class="icon-btn" style="color:#25D366;text-decoration:none;" title="WhatsApp" href="${Util.waLink(q.phone, Quotations.waSummary(q))}" target="_blank">&#128172;</a>
+            <button class="icon-btn" style="color:#25D366;" title="WhatsApp" onclick="WaQuick.quotation('${q.id}')">&#128172;</button>
             <button class="icon-btn" title="Edit" onclick="Quotations.openForm('${q.id}')">&#9998;</button>
             <button class="icon-btn" title="Duplicate" onclick="Quotations.duplicate('${q.id}')">&#128203;</button>
             <button class="icon-btn" title="Delete" onclick="Quotations.remove('${q.id}')">&#128465;</button>
@@ -4805,7 +4806,7 @@ const Payments = {
           const pendingAmt = p.dueAmount!==undefined ? Math.max(Number(p.dueAmount)||0,0) : Math.max((Number(p.amount)||0)-paidAmt,0);
           return `<tr>
           <td class="col-actions"><div class="row-action-btns">
-            <a class="icon-btn" style="color:#25D366;text-decoration:none;" title="WhatsApp reminder" href="${Util.waLink(p.phone,'Hi '+p.contact+', this is a reminder that invoice '+(p.invoiceNumber||p.id)+' for '+Util.fmtMoney(pendingAmt).replace('₹','Rs.')+' is pending. Kindly clear at the earliest. - Jays Trading and Business Solution')}" target="_blank">&#128172;</a>
+            <button class="icon-btn" style="color:#25D366;" title="WhatsApp reminder" onclick="WaQuick.payment('${p.id}')">&#128172;</button>
             <button class="icon-btn" onclick="Payments.markPaid('${p.id}')" title="Mark paid">&#10003;</button>
             <button class="icon-btn" onclick="Payments.openForm('${p.id}')">&#9998;</button>
             <button class="icon-btn" onclick="Payments.remove('${p.id}')">&#128465;</button>
@@ -9440,6 +9441,7 @@ const Notifications = {
       else if(Number(p.stock)<5) items.push({type:'Low Stock', text:`${p.name} — ${p.stock} left`, color:'var(--amber,#d97706)', view:'inventory'});
     });
 
+    TenderAlerts.list().forEach(x=>items.push({type:'Tender Closing', text:(x.b.title||x.b.bidNumber||'Bid')+' \u2014 '+(x.days===0?'closes TODAY':x.days===1?'closes tomorrow':'closes in '+x.days+' days'), color:x.days<=1?'var(--red,#dc2626)':'var(--amber,#d97706)', view:'bidsearch'}));
     Alerts.collect().forEach(a=>items.push(a));
 
     document.getElementById('content').innerHTML = `
@@ -10237,6 +10239,7 @@ const BidSearch = {
       <div class="toolbar">
         <div class="search"><span class="ic">&#128269;</span><input id="bidSearch" autocomplete="off" placeholder="Search bid number, title, category, organisation, department..." oninput="BidSearch.render()" value="${Util.escapeHtml(q)}"></div>
         <div class="toolbar-spacer"></div>
+        ${BidClean.canRun()?'<button class="btn btn-outline btn-sm" onclick="BidClean.openPanel()">&#129529; Clean-up</button>':''}
         <button class="btn btn-outline btn-sm" onclick="BidSearch.exportExcel()">&#128228; Export Bid Register</button>
         <button class="btn btn-primary btn-sm" id="btnBidReport" onclick="BidSearch.exportReport()">&#128202; Excel Report</button>
         <button class="btn btn-primary btn-sm" onclick="BidSearch.openForm(null)">&#65291; Add Bid</button>
@@ -17865,6 +17868,208 @@ const OppFinder = {
   const _close = UI.closeModal.bind(UI);
   UI.closeModal = function(){ OppFinder._cur = null; OppFinder._stack = []; return _close(); };
 })();
+
+/* =====================================================================
+   TODAY'S ACTIONS, WHATSAPP QUICK-SEND, TENDER DEADLINE ALERTS and
+   CLOSED-TENDER CLEAN-UP. Built on the existing follow-ups, quotations,
+   payments, tasks, bids and project-opportunity data - no new tables.
+===================================================================== */
+const TENDER_ALERT_SKIP = BID_TERMINAL_STATUSES.concat(['Submitted','Technical Evaluation','Financial Evaluation']);
+const TenderAlerts = {
+  /* open tenders closing today, tomorrow or within 3 days (not yet submitted / decided) */
+  list(){
+    const out = [];
+    (Store.data.bids||[]).forEach(b=>{
+      if(TENDER_ALERT_SKIP.includes(b.status)) return;
+      const d = bidDeadlineInfo(b.endDate).days; if(d===null || d<0 || d>3) return;
+      out.push({ b, days:d, bucket: d===0?'today':d===1?'tomorrow':'soon' });
+    });
+    out.sort((a,c)=>a.days-c.days);
+    return out;
+  },
+  toastOnLogin(){
+    if(!hasMenuAccess('bidsearch')) return;
+    const l = this.list(); if(!l.length) return;
+    const t = l.filter(x=>x.days===0).length, o = l.filter(x=>x.days===1).length, s = l.length-t-o, parts = [];
+    if(t) parts.push(t+' tender(s) close TODAY'); if(o) parts.push(o+' close tomorrow'); if(s) parts.push(s+' more within 3 days');
+    UI.toast('\u23F0 '+parts.join(' \u00b7 '), 7000);
+  }
+};
+
+/* ---------- WhatsApp: pick a ready message, edit it, open WhatsApp and log the contact ---------- */
+const WA_TEMPLATES = [
+  { id:'intro',     label:'Introduction',        text:'Hi {name}, this is {staff} from {company}. We would like to introduce our products and services. May we share more details with you?' },
+  { id:'followup',  label:'Follow-up',           text:'Hi {name}, this is {staff} from {company}, following up regarding: {topic}. Please let us know a convenient time to talk.' },
+  { id:'quotation', label:'Quotation follow-up', text:'Hi {name}, this is {company}. We sent you quotation {ref} for {amount}. Could you let us know if you have any questions or would like to go ahead?' },
+  { id:'payment',   label:'Payment reminder',    text:'Hi {name}, this is a reminder that invoice {ref} for {amount} is pending. Kindly clear at the earliest. - {company}' }
+];
+const WaQuick = {
+  ctx: null,
+  fill(text, c){
+    const v = { name:c.name||'there', staff:(Auth.session&&(Auth.session.name||Auth.session.username))||'', company:(Store.data.settings&&Store.data.settings.companyName)||'Jays Trading and Business Solution', topic:c.topic||'your enquiry', ref:c.ref||'', amount:c.amount||'' };
+    return String(text).replace(/\{(\w+)\}/g,(m,k)=>v[k]!==undefined?v[k]:'').replace(/ {2,}/g,' ').replace(/\s+([.,])/g,'$1');
+  },
+  open(ctx){
+    this.ctx = ctx; const E = Util.escapeHtml;
+    const tpls = WA_TEMPLATES.slice(); if(ctx.text) tpls.unshift({ id:'custom', label:'Prepared message', text:ctx.text, raw:true });
+    this._tpls = tpls;
+    const cur = ctx.text ? 'custom' : (tpls.find(t=>t.id===ctx.kind) ? ctx.kind : 'intro');
+    UI.openModal('WhatsApp \u2014 '+(ctx.name||'contact'),
+      '<div class="field"><label>Phone / WhatsApp number</label><input id="waq_phone" type="tel" value="'+E(ctx.phone||'')+'"></div>' +
+      '<div class="field"><label>Message type</label><select id="waq_tpl" onchange="WaQuick.pick()">'+tpls.map(t=>'<option value="'+t.id+'"'+(t.id===cur?' selected':'')+'>'+E(t.label)+'</option>').join('')+'</select></div>' +
+      '<div class="field"><label>Message (you can edit it before sending)</label><textarea id="waq_text" rows="6"></textarea></div>' +
+      '<div class="hint">WhatsApp opens with this message ready; press Send there. Opening it is recorded in the contact\u2019s history.</div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-wa" onclick="WaQuick.send()">&#128172; Open WhatsApp &amp; log</button>');
+    this.pick();
+  },
+  pick(){
+    const t = this._tpls.find(x=>x.id===document.getElementById('waq_tpl').value); if(!t) return;
+    document.getElementById('waq_text').value = t.raw ? t.text : this.fill(t.text, this.ctx);
+  },
+  async send(){
+    const c = this.ctx; if(!c) return;
+    const phone = document.getElementById('waq_phone').value.trim(), text = document.getElementById('waq_text').value.trim();
+    if(String(phone).replace(/\D/g,'').length < 10){ UI.toast('Enter a valid WhatsApp number'); return; }
+    if(!text){ UI.toast('Message is empty'); return; }
+    window.open(Util.waLink(phone, text), '_blank');   /* opened first so the browser does not block the pop-up */
+    const label = (this._tpls.find(x=>x.id===document.getElementById('waq_tpl').value)||{}).label || 'WhatsApp';
+    UI.closeModal();
+    try{
+      if(c.customerId) await Customers.logTimeline(c.customerId, 'WhatsApp Sent', 'WhatsApp opened ('+label+'): '+text.slice(0,140), {silent:true});
+      await Activity.log('WhatsApp opened', (c.name||phone)+' \u2014 '+label);
+      if(typeof c.after==='function') c.after();
+    }catch(e){ console.error('WaQuick log', e); }
+    UI.toast('WhatsApp opened and logged');
+  },
+  customer(id){ const x = Store.data.customers.find(c=>c.id===id); if(!x) return;
+    this.open({ kind:'intro', name:x.name, phone:x.whatsapp||x.phone, customerId:id, after:()=>{ if(document.getElementById('drawerOverlay').style.display==='block') Customers.openDetail(id); } }); },
+  followup(id){ const f = Store.data.followups.find(x=>x.id===id); if(!f) return;
+    this.open({ kind:'followup', name:f.customerName, phone:f.phone, topic:f.purpose, customerId:f.customerId }); },
+  quotation(id){ const q = Store.data.quotations.find(x=>x.id===id); if(!q) return;
+    const cu = Store.data.customers.find(c=>c.id===q.customerId);
+    this.open({ kind:'quotation', name:q.customerName, phone:q.phone||(cu&&(cu.whatsapp||cu.phone)), ref:q.id, amount:Util.fmtMoney(q.total).replace('\u20b9','Rs.'), customerId:q.customerId, text:Quotations.waSummary(q) }); },
+  payment(id){ const p = Store.data.payments.find(x=>x.id===id); if(!p) return;
+    const pend = p.dueAmount!==undefined ? Math.max(Number(p.dueAmount)||0,0) : Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0);
+    this.open({ kind:'payment', name:p.contact||p.party, phone:p.phone, ref:p.invoiceNumber||p.id, amount:Util.fmtMoney(pend).replace('\u20b9','Rs.'), customerId:p.customerId }); }
+};
+
+/* ---------- Today's Actions: one screen with everything that needs doing now ---------- */
+const TodayPlan = {
+  scope: 'mine',
+  setScope(v){ this.scope = v; Router.render('todayplan'); },
+  collect(){
+    const D = Store.data, today = Util.todayISO(), me = (Auth.session&&(Auth.session.name||Auth.session.username))||'';
+    const all = Auth.isAdmin() && this.scope==='all';
+    const custOwner = id=>{ const c = (D.customers||[]).find(x=>x.id===id); return c ? c.assignedTo : ''; };
+    const mine = a=> all || !a || a===me, strict = a=> all || a===me;
+    const S = [];
+    const tl = TenderAlerts.list();
+    if(hasMenuAccess('bidsearch')) S.push({ id:'tenders', icon:'\u23F0', title:'Tenders closing soon', view:'bidsearch', rows: tl.map(x=>({ main:x.b.title||x.b.bidNumber||'Bid', sub:(x.b.organisation||'')+(x.b.bidNumber?' \u00b7 '+x.b.bidNumber:''), when:bidDeadlineBadgeHTML(x.b.endDate), open:"TodayPlan.openBid('"+x.b.id+"')" })) });
+    const fu = (D.followups||[]).filter(f=>f.status!=='Done' && f.date && f.date<=today && mine(custOwner(f.customerId))).sort((a,b)=>String(a.date).localeCompare(String(b.date)));
+    S.push({ id:'followups', icon:'\u23F0', title:'Follow-ups due', view:'followupcentre', rows: fu.map(f=>({ main:f.customerName||'Follow-up', sub:f.purpose||'', when:this.dueLabel(f.date,today), wa:f.phone?"WaQuick.followup('"+f.id+"')":'', tel:f.phone||'' })) });
+    const qs = (D.quotations||[]).filter(q=>q.status==='Sent' && mine(custOwner(q.customerId))).map(q=>({q, age:q.date?-Util.daysUntil(q.date):0})).sort((a,b)=>b.age-a.age);
+    S.push({ id:'quotes', icon:'\ud83d\udcc4', title:'Quotations waiting for a reply', view:'quotations', rows: qs.map(x=>({ main:x.q.customerName||x.q.id, sub:x.q.id+' \u00b7 '+Util.fmtMoney(x.q.total), when:'<span class="hint">sent '+x.age+' day(s) ago</span>', wa:"WaQuick.quotation('"+x.q.id+"')", tel:x.q.phone||'' })) });
+    const pays = (D.payments||[]).filter(p=>p.status==='Pending' && p.followupDate && p.followupDate<=today && mine(custOwner(p.customerId))).sort((a,b)=>String(a.followupDate).localeCompare(String(b.followupDate)));
+    S.push({ id:'pays', icon:'\u20b9', title:'Payments to chase', view:'payments', rows: pays.map(p=>{ const pend = p.dueAmount!==undefined ? Math.max(Number(p.dueAmount)||0,0) : Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0);
+      return { main:p.party||p.contact||'Party', sub:(p.invoiceNumber||p.id||'')+' \u00b7 '+Util.fmtMoney(pend)+' pending', when:this.dueLabel(p.followupDate,today), wa:p.phone?"WaQuick.payment('"+p.id+"')":'', tel:p.phone||'' }; }) });
+    const tasks = (D.tasks||[]).filter(t=>t.status!=='Completed' && t.date && t.date<=today && strict(t.assignedTo)).sort((a,b)=>String(a.date).localeCompare(String(b.date)));
+    S.push({ id:'tasks', icon:'\u2705', title:'My tasks', view:'tasks', rows: tasks.map(t=>({ main:t.todo||'Task', sub:t.customerName||'', when:this.dueLabel(t.date,today), wa:t.phone?"WaQuick.open({kind:'followup',name:'"+String(t.customerName||'').replace(/['\\<>&]/g,'')+"',phone:'"+String(t.phone).replace(/[^0-9+]/g,'')+"',topic:'"+String(t.todo||'').replace(/['\\<>&]/g,'')+"'})":'', tel:t.phone||'' })) });
+    if(hasMenuAccess('oppfinder')){
+      const trk = D.oppTracking||{}, due = Object.keys(trk).filter(k=>{ const t = trk[k]; return t && t.followup && t.followup<=today && !['Won','Lost'].includes(t.status) && (all || !t.staff || t.staff===me); });
+      let names = {};
+      if(due.length){ const want = new Set(due); (D.oppProjects||[]).forEach(r=>{ const k = oppKeyOf(r); if(want.has(k)) names[k] = r; }); }
+      S.push({ id:'proj', icon:'\ud83c\udfdb', title:'Project follow-ups', view:'oppfinder', rows: due.sort((a,b)=>String(trk[a].followup).localeCompare(String(trk[b].followup))).map(k=>{ const r = names[k]||{}, t = trk[k];
+        return { main:r['Project Name Eng']||r['Project Name Mal']||'Project', sub:(r['LB Name']||'')+(r['District']?' \u00b7 '+r['District']:'')+' \u00b7 '+(t.status||'New'), when:this.dueLabel(t.followup,today), open:"TodayPlan.openProject('"+String(k).replace(/['\\]/g,'')+"')" }; }) });
+    }
+    return S;
+  },
+  dueLabel(d, today){ if(!d) return ''; if(d<today) return '<span class="badge" style="background:var(--red,#dc2626);color:#fff;">Overdue '+Util.fmtDate(d)+'</span>'; return '<span class="badge badge-blue">Today</span>'; },
+  openBid(id){ go('bidsearch'); setTimeout(()=>{ try{ BidSearch.openDetail(id); }catch(e){ console.error(e); } }, 80); },
+  openProject(key){ go('oppfinder'); setTimeout(async()=>{ try{ if(!Store.data.oppProjects.length) await Store.loadOppProjects(); OppFinder.viewProject(key); }catch(e){ console.error(e); } }, 120); },
+  render(){
+    const E = Util.escapeHtml, S = this.collect(), total = S.reduce((a,s)=>a+s.rows.length,0);
+    const sec = s=> '<div class="card card-pad" style="margin-bottom:14px;"><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><h3 style="margin:0;font-size:15px;">'+s.icon+' '+E(s.title)+'</h3><span class="badge '+(s.rows.length?'badge-blue':'badge-gray')+'">'+s.rows.length+'</span><span style="flex:1"></span><button class="btn btn-outline btn-sm" onclick="go(\''+s.view+'\')">Open</button></div>' +
+      (s.rows.length ? '<div class="table-wrap"><table><tbody>'+s.rows.slice(0,50).map(r=>'<tr><td style="white-space:normal;min-width:200px;"><b>'+E(r.main)+'</b><div class="hint">'+E(r.sub)+'</div></td><td>'+(r.when||'')+'</td><td style="white-space:nowrap;text-align:right;">' +
+        (r.open?'<button class="btn btn-outline btn-sm" onclick="'+r.open+'">View</button> ':'') +
+        (r.tel?'<a class="btn btn-outline btn-sm" style="text-decoration:none;" href="tel:'+E(String(r.tel).replace(/[^0-9+]/g,''))+'">&#9742; Call</a> ':'') +
+        (r.wa?'<button class="btn btn-wa btn-sm" onclick="'+E(r.wa)+'">&#128172; WhatsApp</button>':'') + '</td></tr>').join('')+'</tbody></table></div>' + (s.rows.length>50?'<div class="hint">Showing the first 50 of '+s.rows.length+'.</div>':'')
+        : '<div class="hint">Nothing here \u2014 all clear.</div>') + '</div>';
+    document.getElementById('content').innerHTML =
+      '<div class="toolbar"><div><b style="font-size:16px;">'+(total? total+' item(s) need attention today' : 'You are all caught up for today')+'</b><div class="hint">'+Util.fmtDate(Util.todayISO())+'</div></div><div class="toolbar-spacer"></div>' +
+      (Auth.isAdmin() ? '<select onchange="TodayPlan.setScope(this.value)"><option value="mine"'+(this.scope==='mine'?' selected':'')+'>My items</option><option value="all"'+(this.scope==='all'?' selected':'')+'>Everyone</option></select>' : '') + '</div>' +
+      S.map(sec).join('');
+  }
+};
+Views.todayplan = ()=>TodayPlan.render();
+
+/* ---------- Closed tenders you did not take part in: removed 7 days after closing, with a restore list ---------- */
+const BID_CLEAN_STATUSES = ['New','Saved','Under Review','Go / No-Go Decision','Not Participating'];
+const BidClean = {
+  cfg(){ const s = Store.data.settings||{}; return { enabled: s.bidCleanEnabled!==false, days: Math.max(1, Math.min(365, Number(s.bidCleanDays)||7)) }; },
+  canRun(){ return !!(Auth.session && (Auth.session.role==='Admin'||Auth.session.role==='Manager') && typeof Access!=='undefined' && Access.level('jays_bids')==='edit' && !Store.loadFailed['jays_bids']); },
+  eligible(b, days){
+    if(!b || !b.endDate || !BID_CLEAN_STATUSES.includes(b.status)) return false;
+    const d = bidDeadlineInfo(b.endDate).days; if(d===null || d > -days) return false;          /* closed at least N days ago */
+    if(bidGoState(b)==='Go') return false;                                                       /* you decided to go: keep */
+    if((Store.data.tasks||[]).some(t=>t.bidId===b.id)) return false;                             /* has linked tasks */
+    if((Store.data.emdPbg||[]).some(r=>r.bidId===b.id)) return false;                            /* has EMD / PBG on it */
+    if((Store.data.gemcrac||[]).some(g=>g.bidId===b.id) || (Store.data.orders||[]).some(o=>o.bidId===b.id)) return false;
+    return true;
+  },
+  candidates(days){ days = days||this.cfg().days; return (Store.data.bids||[]).filter(b=>this.eligible(b,days)); },
+  compact(b){ const c = {}; let cut = false; Object.keys(b).forEach(k=>{ const v = b[k]; if(v!==null && typeof v==='object' && JSON.stringify(v).length>5000){ cut = true; return; } if(typeof v==='string' && v.length>5000){ cut = true; return; } c[k] = v; }); if(cut) c._trimmed = true; return c; },
+  async removeList(list, how){
+    if(!list.length) return 0;
+    const s = Store.data.settings, now = new Date().toISOString(), cutoff = Date.now()-30*86400000;
+    const arch = (s.removedBids||[]).filter(x=>new Date(x.at).getTime()>=cutoff);
+    list.forEach(b=>arch.unshift({ at:now, how, rec:this.compact(b) }));
+    s.removedBids = arch.slice(0,300);
+    if(!(await Store.save('settings'))) return 0;                                  /* archive first: never delete without a restore copy */
+    const ids = new Set(list.map(b=>b.id));
+    Store.data.bids = Store.data.bids.filter(b=>!ids.has(b.id));
+    if(!(await Store.save('bids'))) return 0;
+    await Activity.log(how==='auto'?'Closed tenders auto-removed':'Closed tenders removed', list.length+' bid(s)');
+    return list.length;
+  },
+  async auto(){
+    if(this._ran || !this.canRun() || !hasMenuAccess('bidsearch')) return; this._ran = true;
+    const c = this.cfg(); if(!c.enabled) return;
+    const list = this.candidates(c.days); if(!list.length) return;
+    const n = await this.removeList(list, 'auto');
+    if(n) UI.toast('\ud83e\uddf9 '+n+' closed tender(s) you did not take part in were removed (restore from GeM Bid Search \u2192 Clean-up)', 8000);
+  },
+  openPanel(){
+    const E = Util.escapeHtml, c = this.cfg(), cand = this.candidates(c.days), arch = (Store.data.settings.removedBids||[]);
+    UI.openModal('Closed tender clean-up',
+      '<div class="hint" style="margin-bottom:10px;">Tenders that have been closed for the number of days below, and that you did not take part in (status New, Saved, Under Review, Go / No-Go or Not Participating), are removed automatically. Anything marked Go, submitted, won, lost, or linked to tasks / EMD / orders is never removed. Removed tenders can be restored for 30 days.</div>' +
+      '<div class="form-row" style="grid-template-columns:1fr 1fr;"><div class="field"><label><input type="checkbox" id="bc_en" '+(c.enabled?'checked':'')+'> Remove automatically</label></div><div class="field"><label>Days after closing</label><input type="number" id="bc_days" min="1" max="365" value="'+c.days+'"></div></div>' +
+      '<div style="margin:6px 0 14px;"><button class="btn btn-outline btn-sm" onclick="BidClean.saveCfg()">Save settings</button></div>' +
+      '<h4 style="margin:6px 0;">Ready to remove now ('+cand.length+')</h4>' +
+      (cand.length ? '<div class="table-wrap" style="max-height:220px;overflow:auto;"><table><thead><tr><th>Bid</th><th>Organisation</th><th>Closed</th><th>Status</th></tr></thead><tbody>'+cand.slice(0,100).map(b=>'<tr><td style="white-space:normal;">'+E(b.title||b.bidNumber||'')+'<div class="hint">'+E(b.bidNumber||'')+'</div></td><td>'+E(b.organisation||'')+'</td><td>'+E(Util.fmtDate(b.endDate))+'</td><td>'+E(b.status)+'</td></tr>').join('')+'</tbody></table></div>' : '<div class="hint">None right now.</div>') +
+      (cand.length ? '<div style="margin:8px 0 14px;"><button class="btn btn-primary btn-sm" onclick="BidClean.removeNow()">Remove these '+cand.length+' now</button></div>' : '') +
+      '<h4 style="margin:10px 0 6px;">Recently removed ('+arch.length+')</h4>' +
+      (arch.length ? '<div class="table-wrap" style="max-height:220px;overflow:auto;"><table><thead><tr><th>Bid</th><th>Removed</th><th></th></tr></thead><tbody>'+arch.slice(0,100).map((x,i)=>'<tr><td style="white-space:normal;">'+E((x.rec&&(x.rec.title||x.rec.bidNumber))||'')+'<div class="hint">'+E((x.rec&&x.rec.organisation)||'')+(x.rec&&x.rec._trimmed?' \u00b7 some large attachments not kept':'')+'</div></td><td>'+E(Util.fmtDate((x.at||'').slice(0,10)))+(x.how==='auto'?' (auto)':'')+'</td><td><button class="btn btn-outline btn-sm" onclick="BidClean.restore('+i+')">Restore</button></td></tr>').join('')+'</tbody></table></div>' : '<div class="hint">Nothing removed in the last 30 days.</div>'),
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>', true);
+  },
+  async saveCfg(){
+    const s = Store.data.settings; s.bidCleanEnabled = document.getElementById('bc_en').checked; s.bidCleanDays = Math.max(1, Math.min(365, Number(document.getElementById('bc_days').value)||7));
+    if(await Store.save('settings')){ UI.toast('Saved'); this.openPanel(); }
+  },
+  async removeNow(){
+    const list = this.candidates(); if(!list.length) return;
+    if(!confirm('Remove '+list.length+' closed tender(s)? You can restore them for 30 days.')) return;
+    const n = await this.removeList(list, 'manual'); UI.toast(n?n+' removed':'Nothing removed'); this.openPanel(); if(UI.currentView==='bidsearch') Router.render('bidsearch');
+  },
+  async restore(i){
+    const s = Store.data.settings, x = (s.removedBids||[])[i]; if(!x) return;
+    if(Store.data.bids.some(b=>b.id===x.rec.id)){ UI.toast('This bid is already back in the list'); return; }
+    Store.data.bids.unshift(x.rec);
+    if(!(await Store.save('bids'))) { Store.data.bids = Store.data.bids.filter(b=>b!==x.rec); return; }
+    s.removedBids.splice(i,1); await Store.save('settings');
+    await Activity.log('Removed tender restored', x.rec.bidNumber||x.rec.title||x.rec.id);
+    UI.toast('Restored'); this.openPanel(); if(UI.currentView==='bidsearch') Router.render('bidsearch');
+  }
+};
 Views.oppfinder = ()=>OppFinder.seedKeywordGroups().then(()=>OppFinder.prepare()).then(()=>OppFinder.render());
 
 const Reports = {
