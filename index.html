@@ -1454,7 +1454,7 @@ const Store = {
     customers: [], products: [], quotations: [], payments: [],
     followups: [], tasks: [], notes: [], users: [], settings: {}, activityLog: [],
     gemcrac: [], orders: [], complaints: [], bids: [], waTemplates: [], waHistory: [],
-    emdPbg: [], suppliers: [], purchaseOrders: [], amcRecords: [], rfqs: [], officeExpenses: [], officeWork: [], handovers: [], siteOrders: [], siteExpenses: [], sitePayments: [], siteCollections: [], siteTemplates: [],
+    emdPbg: [], suppliers: [], purchaseOrders: [], amcRecords: [], rfqs: [], officeExpenses: [], officeWork: [], handovers: [], siteOrders: [], siteExpenses: [], sitePayments: [], siteCollections: [], siteTemplates: [], lbContacts: [],
     rateTemplates: [], rateDocs: [], rateTerms: [], rateDocTemplates: [],
     oppProjects: [], oppTracking: {}, oppProducts: [], oppImportHistory: [], oppKeywordGroups: [],
     attendance: [], leaveRequests: [], bidDocs: [],
@@ -2040,7 +2040,7 @@ const Store = {
       attendance, leaveRequests, bidDocs, visits, requirements, travelLogs,
       lsgOfficeGeo, settings, counters, _users, dayPlans, staffTargets,
       emdPbg, suppliers, purchaseOrders, amcRecords, rfqs, officeExpenses, officeWork, handovers,
-      siteOrders, siteExpenses, sitePayments, siteCollections, siteTemplates
+      siteOrders, siteExpenses, sitePayments, siteCollections, siteTemplates, lbContacts
     ] = await Promise.all([
       this.loadCustomersDb(),
       this.loadKey('jays_products', null),
@@ -2089,6 +2089,7 @@ const Store = {
       this.loadKey('jays_sitepayments', []),
       this.loadKey('jays_sitecollections', []),
       this.loadKey('jays_sitetemplates', []),
+      this.loadKey('jays_lbcontacts', []),
     ]);
 
     /* customers now reads from public.customers (Phase 6 cutover), with
@@ -2154,6 +2155,7 @@ const Store = {
     this.data.sitePayments = sitePayments;
     this.data.siteCollections = siteCollections;
     this.data.siteTemplates = siteTemplates;
+    this.data.lbContacts = Array.isArray(lbContacts) ? lbContacts : [];
 
     await this.migrateWaTemplates();
     await this.migrateOppMachineKeywords();
@@ -3109,6 +3111,8 @@ const App = {
     setTimeout(()=>{ try{ Work.runAlerts(); Work.refreshBadge(); }catch(e){} }, 1500);
     setTimeout(()=>{ try{ TenderAlerts.toastOnLogin(); }catch(e){ console.error(e); } }, 2500);
     setTimeout(()=>{ try{ BidClean.auto(); }catch(e){ console.error(e); } }, 9000);
+    setTimeout(()=>{ try{ DbMeter.bootCheck(); }catch(e){ console.error(e); } }, 12000);
+    setTimeout(()=>{ try{ BackupSched.check(); }catch(e){ console.error(e); } }, 20000);
   }
 };
 document.getElementById('loginPass').addEventListener('keydown', e=>{ if(e.key==='Enter') Auth.login(); });
@@ -17009,16 +17013,16 @@ const OppFinder = {
       const list = todo.sort((a,c)=>(c.x.s-a.x.s) || (c.fund-a.fund));
       const pg = Paginate.slice('oppboard', list);
       return fil + stats + '<div class="hint" style="margin:0 0 8px;">Matched projects that are not saved in My Opportunities beyond &ldquo;New&rdquo; and whose local body has no lead yet &mdash; strongest match first.</div>' +
-        (pg.pageItems.length ? '<div class="card"><div class="table-wrap"><table><thead><tr><th>Local body</th><th>Project</th><th>Category</th><th>Fund</th><th>Impl Code</th><th></th></tr></thead><tbody>' +
+        (pg.pageItems.length ? '<div class="card"><div class="table-wrap"><table><thead><tr><th>Local body</th><th>Project</th><th>Category</th><th>Fund</th><th>Impl Code</th><th>Contact</th><th></th></tr></thead><tbody>' +
           pg.pageItems.map(p=>'<tr><td><b>'+E(p.r['LB Name']||'')+'</b><div class="hint">'+E(p.r['District']||'')+'</div></td><td style="white-space:normal;min-width:240px;">'+E(p.r['Project Name Eng']||p.r['Project Name Mal']||'')+'<div class="hint">'+E(p.r['Project Name Mal']||'')+'</div></td>' +
-            '<td><span class="badge badge-blue">'+E(OPP_CATEGORY_NAMES[p.x.c]||p.x.c)+'</span> <b style="font-size:11px;color:'+this.BAND_COLOR[p.x.b]+';">'+OppEngine.BAND_NAME[p.x.b]+'</b></td><td>'+E(p.r['FundTotal']||'')+'</td><td>'+E(p.r['Impl Code']||'')+'</td>' +
+            '<td><span class="badge badge-blue">'+E(OPP_CATEGORY_NAMES[p.x.c]||p.x.c)+'</span> <b style="font-size:11px;color:'+this.BAND_COLOR[p.x.b]+';">'+OppEngine.BAND_NAME[p.x.b]+'</b></td><td>'+E(p.r['FundTotal']||'')+'</td><td>'+E(p.r['Impl Code']||'')+'</td><td>'+LbBook.cellHTML(p.r['District']||'',p.r['LB Name']||'')+'</td>' +
             '<td style="white-space:nowrap;"><button class="btn btn-outline btn-sm" data-k="'+E(p.key)+'" onclick="OppFinder.viewProject(this.dataset.k)">View</button> <button class="btn btn-outline btn-sm" data-k="'+E(p.key)+'" onclick="OppFinder.markContacted(this.dataset.k)">Mark contacted</button> <button class="btn btn-primary btn-sm" data-k="'+E(p.key)+'" onclick="OppFinder.convertToLead(this.dataset.k)">Convert to Lead</button></td></tr>').join('') +
           '</tbody></table></div>'+Paginate.controlsHTML('oppboard', pg, 'OppFinder.render()')+'</div>' : '<div class="card card-pad"><div class="empty-state"><div class="t">Nothing waiting</div><div class="d">Every matched project here is already worked on or its local body has a lead.</div></div></div>');
     }
     const list = d.groups.sort((a,c)=>(c.high-a.high) || (c.fund-a.fund));
     const pg = Paginate.slice('oppboard', list);
-    return fil + stats + (pg.pageItems.length ? '<div class="card"><div class="table-wrap"><table><thead><tr><th>Local body</th><th>District</th><th>Matched projects</th><th>High</th><th>Matched fund</th><th>Worked on</th><th>Lead</th><th></th></tr></thead><tbody>' +
-      pg.pageItems.map(g=>'<tr><td><b>'+E(g.lb)+'</b></td><td>'+E(g.district)+'</td><td>'+g.n+'</td><td>'+g.high+'</td><td>'+money(g.fund)+'</td><td>'+g.worked+' / '+g.n+'</td><td>'+(g.hasLead?'<span class="badge badge-green">Lead exists</span>':'<span class="badge badge-gray">No lead</span>')+'</td>' +
+    return fil + stats + (pg.pageItems.length ? '<div class="card"><div class="table-wrap"><table><thead><tr><th>Local body</th><th>District</th><th>Matched projects</th><th>High</th><th>Matched fund</th><th>Worked on</th><th>Lead</th><th>Contact</th><th></th></tr></thead><tbody>' +
+      pg.pageItems.map(g=>'<tr><td><b>'+E(g.lb)+'</b></td><td>'+E(g.district)+'</td><td>'+g.n+'</td><td>'+g.high+'</td><td>'+money(g.fund)+'</td><td>'+g.worked+' / '+g.n+'</td><td>'+(g.hasLead?'<span class="badge badge-green">Lead exists</span>':'<span class="badge badge-gray">No lead</span>')+'</td><td>'+LbBook.cellHTML(g.district,g.lb)+'</td>' +
         '<td><button class="btn btn-outline btn-sm" data-d="'+E(g.district)+'" data-l="'+E(g.lb)+'" onclick="OppFinder.viewBoardLB(this.dataset.d,this.dataset.l)">Projects</button></td></tr>').join('') +
       '</tbody></table></div>'+Paginate.controlsHTML('oppboard', pg, 'OppFinder.render()')+'</div>' : '<div class="card card-pad"><div class="empty-state"><div class="t">No matched projects</div><div class="d">Try a lower relevance or another category.</div></div></div>');
   },
@@ -17026,7 +17030,7 @@ const OppFinder = {
     const d = this.boardData(), E = Util.escapeHtml, g = d.groups.find(x=>x.district===district && x.lb===lb); if(!g) return;
     const items = d.projects.filter(p=>p.g===g).sort((a,c)=>(c.x.s-a.x.s)||(c.fund-a.fund));
     UI.openModal(lb+' \u2014 '+items.length+' matched project(s)',
-      '<div class="hint" style="margin-bottom:8px;">'+E(district)+' &middot; '+(g.hasLead?'a lead already exists for this local body':'no lead yet')+'</div><div class="table-wrap"><table><thead><tr><th>Project</th><th>Category</th><th>Fund</th><th>Impl Code</th><th>Status</th><th></th></tr></thead><tbody>' +
+      '<div class="hint" style="margin-bottom:8px;">'+E(district)+' &middot; '+(g.hasLead?'a lead already exists for this local body':'no lead yet')+'</div>'+LbBook.lbBlock(district, lb)+'<div class="table-wrap"><table><thead><tr><th>Project</th><th>Category</th><th>Fund</th><th>Impl Code</th><th>Status</th><th></th></tr></thead><tbody>' +
       items.map(p=>'<tr><td style="white-space:normal;min-width:220px;">'+E(p.r['Project Name Eng']||p.r['Project Name Mal']||'')+'</td><td><span class="badge badge-blue">'+E(OPP_CATEGORY_NAMES[p.x.c]||p.x.c)+'</span> <b style="font-size:11px;color:'+this.BAND_COLOR[p.x.b]+';">'+OppEngine.BAND_NAME[p.x.b]+'</b></td><td>'+E(p.r['FundTotal']||'')+'</td><td>'+E(p.r['Impl Code']||'')+'</td><td>'+E(p.st)+'</td>' +
         '<td style="white-space:nowrap;"><button class="btn btn-outline btn-sm" data-k="'+E(p.key)+'" onclick="OppFinder.viewProject(this.dataset.k)">View</button> <button class="btn btn-primary btn-sm" data-k="'+E(p.key)+'" onclick="OppFinder.convertToLead(this.dataset.k)">Convert to Lead</button></td></tr>').join('') + '</tbody></table></div>',
       '<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>', true);
@@ -17375,6 +17379,7 @@ const OppFinder = {
            ['Zero Expenditure',r.scoreBreakdown.zeroExpenditure||0,5]]
            .map(([label,val,max])=>'<div class="card card-pad" style="padding:7px;text-align:center;"><div class="hint">'+E(label)+'</div><b>'+val+'</b><span class="hint">/'+max+'</span></div>').join('') +
         '</div>' : '') +
+      LbBook.projectBlock(r, key) +
       '<h3 style="margin:16px 0 8px;">\u2b50 My Opportunity</h3>' +
       '<div class="form-row" style="grid-template-columns:1fr 1fr 1fr;">' +
         '<div class="field"><label>Priority</label><select id="oppPriority">'+['Low','Medium','High'].map(p=>'<option '+(tr.priority===p?'selected':'')+'>'+p+'</option>').join('')+'</select></div>' +
@@ -17563,7 +17568,7 @@ const OppFinder = {
   switcherHTML(){
     const tabs = [['dashboard','&#127968; Dashboard'],['projects','&#128269; Projects'],
       ['opportunities','&#11088; My Opportunities'],['import','&#128229; Import'],
-      ['board','&#128222; Follow-up Board'],['products','&#128230; Products'],['reports','&#128202; Reports']];
+      ['board','&#128222; Follow-up Board'],['contacts','&#128210; Contacts'],['products','&#128230; Products'],['reports','&#128202; Reports']];
     if(Auth.isAdmin()) tabs.push(['deldata','&#128465; Delete Data']);
     return '<div class="rp-switcher" style="flex-wrap:wrap;">' +
       tabs.map(([id,label])=>'<button class="'+(this.tab===id?'active':'')+'" onclick="OppFinder.setTab(\''+id+'\')">'+label+'</button>').join('') +
@@ -17576,6 +17581,7 @@ const OppFinder = {
       : this.tab==='import' ? this.renderImport()
       : this.tab==='products' ? this.renderProducts()
       : this.tab==='board' ? this.renderBoard()
+      : this.tab==='contacts' ? LbBook.render()
       : this.tab==='deldata' ? this.renderDeleteData()
       : this.renderReports();
     document.getElementById('content').innerHTML = this.switcherHTML() + this.loadBannerHTML() + body;
@@ -17970,12 +17976,13 @@ const WA_TEMPLATES = [
   { id:'intro',     label:'Introduction',        text:'Hi {name}, this is {staff} from {company}. We would like to introduce our products and services. May we share more details with you?' },
   { id:'followup',  label:'Follow-up',           text:'Hi {name}, this is {staff} from {company}, following up regarding: {topic}. Please let us know a convenient time to talk.' },
   { id:'quotation', label:'Quotation follow-up', text:'Hi {name}, this is {company}. We sent you quotation {ref} for {amount}. Could you let us know if you have any questions or would like to go ahead?' },
+  { id:'panchayat', label:'Local body / project', text:'Hello {name}, this is {staff} from {company}. We supply products related to {topic} for local bodies and would like to share our details and a quotation for {lb}. May we send them to you?' },
   { id:'payment',   label:'Payment reminder',    text:'Hi {name}, this is a reminder that invoice {ref} for {amount} is pending. Kindly clear at the earliest. - {company}' }
 ];
 const WaQuick = {
   ctx: null,
   fill(text, c){
-    const v = { name:c.name||'there', staff:(Auth.session&&(Auth.session.name||Auth.session.username))||'', company:(Store.data.settings&&Store.data.settings.companyName)||'Jays Trading and Business Solution', topic:c.topic||'your enquiry', ref:c.ref||'', amount:c.amount||'' };
+    const v = { name:c.name||'there', staff:(Auth.session&&(Auth.session.name||Auth.session.username))||'', company:(Store.data.settings&&Store.data.settings.companyName)||'Jays Trading and Business Solution', topic:c.topic||'your enquiry', ref:c.ref||'', amount:c.amount||'', lb:c.lb||'your local body' };
     return String(text).replace(/\{(\w+)\}/g,(m,k)=>v[k]!==undefined?v[k]:'').replace(/ {2,}/g,' ').replace(/\s+([.,])/g,'$1');
   },
   open(ctx){
@@ -17988,13 +17995,14 @@ const WaQuick = {
       '<div class="field"><label>Message type</label><select id="waq_tpl" onchange="WaQuick.pick()">'+tpls.map(t=>'<option value="'+t.id+'"'+(t.id===cur?' selected':'')+'>'+E(t.label)+'</option>').join('')+'</select></div>' +
       '<div class="field"><label>Message (you can edit it before sending)</label><textarea id="waq_text" rows="6"></textarea></div>' +
       '<div class="hint">WhatsApp opens with this message ready; press Send there. Opening it is recorded in the contact\u2019s history.</div>',
-      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-wa" onclick="WaQuick.send()">&#128172; Open WhatsApp &amp; log</button>');
+      '<button class="btn btn-outline" onclick="WaQuick.cancel()">Cancel</button><button class="btn btn-wa" onclick="WaQuick.send()">&#128172; Open WhatsApp &amp; log</button>');
     this.pick();
   },
   pick(){
     const t = this._tpls.find(x=>x.id===document.getElementById('waq_tpl').value); if(!t) return;
     document.getElementById('waq_text').value = t.raw ? t.text : this.fill(t.text, this.ctx);
   },
+  cancel(){ const c = this.ctx; this.ctx = null; if(c && typeof c.back==='function') c.back(); else UI.closeModal(); },
   async send(){
     const c = this.ctx; if(!c) return;
     const phone = document.getElementById('waq_phone').value.trim(), text = document.getElementById('waq_text').value.trim();
@@ -18002,7 +18010,7 @@ const WaQuick = {
     if(!text){ UI.toast('Message is empty'); return; }
     window.open(Util.waLink(phone, text), '_blank');   /* opened first so the browser does not block the pop-up */
     const label = (this._tpls.find(x=>x.id===document.getElementById('waq_tpl').value)||{}).label || 'WhatsApp';
-    UI.closeModal();
+    if(typeof c.back==='function'){ try{ c.back(); }catch(e){ UI.closeModal(); } } else UI.closeModal();
     try{
       if(c.customerId) await Customers.logTimeline(c.customerId, 'WhatsApp Sent', 'WhatsApp opened ('+label+'): '+text.slice(0,140), {silent:true});
       await Activity.log('WhatsApp opened', (c.name||phone)+' \u2014 '+label);
@@ -18075,7 +18083,7 @@ Views.todayplan = ()=>TodayPlan.render();
 const BID_CLEAN_STATUSES = ['New','Saved','Under Review','Go / No-Go Decision','Not Participating'];
 const BidClean = {
   cfg(){ const s = Store.data.settings||{}; return { enabled: s.bidCleanEnabled!==false, days: Math.max(1, Math.min(365, Number(s.bidCleanDays)||7)) }; },
-  canRun(){ return !!(Auth.session && (Auth.session.role==='Admin'||Auth.session.role==='Manager') && typeof Access!=='undefined' && Access.level('jays_bids')==='edit' && !Store.loadFailed['jays_bids']); },
+  canRun(){ return !!(Auth.session && Auth.session.role==='Admin' && typeof Access!=='undefined' && Access.level('jays_bids')==='edit' && !Store.loadFailed['jays_bids']); },
   eligible(b, days){
     if(!b || !b.endDate || !BID_CLEAN_STATUSES.includes(b.status)) return false;
     const d = bidDeadlineInfo(b.endDate).days; if(d===null || d > -days) return false;          /* closed at least N days ago */
@@ -18138,6 +18146,339 @@ const BidClean = {
     await Activity.log('Removed tender restored', x.rec.bidNumber||x.rec.title||x.rec.id);
     UI.toast('Restored'); this.openPanel(); if(UI.currentView==='bidsearch') Router.render('bidsearch');
   }
+};
+
+/* =====================================================================
+   CONTACT BOOK PER LOCAL BODY, STORAGE METER, SCHEDULED BACKUP
+   lbContacts (jays_lbcontacts): [{id, district, lb, person, designation, implCode, phone,
+   whatsapp, email, notes, lastContact, createdAt, createdBy, updatedAt, updatedBy, source}]
+   One row per person at a local body; the same person is never stored twice.
+===================================================================== */
+const LB_DESIGNATIONS = ['Secretary','President','Vice President','Assistant Secretary','Standing Committee Chairperson','Ward Member','Engineer','Overseer','Accountant','Headmaster','Medical Officer','Supervisor','Other'];
+const LbBook = {
+  _idx: null, _ver: 0, _idxVer: -1, _ret: null, _editId: null, _pending: null,
+  filters: { district:'', des:'', q:'' },
+  data(){ return Array.isArray(Store.data.lbContacts) ? Store.data.lbContacts : (Store.data.lbContacts = []); },
+  dg(s){ return String(s==null?'':s).replace(/\D/g,''); },
+  lk(d,l){ return oppNorm(d||'')+'|'+oppNorm(l||''); },
+  invalidate(){ this._ver++; },
+  index(){
+    if(this._idx && this._idxVer===this._ver && this._idxN===this.data().length) return this._idx;
+    const m = new Map(); this.data().forEach(c=>{ const k = this.lk(c.district, c.lb); (m.get(k) || m.set(k,[]).get(k)).push(c); });
+    this._idx = m; this._idxVer = this._ver; this._idxN = this.data().length; return m;
+  },
+  forLB(d,l){ return this.index().get(this.lk(d,l)) || []; },
+  rank(c){ const i = LB_DESIGNATIONS.indexOf(c.designation); return i<0 ? 50 : i; },
+  sorted(list){ return list.slice().sort((a,b)=>this.rank(a)-this.rank(b) || String(a.person||'').localeCompare(String(b.person||''))); },
+  primary(list){ const wp = list.filter(c=>this.dg(c.whatsapp||c.phone).length>=10); return this.sorted(wp.length?wp:list)[0] || null; },
+  phoneOf(c){ return c.whatsapp || c.phone || ''; },
+  byId(id){ return this.data().find(c=>c.id===id); },
+  sameImpl(a,b){ return !!a && !!b && String(a).trim().toLowerCase()===String(b).trim().toLowerCase(); },
+  /* ---- small HTML pieces ---- */
+  actionsHTML(c, key){
+    const E = Util.escapeHtml, ph = this.phoneOf(c), has = this.dg(ph).length>=10;
+    return (has ? '<a class="btn btn-outline btn-sm" style="text-decoration:none;" href="tel:'+E(this.dg(ph))+'">&#9742; Call</a> <button class="btn btn-wa btn-sm" data-c="'+E(c.id)+'" data-k="'+E(key||'')+'" onclick="LbBook.wa(this.dataset.c,this.dataset.k)">&#128172; WhatsApp</button> ' : '<span class="hint">no phone</span> ') +
+      '<button class="btn btn-outline btn-sm" data-c="'+E(c.id)+'" data-k="'+E(key||'')+'" onclick="LbBook.edit(this.dataset.c,this.dataset.k)">Edit</button>';
+  },
+  rowHTML(c, key, hi){
+    const E = Util.escapeHtml;
+    return '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:7px 0;border-bottom:1px solid var(--border,#e5e7eb);"><div style="flex:1;min-width:190px;"><b>'+E(c.person||'(no name)')+'</b> '+(c.designation?'<span class="badge badge-gray">'+E(c.designation)+'</span> ':'')+(c.implCode?'<span class="badge '+(hi?'badge-blue':'badge-gray')+'">'+E(c.implCode)+'</span> ':'')+
+      '<div class="hint">'+E(this.phoneOf(c)||'no phone yet')+(c.lastContact?' · last contacted '+E(Util.fmtDate(c.lastContact)):'')+(c.notes?' · '+E(c.notes):'')+'</div></div><div style="white-space:nowrap;">'+this.actionsHTML(c,key)+'</div></div>';
+  },
+  /* contacts for the local body of a project, the one with the project's Impl Code first */
+  projectBlock(r, key){
+    const E = Util.escapeHtml, list = this.forLB(r['District'], r['LB Name']), code = r['Impl Code'];
+    const match = this.sorted(list.filter(c=>this.sameImpl(c.implCode, code))), rest = this.sorted(list.filter(c=>!this.sameImpl(c.implCode, code)));
+    const off = String(r['Impl Officer Name']||'').trim(), known = off && list.some(c=>String(c.person||'').trim().toLowerCase()===off.toLowerCase());
+    return '<div class="card card-pad" style="margin:12px 0;"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><h4 style="margin:0;flex:1;">&#128210; Contacts — '+E(r['LB Name']||'local body')+'</h4>' +
+      '<button class="btn btn-outline btn-sm" data-k="'+E(key)+'" onclick="LbBook.addForProject(this.dataset.k)">&#65291; Add contact</button></div>' +
+      (off ? '<div class="hint" style="margin:6px 0;">Implementing officer in the project data: <b>'+E(off)+'</b>'+(code?' ('+E(code)+')':'')+(known?'':' <button class="btn btn-outline btn-sm" data-k="'+E(key)+'" onclick="LbBook.saveOfficer(this.dataset.k)">Save to contact book</button>')+'</div>' : '') +
+      (list.length ? match.map(c=>this.rowHTML(c,key,true)).join('') + rest.map(c=>this.rowHTML(c,key,false)).join('') : '<div class="hint" style="margin-top:6px;">No contacts saved for this local body yet.</div>') + '</div>';
+  },
+  /* contacts for a local body (Follow-up Board popup) */
+  lbBlock(district, lb){
+    const list = this.sorted(this.forLB(district, lb));
+    return '<div class="card card-pad" style="margin-bottom:10px;"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><b style="flex:1;">&#128210; Contacts</b><button class="btn btn-outline btn-sm" data-d="'+Util.escapeHtml(district)+'" data-l="'+Util.escapeHtml(lb)+'" onclick="LbBook.addForLB(this.dataset.d,this.dataset.l)">&#65291; Add contact</button></div>' +
+      (list.length ? list.map(c=>this.rowHTML(c,'',false)).join('') : '<div class="hint">No contacts saved for this local body yet.</div>') + '</div>';
+  },
+  /* one-line cell for the Follow-up Board tables */
+  cellHTML(district, lb){
+    const E = Util.escapeHtml, list = this.forLB(district, lb), p = this.primary(list);
+    if(!p) return '<button class="btn btn-outline btn-sm" data-d="'+E(district)+'" data-l="'+E(lb)+'" onclick="LbBook.addForLB(this.dataset.d,this.dataset.l)">&#65291; Add contact</button>';
+    return '<div style="min-width:150px;"><b>'+E(p.person||'')+'</b>'+(p.designation?' <span class="hint">'+E(p.designation)+'</span>':'')+(list.length>1?' <span class="hint">+'+(list.length-1)+' more</span>':'')+'<div style="white-space:nowrap;margin-top:3px;">'+this.actionsHTML(p,'')+'</div></div>';
+  },
+  /* ---- WhatsApp ---- */
+  wa(id, key){
+    const c = this.byId(id); if(!c) return;
+    let topic = '', r = null;
+    if(key){ r = Store.data.oppProjects.find(x=>oppKeyOf(x)===key); if(r) topic = r['Project Name Eng'] || r['Project Name Mal'] || ''; }
+    const modalOpen = document.getElementById('modalOverlay').style.display==='flex';
+    WaQuick.open({ kind:'panchayat', name:c.person||c.designation||'Sir/Madam', phone:this.phoneOf(c), lb:c.lb, topic:topic||'local body projects',
+      back: (modalOpen && typeof OppFinder!=='undefined' && OppFinder._cur) ? ()=>OppFinder._cur() : null,
+      after: ()=>this.touch(id) });
+  },
+  async touch(id){ const c = this.byId(id); if(!c) return; c.lastContact = Util.todayISO(); c.updatedAt = new Date().toISOString(); await Store.save('lbContacts'); if(UI.currentView==='oppfinder' && document.getElementById('modalOverlay').style.display!=='flex') OppFinder.render(); },
+  /* ---- add / edit form ---- */
+  addForProject(key){
+    const r = Store.data.oppProjects.find(x=>oppKeyOf(x)===key); if(!r) return;
+    this._ret = ()=>{ if(OppFinder._cur) OppFinder._cur(); else UI.closeModal(); };
+    this.form(null, { district:r['District']||'', lb:r['LB Name']||'', implCode:r['Impl Code']||'' });
+  },
+  addForLB(district, lb){
+    const open = document.getElementById('modalOverlay').style.display==='flex';
+    this._ret = open ? ()=>{ if(OppFinder._cur) OppFinder._cur(); else UI.closeModal(); } : null;
+    this.form(null, { district, lb });
+  },
+  saveOfficer(key){
+    const r = Store.data.oppProjects.find(x=>oppKeyOf(x)===key); if(!r) return;
+    this._ret = ()=>{ if(OppFinder._cur) OppFinder._cur(); else UI.closeModal(); };
+    this.form(null, { district:r['District']||'', lb:r['LB Name']||'', person:r['Impl Officer Name']||'', implCode:r['Impl Code']||'', source:'project data' });
+  },
+  edit(id, key){
+    const c = this.byId(id); if(!c) return;
+    const open = document.getElementById('modalOverlay').style.display==='flex';
+    this._ret = open ? ()=>{ if(OppFinder._cur) OppFinder._cur(); else UI.closeModal(); } : null;
+    this.form(c);
+  },
+  form(c, pre){
+    const E = Util.escapeHtml, v = c || Object.assign({ district:'', lb:'', person:'', designation:'', implCode:'', phone:'', whatsapp:'', email:'', notes:'' }, pre||{});
+    this._editId = c ? c.id : null; this._pending = pre && pre.source ? pre.source : null;
+    const dl = (id, arr)=>'<datalist id="'+id+'">'+arr.map(x=>'<option value="'+E(x)+'">').join('')+'</datalist>';
+    const dists = (typeof OppFinder!=='undefined') ? OppFinder.districtOptions() : [];
+    UI.openModal(c ? 'Edit contact' : 'Add contact',
+      '<div class="form-row" style="grid-template-columns:1fr 1fr;"><div class="field"><label>District</label><input id="lc_district" list="lc_dl_d" value="'+E(v.district)+'" onchange="LbBook.refreshLBList()"></div>' +
+      '<div class="field"><label>Local body *</label><input id="lc_lb" list="lc_dl_l" value="'+E(v.lb)+'"></div></div>' +
+      '<div class="form-row" style="grid-template-columns:1fr 1fr;"><div class="field"><label>Person name</label><input id="lc_person" value="'+E(v.person)+'"></div>' +
+      '<div class="field"><label>Designation</label><input id="lc_des" list="lc_dl_s" value="'+E(v.designation)+'" placeholder="Secretary, President, ..."></div></div>' +
+      '<div class="form-row" style="grid-template-columns:1fr 1fr 1fr;"><div class="field"><label>Impl Code</label><input id="lc_impl" list="lc_dl_i" value="'+E(v.implCode)+'"></div>' +
+      '<div class="field"><label>Phone</label><input id="lc_phone" type="tel" value="'+E(v.phone)+'"></div><div class="field"><label>WhatsApp (if different)</label><input id="lc_wa" type="tel" value="'+E(v.whatsapp)+'"></div></div>' +
+      '<div class="form-row" style="grid-template-columns:1fr 1fr;"><div class="field"><label>Email</label><input id="lc_email" value="'+E(v.email)+'"></div><div class="field"><label>Notes</label><input id="lc_notes" value="'+E(v.notes)+'"></div></div>' +
+      dl('lc_dl_d', dists) + '<datalist id="lc_dl_l"></datalist>' + dl('lc_dl_s', LB_DESIGNATIONS) + dl('lc_dl_i', (typeof OppFinder!=='undefined' ? OppFinder.implOptions('', '') : []).map(x=>x[0])),
+      (c ? '<button class="btn btn-outline" style="color:#dc2626;margin-right:auto;" onclick="LbBook.remove(\''+E(c.id)+'\')">Delete</button>' : '') +
+      '<button class="btn btn-outline" onclick="LbBook.cancelForm()">Cancel</button><button class="btn btn-primary" onclick="LbBook.saveForm()">Save contact</button>');
+    this.refreshLBList();
+  },
+  refreshLBList(){
+    const el = document.getElementById('lc_dl_l'); if(!el || typeof OppFinder==='undefined') return;
+    const d = (document.getElementById('lc_district')||{}).value || '';
+    el.innerHTML = OppFinder.localBodyOptions(d).slice(0,3000).map(x=>'<option value="'+Util.escapeHtml(x)+'">').join('');
+  },
+  cancelForm(){ const r = this._ret; this._ret = null; this._editId = null; if(r) r(); else UI.closeModal(); },
+  async saveForm(){
+    const g = id=>document.getElementById(id).value.trim();
+    const rec = { district:g('lc_district'), lb:g('lc_lb'), person:g('lc_person'), designation:g('lc_des'), implCode:g('lc_impl'), phone:g('lc_phone'), whatsapp:g('lc_wa'), email:g('lc_email'), notes:g('lc_notes') };
+    if(!rec.lb){ UI.toast('Enter the local body'); return; }
+    if(!rec.person && !rec.phone && !rec.whatsapp){ UI.toast('Enter a person name or a phone number'); return; }
+    for(const f of ['phone','whatsapp']) if(rec[f] && this.dg(rec[f]).length<10){ UI.toast('The '+(f==='phone'?'phone':'WhatsApp')+' number looks too short'); return; }
+    const dup = this.findDup(rec, this._editId);
+    if(dup){ UI.toast('Already saved: '+(dup.person||dup.phone)+' at '+dup.lb); return; }
+    const list = this.data(), prev = JSON.stringify(list), now = new Date().toISOString(), me = (Auth.session&&(Auth.session.name||Auth.session.username))||'';
+    if(this._editId){ const c = this.byId(this._editId); Object.assign(c, rec, { updatedAt:now, updatedBy:me }); }
+    else list.push(Object.assign({ id:'LC'+Date.now()+Math.floor(Math.random()*1000) }, rec, { createdAt:now, createdBy:me, updatedAt:now, updatedBy:me, source:this._pending||'manual' }));
+    if(!(await Store.save('lbContacts'))){ list.length = 0; JSON.parse(prev).forEach(x=>list.push(x)); this.invalidate(); return; }
+    this.invalidate(); this._editId = null; this._pending = null;
+    try{ await Activity.log('Contact saved', (rec.person||rec.phone)+' — '+rec.lb); }catch(e){}
+    UI.toast('Contact saved');
+    const r = this._ret; this._ret = null; if(r) r(); else { UI.closeModal(); if(UI.currentView==='oppfinder') OppFinder.render(); }
+  },
+  findDup(rec, exceptId){
+    const ph = this.dg(rec.phone).slice(-10), nm = String(rec.person||'').trim().toLowerCase(), ds = String(rec.designation||'').trim().toLowerCase();
+    return this.forLB(rec.district, rec.lb).find(c=>c.id!==exceptId && ((ph.length===10 && this.dg(c.phone).slice(-10)===ph) || (nm && String(c.person||'').trim().toLowerCase()===nm && String(c.designation||'').trim().toLowerCase()===ds))) || null;
+  },
+  async remove(id){
+    const c = this.byId(id); if(!c) return;
+    if(!confirm('Delete the contact '+(c.person||c.phone||'')+' ('+c.lb+')?')) return;
+    const list = this.data(), prev = JSON.stringify(list); const i = list.indexOf(c); list.splice(i,1);
+    if(!(await Store.save('lbContacts'))){ list.length = 0; JSON.parse(prev).forEach(x=>list.push(x)); this.invalidate(); return; }
+    this.invalidate(); try{ await Activity.log('Contact deleted', (c.person||c.phone||'')+' — '+c.lb); }catch(e){}
+    UI.toast('Deleted'); const r = this._ret; this._ret = null; if(r) r(); else { UI.closeModal(); if(UI.currentView==='oppfinder') OppFinder.render(); }
+  },
+  /* ---- Contacts tab ---- */
+  readFilters(){ const g = id=>{ const e = document.getElementById(id); return e ? e.value : null; }; const d = g('lbcDistrict'); if(d!==null) this.filters = { district:d, des:g('lbcDes')||'', q:g('lbcQ')||'' }; },
+  setFilter(){ this.readFilters(); Paginate.get('lbcontacts').page = 1; OppFinder.render(); },
+  filtered(){
+    const f = this.filters, q = oppNormMl(f.q||'');
+    return this.sorted(this.data().filter(c=>(!f.district || c.district===f.district) && (!f.des || c.designation===f.des) &&
+      (!q || oppNormMl([c.lb,c.district,c.person,c.designation,c.implCode,c.phone,c.whatsapp,c.notes].join(' ')).indexOf(q)>=0)))
+      .sort((a,b)=>String(a.district||'').localeCompare(String(b.district||'')) || String(a.lb||'').localeCompare(String(b.lb||'')) || this.rank(a)-this.rank(b));
+  },
+  render(){
+    this.readFilters();
+    const E = Util.escapeHtml, all = this.data(), list = this.filtered(), f = this.filters;
+    const dists = [...new Set(all.map(c=>c.district).filter(Boolean))].sort();
+    const withPhone = all.filter(c=>this.dg(this.phoneOf(c)).length>=10).length, lbs = new Set(all.map(c=>this.lk(c.district,c.lb))).size;
+    const pg = Paginate.slice('lbcontacts', list);
+    return '<div class="card card-pad" style="margin-bottom:12px;"><div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">' +
+      '<div class="field" style="margin:0;"><label>District</label><select id="lbcDistrict" onchange="LbBook.setFilter()"><option value="">All</option>'+dists.map(d=>'<option '+(f.district===d?'selected':'')+'>'+E(d)+'</option>').join('')+'</select></div>' +
+      '<div class="field" style="margin:0;"><label>Designation</label><select id="lbcDes" onchange="LbBook.setFilter()"><option value="">All</option>'+[...new Set(all.map(c=>c.designation).filter(Boolean))].sort().map(d=>'<option '+(f.des===d?'selected':'')+'>'+E(d)+'</option>').join('')+'</select></div>' +
+      '<div class="field" style="margin:0;min-width:200px;"><label>Search</label><input id="lbcQ" value="'+E(f.q||'')+'" placeholder="name, local body, phone, Impl Code" onchange="LbBook.setFilter()"></div>' +
+      '<div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;"><button class="btn btn-primary btn-sm" onclick="LbBook.addForLB(\'\',\'\')">&#65291; Add contact</button><button class="btn btn-outline btn-sm" onclick="LbBook.pasteForm()">&#128203; Paste list</button><button class="btn btn-outline btn-sm" onclick="LbBook.seedPreview()">Add officers from project data</button><button class="btn btn-outline btn-sm" onclick="LbBook.exportCSV()">&#128228; Export</button></div></div></div>' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:12px;">' +
+      [['Contacts',all.length.toLocaleString()],['Local bodies covered',lbs.toLocaleString()],['With a phone number',withPhone.toLocaleString()]].map(([l,v])=>'<div class="card card-pad" style="padding:10px;"><div class="hint">'+l+'</div><div style="font-size:20px;font-weight:800;">'+v+'</div></div>').join('') + '</div>' +
+      (pg.pageItems.length ? '<div class="card"><div class="table-wrap"><table><thead><tr><th>Local body</th><th>Person</th><th>Designation</th><th>Impl Code</th><th>Phone</th><th>Last contacted</th><th></th></tr></thead><tbody>' +
+        pg.pageItems.map(c=>'<tr><td><b>'+E(c.lb||'')+'</b><div class="hint">'+E(c.district||'')+'</div></td><td>'+E(c.person||'')+'</td><td>'+E(c.designation||'')+'</td><td>'+E(c.implCode||'')+'</td><td>'+E(this.phoneOf(c))+'</td><td>'+(c.lastContact?E(Util.fmtDate(c.lastContact)):'<span class="hint">never</span>')+'</td><td style="white-space:nowrap;">'+this.actionsHTML(c,'')+'</td></tr>').join('') +
+        '</tbody></table></div>'+Paginate.controlsHTML('lbcontacts', pg, 'OppFinder.render()')+'</div>'
+        : '<div class="card card-pad"><div class="empty-state"><div class="t">'+(all.length?'No contacts match':'No contacts yet')+'</div><div class="d">'+(all.length?'Change the filters.':'Add a contact, paste a list, or use &ldquo;Add officers from project data&rdquo; to start from the officer names already in your projects.')+'</div></div></div>');
+  },
+  /* ---- paste a list ---- */
+  pasteForm(){
+    UI.openModal('Paste contact list',
+      '<div class="hint" style="margin-bottom:8px;">One person per line, columns separated by a Tab (copy straight from Excel): <b>District, Local body, Person, Designation, Impl Code, Phone, WhatsApp, Email</b>. Only Local body and a person or phone are required. A header row is skipped. Contacts already saved (same phone, or same name and designation at the same local body) are skipped.</div>' +
+      '<textarea id="lc_paste" rows="10" style="width:100%;font-family:monospace;font-size:12px;" placeholder="Malappuram&#9;Ozhur&#9;Name&#9;Secretary&#9;SEC (GP)&#9;9876543210"></textarea><div id="lc_pasteMsg" class="hint" style="margin-top:6px;"></div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal();OppFinder.render()">Cancel</button><button class="btn btn-primary" onclick="LbBook.pasteRun()">Import</button>');
+  },
+  parsePaste(text){
+    const rows = [];
+    String(text||'').split(/\r?\n/).forEach(line=>{
+      if(!line.trim()) return;
+      const cells = (line.indexOf('\t')>=0 ? line.split('\t') : line.split(',')).map(x=>x.trim());
+      if(/^district$/i.test(cells[0]) || /^local ?body$/i.test(cells[1]||'')) return;
+      const o = { district:cells[0]||'', lb:cells[1]||'', person:cells[2]||'', designation:cells[3]||'', implCode:cells[4]||'', phone:cells[5]||'', whatsapp:cells[6]||'', email:cells[7]||'', notes:'' };
+      rows.push(o);
+    });
+    return rows;
+  },
+  async addMany(rows, source){
+    const list = this.data(), prev = JSON.stringify(list), now = new Date().toISOString(), me = (Auth.session&&(Auth.session.name||Auth.session.username))||'';
+    let added = 0, skipped = 0, bad = 0;
+    rows.forEach(r=>{
+      if(!r.lb || (!r.person && !r.phone && !r.whatsapp)){ bad++; return; }
+      if(this.findDup(r, null)){ skipped++; return; }
+      list.push(Object.assign({ id:'LC'+Date.now()+'_'+added+Math.floor(Math.random()*1000) }, r, { createdAt:now, createdBy:me, updatedAt:now, updatedBy:me, source:source||'import' })); added++;
+      this.invalidate();
+    });
+    if(!added) return { added, skipped, bad, ok:true };
+    if(!(await Store.save('lbContacts'))){ list.length = 0; JSON.parse(prev).forEach(x=>list.push(x)); this.invalidate(); return { added:0, skipped, bad, ok:false }; }
+    try{ await Activity.log('Contacts imported', added+' contact(s) ('+(source||'import')+')'); }catch(e){}
+    return { added, skipped, bad, ok:true };
+  },
+  async pasteRun(){
+    const rows = this.parsePaste((document.getElementById('lc_paste')||{}).value);
+    if(!rows.length){ const m = document.getElementById('lc_pasteMsg'); if(m) m.textContent = 'Nothing to import.'; return; }
+    const r = await this.addMany(rows, 'pasted list');
+    UI.toast(r.ok ? 'Imported '+r.added+' contact(s)'+(r.skipped?', skipped '+r.skipped+' already saved':'')+(r.bad?', '+r.bad+' row(s) missing local body or person/phone':'') : 'Not saved - nothing was imported', 7000);
+    UI.closeModal(); OppFinder.render();
+  },
+  /* ---- start from the officer names already in the project data ---- */
+  async seedCandidates(onlyMatched){
+    if(onlyMatched){ try{ await OppMatch.warm(); }catch(e){} }
+    const seen = new Set(), out = [];
+    (Store.data.oppProjects||[]).forEach(r=>{
+      const person = String(r['Impl Officer Name']||'').trim(), lb = String(r['LB Name']||'').trim(); if(!person || !lb) return;
+      if(onlyMatched && OppMatch.get(r).unmatched) return;
+      const k = this.lk(r['District'],lb)+'|'+person.toLowerCase()+'|'+String(r['Impl Code']||'').trim().toLowerCase(); if(seen.has(k)) return; seen.add(k);
+      if(this.forLB(r['District'], lb).some(c=>String(c.person||'').trim().toLowerCase()===person.toLowerCase() && this.sameImpl(c.implCode, r['Impl Code']))) return;
+      out.push({ district:r['District']||'', lb, person, designation:'', implCode:String(r['Impl Code']||'').trim(), phone:'', whatsapp:'', email:'', notes:'' });
+    });
+    return out;
+  },
+  async seedPreview(){
+    UI.toast('Reading the project data…');
+    const only = true, c = await this.seedCandidates(only); this._seed = c;
+    const L = Store.oppLoad, part = (L && !L.complete) ? '<div style="margin-bottom:8px;padding:8px 10px;border-radius:8px;background:#fffbeb;color:#92400e;border:1px solid #fde68a;">Only '+Store.data.oppProjects.length.toLocaleString()+' projects are loaded so far, so this covers those only. You can run it again later.</div>' : '';
+    UI.openModal('Add officers from project data',
+      part + '<p style="margin:0 0 8px;">Found <b>'+c.length.toLocaleString()+'</b> implementing officer(s) at local bodies whose projects match a JAYS category, who are not in the contact book yet.</p>' +
+      '<p class="hint" style="margin:0 0 8px;">Each is saved with the local body, name and Impl Code from the project data. There is no phone number in that data, so add the numbers afterwards (Edit, or Paste list). Nothing already saved is changed.</p>' +
+      (c.length ? '<div class="table-wrap" style="max-height:200px;overflow:auto;"><table><thead><tr><th>Local body</th><th>Officer</th><th>Impl Code</th></tr></thead><tbody>'+c.slice(0,10).map(x=>'<tr><td>'+Util.escapeHtml(x.lb)+'</td><td>'+Util.escapeHtml(x.person)+'</td><td>'+Util.escapeHtml(x.implCode)+'</td></tr>').join('')+'</tbody></table></div><div class="hint">Showing the first 10.</div>' : ''),
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button>' + (c.length ? '<button class="btn btn-primary" onclick="LbBook.seedRun()">Add '+c.length.toLocaleString()+' contact(s)</button>' : ''));
+  },
+  async seedRun(){
+    const c = this._seed || []; if(!c.length) return; this._seed = null;
+    const r = await this.addMany(c, 'project data');
+    UI.toast(r.ok ? 'Added '+r.added+' officer(s) to the contact book' : 'Not saved - nothing was added', 6000);
+    UI.closeModal(); OppFinder.render();
+  },
+  exportCSV(){
+    const q = v => { const t = String(v==null?'':v); return /[",\n\r]/.test(t) ? '"'+t.replace(/"/g,'""')+'"' : t; };
+    const head = ['District','Local body','Person','Designation','Impl Code','Phone','WhatsApp','Email','Notes','Last contacted'];
+    const lines = [head.join(',')].concat(this.filtered().map(c=>[c.district,c.lb,c.person,c.designation,c.implCode,c.phone,c.whatsapp,c.email,c.notes,c.lastContact].map(q).join(',')));
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['﻿'+lines.join('\n')], {type:'text/csv;charset=utf-8'}));
+    a.download = 'local-body-contacts-'+Util.todayISO()+'.csv'; document.body.appendChild(a); a.click(); a.remove();
+  }
+};
+
+/* ---------- Storage meter (Settings): database size against the plan limit ---------- */
+const DB_METER_SQL = `create or replace function public.app_db_size() returns jsonb
+language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_admin() then raise exception 'Admins only'; end if;
+  return jsonb_build_object(
+    'db_bytes', pg_database_size(current_database()),
+    'tables', (select coalesce(jsonb_agg(jsonb_build_object('name', t.relname, 'bytes', t.b, 'rows', t.rows) order by t.b desc), '[]'::jsonb)
+               from (select c.relname, pg_total_relation_size(c.oid) b, c.reltuples::bigint rows
+                     from pg_class c where c.relnamespace = 'public'::regnamespace and c.relkind = 'r'
+                     order by pg_total_relation_size(c.oid) desc limit 8) t));
+end $$;
+revoke all on function public.app_db_size() from public, anon;
+grant execute on function public.app_db_size() to authenticated;`;
+const DbMeter = {
+  limitMb(){ return Math.max(50, Number((Store.data.settings||{}).dbLimitMb)||500); },
+  async fetch(){ const { data, error } = await sb.rpc('app_db_size'); if(error) throw error; return data; },
+  mb(b){ return (Number(b)||0)/1048576; },
+  level(pct){ return pct>=90 ? 'red' : pct>=80 ? 'amber' : 'ok'; },
+  async mount(){
+    const box = document.getElementById('dbMeterCard'); if(!box) return;
+    box.innerHTML = '<div class="card card-pad" style="max-width:520px;margin-top:16px;"><h3 style="margin:0 0 4px;font-size:14px;">Storage</h3><div class="hint">Checking the database size…</div></div>';
+    try{ const d = await this.fetch(); box.innerHTML = this.html(d); }
+    catch(e){
+      const msg = String((e && e.message) || e);
+      box.innerHTML = '<div class="card card-pad" style="max-width:520px;margin-top:16px;"><h3 style="margin:0 0 4px;font-size:14px;">Storage</h3>' +
+        (/could not find|does not exist|schema cache/i.test(msg)
+          ? '<div class="hint" style="margin-bottom:8px;">The storage meter needs a one-time setup. Open Supabase &rarr; SQL Editor, paste the text below, click Run, then reload this page.</div><textarea readonly rows="9" style="width:100%;font-family:monospace;font-size:11px;" onclick="this.select()">'+Util.escapeHtml(DB_METER_SQL)+'</textarea>'
+          : '<div class="hint" style="color:#b91c1c;">Could not read the database size: '+Util.escapeHtml(msg)+'</div>') + '</div>';
+    }
+  },
+  html(d){
+    const E = Util.escapeHtml, used = this.mb(d.db_bytes), lim = this.limitMb(), pct = Math.min(100, Math.round(used/lim*100)), lv = this.level(pct);
+    const col = lv==='red' ? '#dc2626' : lv==='amber' ? '#d97706' : '#16a34a';
+    return '<div class="card card-pad" style="max-width:520px;margin-top:16px;border-left:4px solid '+col+';"><h3 style="margin:0 0 4px;font-size:14px;">Storage</h3>' +
+      '<div style="font-size:22px;font-weight:800;">'+used.toFixed(0)+' MB <span class="hint" style="font-size:13px;font-weight:400;">of '+lim+' MB ('+pct+'%)</span></div>' +
+      '<div style="background:var(--border,#e5e7eb);border-radius:6px;height:10px;overflow:hidden;margin:8px 0;"><div style="width:'+pct+'%;height:100%;background:'+col+';"></div></div>' +
+      (lv!=='ok' ? '<div style="padding:8px 10px;border-radius:8px;background:'+(lv==='red'?'#fef2f2':'#fffbeb')+';margin-bottom:8px;font-size:13px;"><b>'+(lv==='red'?'Almost full.':'Getting full.')+'</b> Free space by removing data you no longer need (buttons below). Deleting rows does not shrink the file by itself — run <code>VACUUM FULL table_name;</code> afterwards.</div>' : '') +
+      '<div class="hint" style="margin-bottom:4px;">Largest tables</div><table style="font-size:12.5px;width:100%;"><tbody>'+(d.tables||[]).slice(0,6).map(t=>'<tr><td>'+E(t.name)+'</td><td style="text-align:right;">'+this.mb(t.bytes).toFixed(1)+' MB</td><td style="text-align:right;" class="hint">'+(Number(t.rows)>0?Number(t.rows).toLocaleString()+' rows':'')+'</td></tr>').join('')+'</tbody></table>' +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;"><button class="btn btn-outline btn-sm" onclick="DbMeter.openCleanup()">Remove unmatched projects</button>' + (BidClean.canRun() ? '<button class="btn btn-outline btn-sm" onclick="BidClean.openPanel()">Closed tender clean-up</button>' : '') + '<button class="btn btn-outline btn-sm" onclick="DbMeter.mount()">Refresh</button></div>' +
+      '<div class="field" style="margin:12px 0 0;max-width:220px;"><label>Plan limit (MB)</label><input id="dbm_limit" type="number" min="50" value="'+lim+'" onchange="DbMeter.saveLimit()"></div></div>';
+  },
+  openCleanup(){ go('oppfinder'); setTimeout(()=>{ try{ OppFinder.setTab('deldata'); }catch(e){} }, 150); },
+  async saveLimit(){ const v = Number(document.getElementById('dbm_limit').value); if(!(v>=50)) return; Store.data.settings.dbLimitMb = v; if(await Store.save('settings')) this.mount(); },
+  /* one quiet check per sign-in for Admins: warn at 80% */
+  async bootCheck(){
+    if(this._checked || !Auth.session || Auth.session.role!=='Admin') return; this._checked = true;
+    try{ const d = await this.fetch(), used = this.mb(d.db_bytes), pct = Math.round(used/this.limitMb()*100);
+      if(pct>=80) UI.toast('⚠ Storage is '+pct+'% full ('+used.toFixed(0)+' of '+this.limitMb()+' MB). See Settings → Storage.', 9000); }catch(e){ /* meter not installed yet: stay silent */ }
+  }
+};
+
+/* ---------- Scheduled backup: when it is due, an Admin signing in gets a backup file downloaded ---------- */
+const BackupSched = {
+  cfg(){ const s = Store.data.settings||{}; return { enabled: s.backupAutoEnabled!==false, days: Math.max(1, Math.min(90, Number(s.backupEveryDays)||7)) }; },
+  ageDays(){ const l = (Store.data.settings||{}).lastBackupAt; if(!l) return Infinity; return (Date.now()-new Date(l).getTime())/86400000; },
+  due(){ const c = this.cfg(); return c.enabled && this.ageDays() >= c.days; },
+  async run(){
+    const ok = await Backup.downloadJSON({ light:true });
+    if(ok===false) return false;
+    Store.data.settings.lastBackupAt = new Date().toISOString();
+    await Store.save('settings');
+    try{ await Activity.log('Scheduled backup', 'Backup file downloaded (without project opportunity rows)'); }catch(e){}
+    return true;
+  },
+  async check(){
+    if(this._ran || !Auth.session || Auth.session.role!=='Admin') return; this._ran = true;
+    if(!this.due()) return;
+    try{ if(await this.run()) UI.toast('✅ Scheduled backup downloaded — keep the file somewhere safe (Google Drive, a pen drive).', 10000); }
+    catch(e){ console.error('scheduled backup', e); UI.toast('Backup is due but could not be created. Open Backup and download it manually.', 9000); }
+  },
+  mount(){
+    const box = document.getElementById('backupSchedCard'); if(!box) return;
+    const c = this.cfg(), last = (Store.data.settings||{}).lastBackupAt, age = this.ageDays();
+    box.innerHTML = '<div class="card card-pad" style="max-width:520px;margin-top:16px;"><h3 style="margin:0 0 4px;font-size:14px;">Scheduled backup</h3>' +
+      '<div class="hint" style="margin-bottom:10px;">When a backup is due, it is downloaded to the computer of the first Admin who opens the CRM. It cannot run while nobody has the CRM open. The file holds every module including contacts and tenders, but <b>not</b> the project opportunity rows (too large &mdash; re-import them from your source files).</div>' +
+      '<div class="form-row" style="grid-template-columns:1fr 1fr;"><div class="field"><label><input type="checkbox" id="bs_en" '+(c.enabled?'checked':'')+'> Download automatically</label></div><div class="field"><label>Every (days)</label><input type="number" id="bs_days" min="1" max="90" value="'+c.days+'"></div></div>' +
+      '<div style="font-size:13px;margin:6px 0;">Last backup: <b>'+(last?Util.fmtDateTime(last)+' ('+Math.floor(age)+' day(s) ago)':'never')+'</b>'+(this.due()?' <span class="badge" style="background:#d97706;color:#fff;">due</span>':'')+'</div>' +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;"><button class="btn btn-outline btn-sm" onclick="BackupSched.save()">Save</button><button class="btn btn-primary btn-sm" onclick="BackupSched.now()">Back up now</button></div></div>';
+  },
+  async save(){ const s = Store.data.settings; s.backupAutoEnabled = document.getElementById('bs_en').checked; s.backupEveryDays = Math.max(1, Math.min(90, Number(document.getElementById('bs_days').value)||7)); if(await Store.save('settings')){ UI.toast('Saved'); this.mount(); } },
+  async now(){ try{ if(await this.run()){ UI.toast('Backup downloaded'); this.mount(); } }catch(e){ console.error(e); UI.toast('Backup failed: '+(e.message||e)); } }
 };
 Views.oppfinder = ()=>OppFinder.seedKeywordGroups().then(()=>OppFinder.prepare()).then(()=>OppFinder.render());
 
@@ -18351,26 +18692,29 @@ const Backup = {
       emdPbg: Store.data.emdPbg, suppliers: Store.data.suppliers, purchaseOrders: Store.data.purchaseOrders, amcRecords: Store.data.amcRecords,
       rfqs: Store.data.rfqs, officeExpenses: Store.data.officeExpenses,
       officeWork: Store.data.officeWork, handovers: Store.data.handovers,
-      siteOrders: Store.data.siteOrders, siteExpenses: Store.data.siteExpenses, sitePayments: Store.data.sitePayments, siteCollections: Store.data.siteCollections, siteTemplates: Store.data.siteTemplates
+      siteOrders: Store.data.siteOrders, siteExpenses: Store.data.siteExpenses, sitePayments: Store.data.sitePayments, siteCollections: Store.data.siteCollections, siteTemplates: Store.data.siteTemplates, lbContacts: Store.data.lbContacts
     };
   },
-  async downloadJSON(){
+  async downloadJSON(opts){
+    const light = !!(opts && opts.light);
     // Full-database export (every customer, quotation, payment...) -
     // restricted to Admins, same as restore/import below.
     if(!Auth.isAdmin()){ UI.toast("You don't have permission to export the full database"); return; }
     const snap = this.snapshot();
+    if(light){ delete snap.oppProjects; snap._note = 'Weekly backup: project opportunity rows are not included (too large). Re-import them from the source files.'; }
     /* Tender Centre data lives in its own database tables, not in Store,
        so it is fetched separately. If that fails the rest of the backup
        is still produced, but the admin is told it's incomplete. */
     try{ snap.tenderIntel = await TenderCentre.exportAll(); }
     catch(e){ console.error('Tender backup failed', e); UI.toast('Warning: tender data could not be included in this backup ('+(e.message||e)+')', 6000); }
-    const data = JSON.stringify(snap, null, 2);
+    const data = light ? JSON.stringify(snap) : JSON.stringify(snap, null, 2);
     const blob = new Blob([data], {type:'application/json'});
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = 'jays-crm-backup-'+Util.todayISO()+'.json';
+    a.href = url; a.download = (light ? 'jays-crm-weekly-backup-' : 'jays-crm-backup-')+Util.todayISO()+'.json';
     document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
+    setTimeout(()=>URL.revokeObjectURL(url), 60000);
+    return true;
   },
   async googleDriveBackup(){
     if(!Auth.isAdmin()){ UI.toast("You don't have permission to back up the full database"); return; }
@@ -18391,7 +18735,7 @@ const Backup = {
       const data = JSON.parse(text);
       try{ await sb.rpc('store_snapshot', { p_reason:'before file restore' }); }catch(e){ console.warn('pre-restore snapshot failed', e); }   // safety copy of the current data on the server
       Store.forceOverwrite = true;
-      ['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo','dayPlans','staffTargets','emdPbg','suppliers','purchaseOrders','amcRecords','rfqs','officeExpenses','officeWork','handovers','siteOrders','siteExpenses','sitePayments','siteCollections','siteTemplates'].forEach(k=>{
+      ['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo','dayPlans','staffTargets','emdPbg','suppliers','purchaseOrders','amcRecords','rfqs','officeExpenses','officeWork','handovers','siteOrders','siteExpenses','sitePayments','siteCollections','siteTemplates','lbContacts'].forEach(k=>{
         if(data[k]!==undefined) Store.data[k] = data[k];
       });
       // oppProjects lives in its own indexed table now, not the
@@ -18399,7 +18743,7 @@ const Backup = {
       // the dedicated full-replace path so opp_projects_rows (what
       // imports actually merge against) gets restored too, not just
       // the legacy blob.
-      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo','dayPlans','staffTargets','emdPbg','suppliers','purchaseOrders','amcRecords','rfqs','officeExpenses','officeWork','handovers','siteOrders','siteExpenses','sitePayments','siteCollections','siteTemplates'].map(k=>Store.save(k)));
+      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo','dayPlans','staffTargets','emdPbg','suppliers','purchaseOrders','amcRecords','rfqs','officeExpenses','officeWork','handovers','siteOrders','siteExpenses','sitePayments','siteCollections','siteTemplates','lbContacts'].map(k=>Store.save(k)));
       Store.forceOverwrite = false;
       if(data['oppProjects']!==undefined) await Store.replaceAllOppProjects(Store.data.oppProjects);
       // Tender Centre tables: merged back by id (never deleted), only when the backup has them.
@@ -19571,7 +19915,7 @@ const ACCESS_MODULES = [
   {id:'payments',  label:'Payments & Outstanding',     keys:['jays_payments'], menus:['payments','outstanding']},
   {id:'bids',      label:'GeM bids, GEM CRAC, EMD/PBG',keys:['jays_bids','jays_gemcrac','jays_emdpbg'], menus:['bidsearch','gemcrac','emdpbg']},
   {id:'biddocs',   label:'Bid documents & letters',    keys:['jays_biddocs'], menus:['biddocs']},
-  {id:'opp',       label:'Project Opportunity (tracking, products, keywords)', keys:['jays_opptracking','jays_oppproducts','jays_oppimporthistory','jays_oppkeywordgroups'], menus:['oppfinder']},
+  {id:'opp',       label:'Project Opportunity (tracking, products, keywords)', keys:['jays_opptracking','jays_oppproducts','jays_oppimporthistory','jays_oppkeywordgroups','jays_lbcontacts'], menus:['oppfinder']},
   {id:'products',  label:'Products, suppliers, purchase orders', keys:['jays_products','jays_suppliers','jays_purchaseorders'], menus:['products','inventory','suppliers','purchaseorders']},
   {id:'rfq',       label:'Supplier RFQs & price comparison (supplier costs)', keys:['jays_rfqs'], menus:['rfq']},
   {id:'officework',label:'Office work register & handover', keys:['jays_officework','jays_handovers'], menus:['officework','handover']},
@@ -21753,6 +22097,8 @@ Views.settings = function(){
       <button class="btn btn-primary" onclick="SettingsView.saveBidPrefs()">Save Bid Preferences</button>
     </div>
     <div id="vaultCard"></div>
+    <div id="dbMeterCard"></div>
+    <div id="backupSchedCard"></div>
     <div class="card card-pad" style="max-width:520px;margin-top:16px;">
       <h3 style="margin:0 0 4px;font-size:14px;">Office Location Data</h3>
       <div class="hint" style="margin-bottom:12px;">${Object.keys(Store.data.lsgOfficeGeo||{}).length} of ${LSG_OFFICES_RAW.length} Kerala LSG office locations are located so far, for the "Nearby Offices" field feature. A few ways to fill in the rest — use whichever suits you, or combine them. For the odd office the free OpenStreetMap lookup can't find (but Google Maps shows correctly), open that office's details in Find Location and use "Set from Google Maps" to paste its coordinates in directly — no key or bulk run needed.</div>
@@ -21784,6 +22130,7 @@ Views.settings = function(){
     </div>
   `;
   try{ Vault.mount(true); }catch(e){ console.error('vault', e); }
+  try{ DbMeter.mount(); BackupSched.mount(); }catch(e){ console.error('settings cards', e); }
 };
 const SettingsView = {
   async deleteAllProjectRecords(){
