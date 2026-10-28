@@ -1589,13 +1589,33 @@ const Store = {
      overwrites if the server still has that version; otherwise it merges the
      teammate's newer changes with ours (see mergeStore) instead of replacing them. */
   ver: {}, baseStr: {}, forceOverwrite: false,
+  /* The two big records (Bid Documents ~10 MB, Bids ~2 MB) used to be downloaded again on EVERY page load and login - the main use of the
+     free plan's monthly data (egress) allowance. They are now kept in this browser (IndexedDB) together with their version number; a load
+     asks the server only for the tiny version number and downloads the record only when it has really changed. */
+  BIG_KEYS: ['jays_biddocs','jays_bids'],
+  _bigIdb(){ return new Promise((res,rej)=>{ try{ const q = indexedDB.open('jays_big_cache', 1); q.onupgradeneeded = ()=>q.result.createObjectStore('kv'); q.onsuccess = ()=>res(q.result); q.onerror = ()=>rej(q.error); }catch(e){ rej(e); } }); },
+  async bigGet(key){ try{ const db = await this._bigIdb(); return await new Promise(res=>{ const r = db.transaction('kv').objectStore('kv').get(key); r.onsuccess = ()=>res(r.result||null); r.onerror = ()=>res(null); }); }catch(e){ return null; } },
+  async bigSet(key, obj){ try{ const db = await this._bigIdb(); await new Promise((res,rej)=>{ const tx = db.transaction('kv','readwrite'); tx.objectStore('kv').put(obj, key); tx.oncomplete = res; tx.onerror = ()=>rej(tx.error); }); }catch(e){ console.warn('big cache write', key, e); } },
   async loadKey(key, fallback){
     try{
+      if(this.BIG_KEYS.includes(key)){
+        try{
+          const c = await this.bigGet(key);
+          if(c && c.version != null && c.value !== undefined && c.value !== null){
+            const vr = await sb.from('jays_crm_store').select('version').eq('key', key).maybeSingle();
+            if(!vr.error && vr.data && vr.data.version != null && Number(vr.data.version) === Number(c.version)){
+              this.loadFailed[key] = false; this.ver[key] = Number(c.version); try{ this.baseStr[key] = JSON.stringify(c.value); }catch(e){}
+              return c.value;                                   /* unchanged on the server: nothing downloaded */
+            }
+          }
+        }catch(e){ /* any doubt: fall through to a normal download */ }
+      }
       const { data, error } = await sb.from('jays_crm_store').select('value, version').eq('key', key).maybeSingle();
       if(error) throw error;
       this.loadFailed[key] = false;
       if(data && data.value !== null && data.value !== undefined){
-        if(data.version != null){ this.ver[key] = Number(data.version); try{ this.baseStr[key] = JSON.stringify(data.value); }catch(e){} }
+        if(data.version != null){ this.ver[key] = Number(data.version); try{ this.baseStr[key] = JSON.stringify(data.value); }catch(e){}
+          if(this.BIG_KEYS.includes(key)) this.bigSet(key, { version:Number(data.version), value:data.value }); }
         return data.value;
       }
       return fallback;
@@ -1674,6 +1694,7 @@ const Store = {
         }
         if(data && data.ok){
           this.ver[key] = Number(data.version); try{ this.baseStr[key] = JSON.stringify(mine); }catch(e){}
+          if(this.BIG_KEYS.includes(key)) this.bigSet(key, { version:Number(data.version), value:mine });   /* keep the local copy in step with what we just saved */
           if(merged){ this.applyMerged(key, mine); this.lastMerge = { key, at: Date.now() }; UI.toast('Saved. A teammate changed the same list at the same time, so both sets of changes were combined.', 6000); }
           return true;
         }
@@ -1943,7 +1964,7 @@ const Store = {
   /* Local copy of the project list (IndexedDB, this browser only). Logging in no longer downloads the whole table from Supabase every time -
      that download was the main cause of the "Disk IO budget" warning. The copy is reused for OPP_CACHE_HOURS, then refreshed in the background;
      "Reload from database" and every import / delete refresh it at once. */
-  OPP_CACHE_HOURS: 24,
+  OPP_CACHE_HOURS: 168,
   _oppIdb(){
     return new Promise((res,rej)=>{
       try{ const q = indexedDB.open('jays_opp_cache', 1); q.onupgradeneeded = ()=>q.result.createObjectStore('kv'); q.onsuccess = ()=>res(q.result); q.onerror = ()=>rej(q.error); }catch(e){ rej(e); }
@@ -1958,14 +1979,28 @@ const Store = {
   async oppCacheClear(){
     try{ const db = await this._oppIdb(); await new Promise((res)=>{ const tx = db.transaction('kv','readwrite'); tx.objectStore('kv').delete('rows'); tx.oncomplete = res; tx.onerror = res; }); }catch(e){}
   },
-  async loadOppProjectsBackground(){
+  /* The project list is big (tens of MB). It is no longer downloaded at every login: a fresh copy kept on this
+     device is used silently; otherwise it is fetched only when Project Opportunity (or a full backup/export) needs it. */
+  _oppStarted:false, _oppEnsureP:null,
+  ensureOppProjects(){
+    if(this._oppStarted) return this._oppEnsureP || Promise.resolve();
+    this._oppStarted = true;
+    this.oppLoad = { loaded:0, total:null, complete:false, loading:true, msg:'Starting\u2026' };
+    this._oppEnsureP = this.loadOppProjectsBackground().catch(e=>{ console.error('opp ensure', e); this._oppStarted = false; });
+    return this._oppEnsureP;
+  },
+  async loadOppProjectsBackground(opts){
+    const cacheOnly = !!(opts && opts.cacheOnly);
     const c = await this.oppCacheGet();
     if(c && Array.isArray(c.rows) && c.rows.length && (!c.total || c.rows.length >= c.total*0.995) && (Date.now()-c.savedAt) < this.OPP_CACHE_HOURS*3600*1000){
-      this.data.oppProjects = c.rows; this.loadFailed['jays_oppprojects'] = false;
+      this.data.oppProjects = c.rows; this.loadFailed['jays_oppprojects'] = false; this._oppStarted = true;
+      this.oppLoad = { loaded:c.rows.length, total:c.total||c.rows.length, complete:true, loading:false };
       try{ if(typeof OppMatch!=='undefined') await OppMatch.warm(); }catch(e){ console.warn('opp warm', e); }
       if(UI.currentView==='dashboard' || UI.currentView==='oppfinder') Router.render(UI.currentView);
       return;
     }
+    if(cacheOnly) return;
+    this._oppStarted = true;
     const prog = (soFar)=>{
       this.data.oppProjects = soFar;
       if(UI.currentView==='oppfinder') OppFinder.updateLoadBanner();          /* do not redraw the page: it would wipe a preview / delete message the admin is using */
@@ -2020,7 +2055,7 @@ const Store = {
      loadOppProjectsBackground()), so login finishes as soon as the data it
      actually needs is in. */
   async loadAll(){
-    this.loadFailed = {};
+    this.loadFailed = {}; this._oppStarted = false; this._oppEnsureP = null;
     /* _users is a deliberate placeholder, not dead code: this.loadUsers()
        below self-assigns this.data.users and its own Promise resolves to
        undefined, so it needs SOME name here to hold that slot. It used to
@@ -2192,7 +2227,7 @@ const Store = {
 
     /* Fire-and-forget: login/boot does not wait on this (see the comment
        above loadAll() for why). */
-    if(navigator.onLine) this.loadOppProjectsBackground();
+    if(navigator.onLine) this.loadOppProjectsBackground({cacheOnly:true});   /* uses the copy on this device if fresh; never downloads */
 
     const anyFailed = Object.values(this.loadFailed).some(Boolean);
     if(anyFailed && navigator.onLine){
@@ -2814,19 +2849,22 @@ const UI = {
    NAV
 ===================================================================== */
 const NAV = [
-  {sec:'My Workspace', ic:'&#127919;', items:[
+  {sec:'Overview', ic:'&#127968;', items:[
     {id:'dashboard', ic:'&#127968;', label:'Dashboard'},
-    {id:'todayplan', ic:'&#128197;', label:"Today's Actions"},
     {id:'growth', ic:'&#128200;', label:'Growth Centre'},
     {id:'notifications', ic:'&#128276;', label:'Notifications'},
+  ]},
+  {sec:'Work Centre', ic:'&#9889;', items:[
+    {id:'actioncentre', ic:'&#9889;', label:'Action Centre'},
     {id:'mywork', ic:'&#127919;', label:'My Work'},
     {id:'tasks', ic:'&#9989;', label:'Tasks &amp; To-Do'},
-    {id:'officework', ic:'&#128203;', label:'Office Work Register'},
     {id:'followupcentre', ic:'&#9200;', label:'Follow-ups'},
-    {id:'handover', ic:'&#129309;', label:'Work Handover'},
     {id:'mycalls', ic:'&#9742;', label:'My Calling List'},
     {id:'officequeue', ic:'&#128203;', label:'Office Queue'},
+    {id:'officework', ic:'&#128203;', label:'Office Work Register'},
+    {id:'handover', ic:'&#129309;', label:'Work Handover'},
     {id:'attendance', ic:'&#128343;', label:'Attendance &amp; Leave'},
+    {id:'notes', ic:'&#128221;', label:'Notes'},
   ]},
   {sec:'Sales &amp; Customers', ic:'&#128101;', items:[
     {id:'leads', ic:'&#128101;', label:'Leads'},
@@ -2836,31 +2874,29 @@ const NAV = [
     {id:'rate_docs', ic:'&#128196;', label:'Rate / Offer PDF'},
     {id:'orders', ic:'&#128230;', label:'Orders'},
   ]},
-  {sec:'Government Tenders', ic:'&#127963;', items:[
+  {sec:'Government Business', ic:'&#127963;', items:[
     {id:'bidsearch', ic:'&#128269;', label:'GeM Bid Search'},
-    {id:'tenders', ic:'&#128209;', label:'Tender Centre'},
     {id:'oppfinder', ic:'&#127963;', label:'Project Opportunities'},
+    {id:'tenders', ic:'&#128209;', label:'Tender Centre'},
     {id:'biddocs', ic:'&#128196;', label:'Bid Documents'},
     {id:'tendervault', ic:'&#128193;', label:'Tender Vault'},
     {id:'gemcrac', ic:'&#128203;', label:'GEM CRAC'},
     {id:'emdpbg', ic:'&#128274;', label:'EMD / PBG Tracker'},
   ]},
-  {sec:'Products &amp; Inventory', ic:'&#128230;', items:[
+  {sec:'Products &amp; Procurement', ic:'&#128230;', items:[
     {id:'products', ic:'&#128230;', label:'Product Master'},
     {id:'inventory', ic:'&#127974;', label:'Inventory'},
     {id:'suppliers', ic:'&#127981;', label:'Suppliers'},
-    {id:'purchaseorders', ic:'&#128722;', label:'Purchase Orders'},
     {id:'rfq', ic:'&#128209;', label:'Supplier RFQs'},
+    {id:'purchaseorders', ic:'&#128722;', label:'Purchase Orders'},
   ]},
-  {sec:'Payments &amp; Accounts', ic:'&#128176;', items:[
+  {sec:'Finance', ic:'&#128176;', items:[
     {id:'payments', ic:'&#128176;', label:'Payments Follow-up'},
     {id:'outstanding', ic:'&#9888;', label:'Outstanding'},
     {id:'expenses', ic:'&#129534;', label:'Office Expenses'},
-  ]},
-  {sec:'Site Expenses', ic:'&#127959;', items:[
     {id:'siteexp', ic:'&#127959;', label:'Site Expenses'},
   ]},
-  {sec:'Field Sales', ic:'&#128204;', items:[
+  {sec:'Field Operations &amp; Service', ic:'&#128204;', items:[
     {id:'fieldhome', ic:'&#128204;', label:'My Day'},
     {id:'visits', ic:'&#128100;', label:'Visits'},
     {id:'requirements', ic:'&#128221;', label:'Requirements'},
@@ -2868,17 +2904,12 @@ const NAV = [
     {id:'fieldmap', ic:'&#128506;', label:'Field Map'},
     {id:'findlocation', ic:'&#128205;', label:'Find Location'},
     {id:'officefinder', ic:'&#127970;', label:'Nearby Offices'},
-  ]},
-  {sec:'Tasks &amp; Operations', ic:'&#9989;', items:[
     {id:'complaints', ic:'&#128736;', label:'Complaints'},
     {id:'amc', ic:'&#128295;', label:'Service &amp; AMC'},
-    {id:'notes', ic:'&#128221;', label:'Notes'},
   ]},
-  {sec:'Reports &amp; Analytics', ic:'&#128200;', items:[
+  {sec:'Reports &amp; Administration', ic:'&#9881;', items:[
     {id:'reports', ic:'&#128200;', label:'Reports'},
     {id:'fieldreports', ic:'&#128202;', label:'Field Reports'},
-  ]},
-  {sec:'Admin &amp; Settings', ic:'&#9881;', items:[
     {id:'workmgmt', ic:'&#128203;', label:'Work Management', adminOnly:true},
     {id:'callalloc', ic:'&#128222;', label:'Contact Allocation', adminOnly:true},
     {id:'users', ic:'&#128272;', label:'Users &amp; Roles', adminOnly:true},
@@ -2926,6 +2957,7 @@ const PAGE_META = {
   tasks:['Tasks & To-Do','Team to-do list &amp; task tracking'],
   notes:['Notes','Quick notes & reminders'],
   reports:['Reports','Business performance'],
+  actioncentre:['Action Centre','One place to see what needs to happen next'],
   todayplan:["Today's Actions",'Follow-ups, quotations, payments, tasks and tender deadlines in one list'],
   fieldhome:['My Day','Today’s visits, plan and field activity'],
   visits:['Visits','Record and track every field visit'],
@@ -2954,7 +2986,7 @@ function assignableMenus(){
    array exists, it's the source of truth. */
 function hasMenuAccess(viewId){
   if(!Auth.session) return false;
-  if(viewId==='todayplan') return true;   /* everyone's own to-do list; items inside still respect their module access */
+  if(viewId==='todayplan' || viewId==='actioncentre') return true;   /* everyone's own to-do list; items inside still respect their module access */
   if(Auth.session.role==='Admin') return true;
   if(Access.menuHidden(viewId)) return false;
   const perms = Auth.session.permissions;
@@ -3000,6 +3032,7 @@ function navBadgeCount(id){
   if(id==='biddocs'){
     return Store.data.bidDocs.filter(d=>d.status==='Draft').length;
   }
+  if(id==='actioncentre') return (typeof ActionCentre!=='undefined') ? ActionCentre.badge() : 0;
   if(id==='mywork') return (typeof Work!=='undefined' && Work.badge) || 0;
   if(id==='emdpbg') return Alerts.collect().filter(a=>a.view==='emdpbg').length;
   if(id==='purchaseorders') return Alerts.collect().filter(a=>a.view==='purchaseorders').length;
@@ -3016,6 +3049,8 @@ const NavPrefs = {
   write(n, v){ try{ localStorage.setItem(this.key(n), JSON.stringify(v)); }catch(e){} },
   favs(){ return this.read('fav', []); },
   openGroups(){ return this.read('open', null); },
+  compact(){ try{ return localStorage.getItem('jays_nav_compact')!=='0'; }catch(e){ return true; } },
+  setCompact(on){ try{ localStorage.setItem('jays_nav_compact', on?'1':'0'); }catch(e){} },
   toggleFav(id){ const f = this.favs(), i = f.indexOf(id); if(i>=0) f.splice(i,1); else f.push(id); this.write('fav', f); },
   setOpen(sec, on){ let o = this.openGroups() || []; o = o.filter(x=>x!==sec); if(on) o.push(sec); this.write('open', o); }
 };
@@ -3029,22 +3064,28 @@ function renderNav(){
   const activeSec = navGroupOf(UI.currentView);
   if(open === null){ open = [activeSec].filter(Boolean); }
   if(activeSec && !open.includes(activeSec)){ open = open.concat(activeSec); NavPrefs.write('open', open); }
+  const compact = NavPrefs.compact();
+  const allowed = new Set(); NAV.forEach(s=>s.items.forEach(i=>{ if(navItemAllowed(i)) allowed.add(i.id); }));
+  const grpOf = it=>TabStrip.find(it.id);
+  const members = it=>{ const g = grpOf(it); return (compact && g) ? g.filter(id=>allowed.has(id)) : [it.id]; };
+  const isHidden = it=>{ const m = members(it); return m.length>1 && m[0]!==it.id; };       /* only the first page of a tab group gets a sidebar entry */
+  const rowCnt = it=>members(it).reduce((n,id)=>n+(navBadgeCount(id)||0),0);
   const row = (it, inFav)=>{
-    const cnt = navBadgeCount(it.id), label = plain(it.label), pinned = favs.includes(it.id), act = UI.currentView===it.id;
+    const cnt = rowCnt(it), label = plain(it.label), pinned = favs.includes(it.id), act = UI.currentView===it.id || (!inFav && members(it).length>1 && members(it).includes(UI.currentView));
     return `<div class="nav-item ${act?'active':''}" role="link" tabindex="0" data-view="${it.id}" title="${Util.escapeHtml(label)}"${act?' aria-current="page"':''}>
       <span class="ic" aria-hidden="true">${NavIcons.item(it)}</span><span>${it.label}</span>${cnt?`<span class="cnt" aria-label="${cnt} pending">${cnt}</span>`:''}
       <button type="button" class="nav-star ${pinned?'on':''}" data-fav="${it.id}" aria-pressed="${pinned}" aria-label="${pinned?'Remove '+Util.escapeHtml(label)+' from Favorites':'Add '+Util.escapeHtml(label)+' to Favorites'}" title="${pinned?'Unpin from Favorites':'Pin to Favorites'}">${pinned?'&#9733;':'&#9734;'}</button>
     </div>`;
   };
   let html = '';
-  const favItems = favs.map(id=>{ for(const sec of NAV){ const it = sec.items.find(x=>x.id===id); if(it) return it; } return null; }).filter(it=>it && navItemAllowed(it));
+  const favItems = favs.map(id=>id==='todayplan'?'actioncentre':id).filter((id,i,a)=>a.indexOf(id)===i).map(id=>{ for(const sec of NAV){ const it = sec.items.find(x=>x.id===id); if(it) return it; } return null; }).filter(it=>it && navItemAllowed(it));
   if(favItems.length){
     html += `<div class="nav-group nav-fav"><div class="nav-section-label">&#9733; Favorites</div>${favItems.map(it=>row(it,true)).join('')}</div>`;
   }
   NAV.forEach((sec, gi)=>{
-    const items = sec.items.filter(navItemAllowed);
+    const items = sec.items.filter(navItemAllowed).filter(it=>!isHidden(it));
     if(!items.length) return;
-    const isOpen = open.includes(sec.sec), total = items.reduce((n,it)=>n+(navBadgeCount(it.id)||0),0);
+    const isOpen = open.includes(sec.sec), total = items.reduce((n,it)=>n+rowCnt(it),0);
     html += `<div class="nav-group ${isOpen?'open':''}" data-sec="${Util.escapeHtml(sec.sec)}">
       <button type="button" class="nav-group-head" data-sec="${Util.escapeHtml(sec.sec)}" aria-expanded="${isOpen}" aria-controls="navg${gi}" title="${Util.escapeHtml(plain(sec.sec))}">
         <span class="ic" aria-hidden="true">${NavIcons.sec(sec)}</span><span class="gl">${sec.sec}</span>${(!isOpen && total)?`<span class="cnt" aria-label="${total} pending">${total}</span>`:''}<span class="chev" aria-hidden="true">&#9662;</span>
@@ -3052,10 +3093,13 @@ function renderNav(){
       <div class="nav-group-body" id="navg${gi}">${items.map(it=>row(it,false)).join('')}</div>
     </div>`;
   });
+  html += '<div class="nav-compact-row"><button type="button" class="nav-compact-btn" data-compact="'+(compact?'0':'1')+'" title="'+(compact?'Related pages are shown as tabs. Click to list every page in the menu.':'Click to group related pages into one menu entry with tabs.')+'">'+(compact?'Show all pages in menu':'Use compact menu')+'</button></div>';
   box.innerHTML = html;
   if(!box._wired){
     box._wired = true;
     box.addEventListener('click', e=>{
+      const cb = e.target.closest('.nav-compact-btn');
+      if(cb){ NavPrefs.setCompact(cb.getAttribute('data-compact')==='1'); renderNav(); return; }
       const star = e.target.closest('.nav-star');
       if(star){ e.stopPropagation(); NavPrefs.toggleFav(star.getAttribute('data-fav')); renderNav(); return; }
       const head = e.target.closest('.nav-group-head');
@@ -18062,7 +18106,7 @@ const TodayPlan = {
   },
   dueLabel(d, today){ if(!d) return ''; if(d<today) return '<span class="badge" style="background:var(--red,#dc2626);color:#fff;">Overdue '+Util.fmtDate(d)+'</span>'; return '<span class="badge badge-blue">Today</span>'; },
   openBid(id){ go('bidsearch'); setTimeout(()=>{ try{ BidSearch.openDetail(id); }catch(e){ console.error(e); } }, 80); },
-  openProject(key){ go('oppfinder'); setTimeout(async()=>{ try{ if(!Store.data.oppProjects.length) await Store.loadOppProjects(); OppFinder.viewProject(key); }catch(e){ console.error(e); } }, 120); },
+  openProject(key){ go('oppfinder'); setTimeout(async()=>{ try{ await Store.ensureOppProjects(); OppFinder.viewProject(key); }catch(e){ console.error(e); } }, 120); },
   render(){
     const E = Util.escapeHtml, S = this.collect(), total = S.reduce((a,s)=>a+s.rows.length,0);
     const sec = s=> '<div class="card card-pad" style="margin-bottom:14px;"><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><h3 style="margin:0;font-size:15px;">'+s.icon+' '+E(s.title)+'</h3><span class="badge '+(s.rows.length?'badge-blue':'badge-gray')+'">'+s.rows.length+'</span><span style="flex:1"></span><button class="btn btn-outline btn-sm" onclick="go(\''+s.view+'\')">Open</button></div>' +
@@ -18078,6 +18122,265 @@ const TodayPlan = {
   }
 };
 Views.todayplan = ()=>TodayPlan.render();
+
+/* =====================================================================
+   ACTION CENTRE - one queue for everything that needs doing next.
+   Reads the existing follow-ups, tasks, quotations, payments, tender
+   deadlines, project follow-ups and field requirements. No new tables;
+   every row links back to its original record.
+===================================================================== */
+const ActionCentre = {
+  scope:'mine', tab:'today', q:'', LIMIT:100, UPCOMING_DAYS:14,
+  setScope(v){ this.scope = v; Router.render('actioncentre'); },
+  setTab(t){ this.tab = t; Router.render('actioncentre'); },
+  setQ(v){ this.q = String(v||''); this.renderBody(); },
+  addDays(iso, n){ return new Date(Date.parse(iso+'T00:00:00Z') + n*864e5).toISOString().slice(0,10); },
+  bucket(due, today){ if(!due) return 'office'; if(due<today) return 'overdue'; if(due===today) return 'today'; return due<=this.addDays(today,this.UPCOMING_DAYS) ? 'upcoming' : null; },
+  cleanTxt(v){ return String(v||'').replace(/['\\<>&"]/g,''); },
+  /* opts.names=false skips the (slow) project-name lookup, used for the sidebar badge */
+  collect(opts){
+    opts = opts||{}; const D = Store.data, today = Util.todayISO(), me = (Auth.session&&(Auth.session.name||Auth.session.username))||'';
+    const all = Auth.isAdmin() && this.scope==='all';
+    const custOwner = id=>{ const c = (D.customers||[]).find(x=>x.id===id); return c ? (c.assignedTo||'') : ''; };
+    const mine = a=> all || !a || a===me, strict = a=> all || a===me;
+    const out = [], seen = new Set();
+    const add = it=>{ const b = this.bucket(it.due, today); if(!b) return; const k = it.key; if(seen.has(k)) return; seen.add(k);
+      it.bucket = b; it.priority = (b==='overdue' || it.urgent) ? 'High' : (b==='today' ? 'Medium' : 'Low'); out.push(it); };
+    const norm = v=>String(v||'').trim().toLowerCase();
+    /* follow-ups first, so a task that repeats the same follow-up (same customer, day and wording) is not listed twice */
+    const fus = (D.followups||[]).filter(f=>f.status!=='Done' && f.date && mine(custOwner(f.customerId)));
+    const fuSig = new Set();
+    fus.forEach(f=>{ if(f.customerId) fuSig.add([f.customerId, f.date, norm(f.purpose)].join('|')); });
+    fus.forEach(f=>add({ key:'fu:'+f.id, kind:'Follow-up', main:f.customerName||'Follow-up', sub:f.purpose||'', owner:custOwner(f.customerId), due:f.date, status:f.status||'Pending',
+      view:'followupcentre', open: f.customerId ? "go('followupcentre');Customers.openDetail('"+f.customerId+"')" : "go('followupcentre')", wa:f.phone?"WaQuick.followup('"+f.id+"')":'', tel:f.phone||'' }));
+    (D.tasks||[]).filter(t=>t.status!=='Completed' && t.date && strict(t.assignedTo)).forEach(t=>{
+      if(t.customerId && fuSig.has([t.customerId, t.date, norm(t.todo)].join('|'))) return;
+      add({ key:'task:'+t.id, kind:'Task', main:t.todo||'Task', sub:t.customerName||'', owner:t.assignedTo||'', due:t.date, status:t.status||'Not Started',
+        view:'tasks', open:"go('tasks');Tasks.openForm('"+t.id+"')", wa:t.phone?"WaQuick.open({kind:'followup',name:'"+this.cleanTxt(t.customerName)+"',phone:'"+String(t.phone).replace(/[^0-9+]/g,'')+"',topic:'"+this.cleanTxt(t.todo)+"'})":'', tel:t.phone||'' }); });
+    (D.quotations||[]).filter(q=>q.status==='Sent' && mine(custOwner(q.customerId))).forEach(q=>{
+      add({ key:'quo:'+q.id, kind:'Quotation', main:q.customerName||q.id, sub:'Chase reply \u00b7 '+q.id+' \u00b7 '+Util.fmtMoney(q.total), owner:custOwner(q.customerId), due: q.date ? this.addDays(q.date,3) : today, status:'Sent',
+        view:'quotations', open:"go('quotations');Quotations.openForm('"+q.id+"')", wa:"WaQuick.quotation('"+q.id+"')", tel:q.phone||'' }); });
+    (D.payments||[]).filter(p=>p.status==='Pending' && p.followupDate && mine(custOwner(p.customerId))).forEach(p=>{
+      const pend = p.dueAmount!==undefined ? Math.max(Number(p.dueAmount)||0,0) : Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0);
+      add({ key:'pay:'+p.id, kind:'Payment', main:p.party||p.contact||'Party', sub:'Collect '+Util.fmtMoney(pend)+' \u00b7 '+(p.invoiceNumber||p.id||''), owner:custOwner(p.customerId), due:p.followupDate, status:'Pending',
+        view:'payments', open:"go('payments')", wa:p.phone?"WaQuick.payment('"+p.id+"')":'', tel:p.phone||'' }); });
+    if(hasMenuAccess('bidsearch')){
+      (D.bids||[]).forEach(b=>{ if(TENDER_ALERT_SKIP.includes(b.status)) return; const d = bidDeadlineInfo(b.endDate).days; if(d===null || d<0) return;
+        add({ key:'bid:'+b.id, kind:'Tender', main:b.title||b.bidNumber||'Bid', sub:'Bid closes \u00b7 '+(b.organisation||'')+(b.bidNumber?' \u00b7 '+b.bidNumber:''), owner:b.assignedTo||'', due:this.addDays(today,d), status:b.status||'Open', urgent:d<=1,
+          view:'bidsearch', open:"TodayPlan.openBid('"+b.id+"')" }); }); }
+    if(hasMenuAccess('oppfinder')){
+      const trk = D.oppTracking||{}, keys = Object.keys(trk).filter(k=>{ const t = trk[k]; return t && t.followup && !['Won','Lost'].includes(t.status) && (all || !t.staff || t.staff===me); });
+      const names = {}; const dueKeys = keys.filter(k=>this.bucket(trk[k].followup, today));
+      if(dueKeys.length && opts.names!==false){ const want = new Set(dueKeys); (D.oppProjects||[]).forEach(r=>{ const k = oppKeyOf(r); if(want.has(k)) names[k] = r; }); }
+      dueKeys.forEach(k=>{ const r = names[k]||{}, t = trk[k];
+        add({ key:'opp:'+k, kind:'Project', main:r['Project Name Eng']||r['Project Name Mal']||'Project follow-up', sub:(r['LB Name']||'')+(r['District']?' \u00b7 '+r['District']:'')+' \u00b7 '+(t.status||'New'), owner:t.staff||'', due:t.followup, status:t.status||'New',
+          view:'oppfinder', open:"TodayPlan.openProject('"+String(k).replace(/['\\]/g,'')+"')" }); }); }
+    if(hasMenuAccess('officequeue')){
+      (D.requirements||[]).filter(r=>r.status==='New'||r.status==='Quotation Required').forEach(r=>{
+        const cu = (D.customers||[]).find(c=>c.id===r.customerId);
+        add({ key:'req:'+r.id, kind:'Requirement', main:(cu?cu.name:'Customer')+' \u2014 '+(r.title||r.product||'Requirement'), sub:'From '+(r.createdBy||'field staff')+(r.qty?' \u00b7 Qty '+r.qty+(r.unit?' '+r.unit:''):''), owner:'Office', due:'', status:r.status,
+          view:'officequeue', open:"go('officequeue')", tel:'' }); }); }
+    const rank = {High:0, Medium:1, Low:2};
+    out.sort((a,b)=> (rank[a.priority]-rank[b.priority]) || String(a.due||'9999').localeCompare(String(b.due||'9999')) || String(a.main).localeCompare(String(b.main)));
+    return out;
+  },
+  counts(items){ const c = {today:0, overdue:0, upcoming:0, office:0}; items.forEach(i=>{ c[i.bucket]++; }); return c; },
+  badge(){ try{ const c = this.counts(this.collect({names:false})); return c.today + c.overdue; }catch(e){ return 0; } },
+  _items:null,
+  renderBody(){
+    const box = document.getElementById('acBody'); if(!box) return;
+    const E = Util.escapeHtml, items = this._items||[], q = this.q.trim().toLowerCase();
+    let rows = items.filter(i=>i.bucket===this.tab);
+    if(q) rows = rows.filter(i=>[i.main,i.sub,i.owner,i.kind,i.status].join(' ').toLowerCase().includes(q));
+    const pbadge = p=>'<span class="badge '+(p==='High'?'badge-red':p==='Medium'?'badge-amber':'badge-gray')+'">'+p+'</span>';
+    const dueCell = i=>{ if(!i.due) return '<span class="hint">Needs office action</span>'; const t = Util.todayISO();
+      return i.due<t ? '<span style="color:var(--red,#dc2626);font-weight:600;">'+Util.fmtDate(i.due)+'</span><div class="hint">overdue</div>' : (i.due===t ? '<b>Today</b>' : Util.fmtDate(i.due)); };
+    box.innerHTML = rows.length ?
+      '<div class="table-wrap"><table><thead><tr><th>Priority</th><th>Action / Record</th><th>Owner</th><th>Due</th><th>Status</th><th>Action</th></tr></thead><tbody>' +
+      rows.slice(0,this.LIMIT).map(i=>'<tr><td>'+pbadge(i.priority)+'</td>' +
+        '<td style="white-space:normal;min-width:220px;"><span class="badge badge-blue" style="margin-right:6px;">'+E(i.kind)+'</span><b>'+E(i.main)+'</b><div class="hint">'+E(i.sub)+'</div></td>' +
+        '<td>'+E(i.owner||'\u2014')+'</td><td>'+dueCell(i)+'</td><td><span class="badge badge-gray">'+E(i.status||'')+'</span></td>' +
+        '<td style="white-space:nowrap;"><button class="btn btn-primary btn-sm" onclick="'+E(i.open)+'">View</button>' +
+        (i.tel?' <a class="btn btn-outline btn-sm" style="text-decoration:none;" href="tel:'+E(String(i.tel).replace(/[^0-9+]/g,''))+'">&#9742;</a>':'') +
+        (i.wa?' <button class="btn btn-wa btn-sm" title="WhatsApp" onclick="'+E(i.wa)+'">&#128172;</button>':'') + '</td></tr>').join('') +
+      '</tbody></table></div>' + (rows.length>this.LIMIT ? '<div class="hint" style="padding:8px 12px;">Showing the first '+this.LIMIT+' of '+rows.length+'. Use search to narrow the list.</div>' : '')
+      : '<div class="empty-state"><div class="ic">&#9989;</div><div class="t">'+(q?'No matches':'All clear')+'</div><div class="d">'+(q?'Nothing in this tab matches your search.':'Nothing waiting in this tab.')+'</div></div>';
+  },
+  render(){
+    const E = Util.escapeHtml; this._items = this.collect(); const c = this.counts(this._items);
+    const tabs = [['today','Today'],['overdue','Overdue'],['upcoming','Upcoming'],['office','Waiting on Office']];
+    const qa = [['users','Add Lead',"go('customers');Customers.openForm(null)",'customers'],['check','Assign Task',"go('tasks');Tasks.openForm(null)",'tasks'],['file','Create Quotation',"go('quotations');Quotations.openForm(null)",'quotations'],
+                ['phone','Log Call',"go('mycalls')",'mycalls'],['search','Review Bid',"go('bidsearch')",'bidsearch']].filter(x=>hasMenuAccess(x[3]));
+    document.getElementById('content').innerHTML =
+      '<div class="toolbar" style="flex-wrap:wrap;"><div><b style="font-size:16px;">'+(c.today+c.overdue ? (c.today+c.overdue)+' item(s) need action now' : 'You are all caught up')+'</b><div class="hint">'+Util.fmtDate(Util.todayISO())+' \u00b7 each item appears once and opens its original record</div></div><div class="toolbar-spacer"></div>' +
+        (Auth.isAdmin() ? '<select aria-label="Whose items" onchange="ActionCentre.setScope(this.value)"><option value="mine"'+(this.scope==='mine'?' selected':'')+'>My items</option><option value="all"'+(this.scope==='all'?' selected':'')+'>Everyone</option></select>' : '') + '</div>' +
+      (qa.length ? '<div class="toolbar" style="flex-wrap:wrap;gap:8px;">'+qa.map(x=>'<button class="btn btn-outline btn-sm" onclick="'+E(x[2])+'">+ '+x[1]+'</button>').join('')+'</div>' : '') +
+      '<div class="toolbar" style="flex-wrap:wrap;">'+tabs.map(t=>'<button class="tab-btn '+(this.tab===t[0]?'active':'')+'" onclick="ActionCentre.setTab(\''+t[0]+'\')">'+t[1]+' <span class="cnt">'+c[t[0]]+'</span></button>').join('') +
+        '<div class="toolbar-spacer"></div><input type="search" id="acSearch" placeholder="Search this list\u2026" aria-label="Search this list" value="'+E(this.q)+'" oninput="ActionCentre.setQ(this.value)" style="max-width:240px;"></div>' +
+      '<div class="card" id="acBody"></div>';
+    this.renderBody();
+  }
+};
+Views.actioncentre = ()=>ActionCentre.render();
+
+/* =====================================================================
+   DASHBOARD V2 (summary dashboard) and TAB STRIP (related pages grouped
+   as tabs). The previous dashboard is kept untouched as "Detailed
+   dashboard"; the tab strip only adds navigation - every page keeps its
+   own address, data and permissions.
+===================================================================== */
+const DashboardV2 = {
+  classic:false,
+  setScope(v){ ActionCentre.scope = v; this.render(); },
+  openTab(t){ ActionCentre.tab = t; go('actioncentre'); },
+  showClassic(on){ this.classic = !!on; Router.render('dashboard'); },
+  render(){
+    const E = Util.escapeHtml, D = Store.data, today = Util.todayISO(), me = Dash.me(), admin = Auth.isAdmin();
+    const all = admin && ActionCentre.scope==='all', strict = a=> all || a===me;
+    const custOwner = id=>{ const c = (D.customers||[]).find(x=>x.id===id); return c ? (c.assignedTo||'') : ''; };
+    const mineOwner = a=> all || !a || a===me;
+    const week = ActionCentre.addDays(today,-7);
+    const items = ActionCentre.collect(), cnt = ActionCentre.counts(items);
+    const openTasks = (D.tasks||[]).filter(t=>t.status!=='Completed' && strict(t.assignedTo)).length;
+    const overdueFU = (D.followups||[]).filter(f=>f.status!=='Done' && f.date && f.date<today && mineOwner(custOwner(f.customerId))).length;
+    const openQ = (D.quotations||[]).filter(q=>QUOTATION_OPEN_STATUSES.includes(q.status)).length;
+    const canBids = hasMenuAccess('bidsearch');
+    const bidsSoon = canBids ? (D.bids||[]).filter(b=>{ const d = bidDeadlineInfo(b.endDate).days; return d!==null && d>=0 && d<=7 && !BID_TERMINAL_STATUSES.includes(b.status); }).length : 0;
+    const kpi = (cls, ic, title, val, sub, click)=>'<button type="button" class="d2-kpi" onclick="'+E(click)+'" aria-label="'+E(title+': '+val)+'"><span class="d2-kic '+cls+'">'+Ico.svg(ic)+'</span><span class="d2-kb"><span class="d2-kt">'+E(title)+'</span><span class="d2-kv">'+val+'</span><span class="d2-ks">'+E(sub)+'</span></span><span class="d2-ch" aria-hidden="true">&rsaquo;</span></button>';
+    const kpis = kpi('c-amber','check','Open Tasks',openTasks,'Assigned and in progress',"go('tasks')") +
+      kpi('c-red','clock','Overdue Follow-ups',overdueFU,'Follow-ups past due',"DashboardV2.openTab('overdue')") +
+      kpi('c-blue','file','Open Quotations',openQ,'Draft, sent or in negotiation',"go('quotations')") +
+      (canBids ? kpi('c-orange','landmark','GeM Bids Closing Soon',bidsSoon,'Deadlines in next 7 days',"go('bidsearch')") : '');
+    /* priority table: the most urgent items from the Action Centre */
+    const top = items.filter(i=>i.bucket==='today'||i.bucket==='overdue').slice(0,6);
+    const pb = p=>'<span class="badge '+(p==='High'?'badge-red':p==='Medium'?'badge-amber':'badge-gray')+'">'+p+'</span>';
+    const chip = (t,l)=>'<button type="button" class="d2-chip'+(t==='today'?' on':'')+'" onclick="DashboardV2.openTab(\''+t+'\')">'+l+' <b>'+cnt[t]+'</b></button>';
+    const prio = '<div class="card card-pad d2-card"><div class="d2-head"><h3>&#9889; Priority Action Centre</h3><div class="d2-chips">'+chip('today','Today')+chip('overdue','Overdue')+chip('upcoming','Upcoming')+chip('office','Waiting on Office')+'</div></div>' +
+      (top.length ? '<div class="table-wrap"><table><thead><tr><th>Priority</th><th>Action / Record</th><th>Owner</th><th>Due</th><th></th></tr></thead><tbody>' +
+        top.map(i=>'<tr><td>'+pb(i.priority)+'</td><td style="white-space:normal;min-width:180px;"><b>'+E(i.main)+'</b><div class="hint">'+E(i.kind+(i.sub?' · '+i.sub:''))+'</div></td><td>'+E(i.owner||'—')+'</td><td>'+(i.bucket==='overdue'?'<span style="color:var(--red,#dc2626);font-weight:600;">'+Util.fmtDate(i.due)+'</span>':'Today')+'</td><td><button class="btn btn-primary btn-sm" onclick="'+E(i.open)+'">View</button></td></tr>').join('') +
+        '</tbody></table></div><div style="margin-top:8px;"><button class="btn btn-outline btn-sm" onclick="go(\'actioncentre\')">Open Action Centre ('+(cnt.today+cnt.overdue)+' due now) &rarr;</button></div>'
+        : '<div class="empty-state" style="padding:18px;"><div class="d">Nothing due today or overdue. Nice work.</div></div>') + '</div>';
+    /* business snapshot */
+    const pays = (D.payments||[]).filter(p=>p.status==='Pending'), owe = p=>p.dueAmount!==undefined ? Math.max(Number(p.dueAmount)||0,0) : Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0);
+    const payAmt = pays.reduce((a,p)=>a+owe(p),0), payTotal = (D.payments||[]).reduce((a,p)=>a+(Number(p.amount)||0),0);
+    const payParties = new Set(pays.map(p=>p.party||p.customerId).filter(Boolean)).size;
+    const rfqOpen = (D.rfqs||[]).filter(r=>['Draft','Sent to Suppliers'].includes(r.status)).length, rfqAll = (D.rfqs||[]).length;
+    const ordAct = (D.orders||[]).filter(o=>o.status && o.status!=='Payment Received').length, ordAll = (D.orders||[]).length;
+    const canOpp = hasMenuAccess('oppfinder'), oppRows = D.oppProjects||[], oppNew = canOpp ? oppRows.filter(r=>r.score>=80 && !(D.oppTracking||{})[oppKeyOf(r)]).length : 0;
+    const pct = (a,b)=> b>0 ? Math.min(100,Math.round(a*100/b)) : 0;
+    const snap = (cls,ic,title,val,side,p,click)=>'<button type="button" class="d2-snap" onclick="'+E(click)+'"><span class="d2-kic '+cls+'">'+Ico.svg(ic)+'</span><span class="d2-sb"><span class="d2-st"><span>'+E(title)+'</span><i>'+E(side)+'</i></span><span class="d2-sv">'+val+'</span><span class="d2-bar"><span class="'+cls+'" style="width:'+p+'%"></span></span></span><span class="d2-ch" aria-hidden="true">&rsaquo;</span></button>';
+    const snapHTML = '<div class="card card-pad d2-card"><div class="d2-head"><h3>&#128200; Business Snapshot</h3></div>' +
+      snap('c-green','wallet','Payments to follow up',Util.fmtMoney(payAmt),payParties+' customer(s) · '+pct(payAmt,payTotal)+'% of billed',pct(payAmt,payTotal),"go('payments')") +
+      snap('c-violet','truck','Supplier prices pending',rfqOpen,rfqAll+' RFQ(s) in total',pct(rfqOpen,rfqAll),"go('rfq')") +
+      snap('c-orange','cart','Orders awaiting action',ordAct,ordAll+' order(s) in total',pct(ordAct,ordAll),"go('orders')") +
+      (canOpp ? (Store._oppStarted ? snap('c-blue','landmark','Project opportunities',oppNew,oppRows.length.toLocaleString('en-IN')+' loaded · 80+ match, not yet tracked',pct(oppNew,oppRows.length),"go('oppfinder')") : snap('c-blue','landmark','Project opportunities','—','Opens and loads when you visit it',0,"go('oppfinder')")) : '') + '</div>';
+    /* pipeline */
+    const cs = D.customers||[], wk = d=> d && String(d).slice(0,10)>=week;
+    const stages = [
+      ['New Lead','users','c-blue', cs.filter(c=>c.status==='New Lead'), cs.filter(c=>c.status==='New Lead' && wk(c.createdDate)).length, 'leads'],
+      ['Contacted','phone','c-green', cs.filter(c=>['First Contact','WhatsApp Sent','Follow-up Scheduled','Call Not Taken'].includes(c.status)), null, 'customers'],
+      ['Quotation','file','c-orange', (D.quotations||[]).filter(q=>QUOTATION_OPEN_STATUSES.includes(q.status)), (D.quotations||[]).filter(q=>QUOTATION_OPEN_STATUSES.includes(q.status) && wk(q.date)).length, 'quotations'],
+      ['Order in progress','cart','c-violet', (D.orders||[]).filter(o=>['In Progress','Work Order Done'].includes(o.status)), (D.orders||[]).filter(o=>['In Progress','Work Order Done'].includes(o.status) && wk(o.orderDate)).length, 'orders'],
+      ['Dispatched','truck','c-amber', (D.orders||[]).filter(o=>['Product Reached','Dispatched'].includes(o.status)), null, 'orders'],
+      ['Paid','wallet','c-green', (D.orders||[]).filter(o=>o.status==='Payment Received'), null, 'orders']];
+    const pipe = '<div class="card card-pad d2-card"><div class="d2-head"><h3>&#128260; Sales &amp; Procurement Pipeline</h3><button class="btn btn-outline btn-sm" onclick="go(\'pipeline\')">View all &rarr;</button></div><div class="d2-pipe">' +
+      stages.map(s=>'<button type="button" class="d2-stage" onclick="go(\''+s[5]+'\')"><span class="d2-kic '+s[2]+'">'+Ico.svg(s[1])+'</span><span class="d2-sn">'+s[3].length+'</span><span class="d2-sl">'+E(s[0])+'</span><span class="d2-sw">'+(s[4]!==null? '+'+s[4]+' this week' : '&nbsp;')+'</span></button>').join('') + '</div></div>';
+    /* team workload (admin) */
+    let team = '';
+    if(admin){
+      const by = {}; (D.tasks||[]).forEach(t=>{ const o = t.assignedTo; if(!o) return; const r = by[o] || (by[o] = {name:o, open:0, done:0, late:0}); if(t.status==='Completed') r.done++; else { r.open++; if(t.date && t.date<today) r.late++; } });
+      const rows = Object.values(by).sort((a,b)=>b.open-a.open).slice(0,8);
+      team = '<div class="card card-pad d2-card"><div class="d2-head"><h3>&#128101; Team Workload</h3><button class="btn btn-outline btn-sm" onclick="go(\'workmgmt\')">View all &rarr;</button></div>' +
+        (rows.length ? '<div class="table-wrap"><table><thead><tr><th>Staff</th><th>Open</th><th>Overdue</th><th>Done</th><th>Progress</th></tr></thead><tbody>' + rows.map(r=>{ const tot = r.open+r.done, p = pct(r.done,tot);
+          return '<tr><td><b>'+E(r.name)+'</b></td><td>'+r.open+'</td><td'+(r.late?' style="color:var(--red,#dc2626);font-weight:600;"':'')+'>'+r.late+'</td><td>'+r.done+'</td><td style="min-width:110px;"><span class="d2-bar"><span class="c-green" style="width:'+p+'%"></span></span><span class="hint">'+p+'%</span></td></tr>'; }).join('') + '</tbody></table></div>'
+          : '<div class="empty-state" style="padding:18px;"><div class="d">No assigned tasks yet.</div></div>') + '</div>';
+    }
+    const hour = new Date().getHours(), greet = hour<12?'Good morning':hour<17?'Good afternoon':'Good evening';
+    const qa = [['plus','New Lead',"go('customers');Customers.openForm(null)",'customers'],['check','Assign Task',"go('tasks');Tasks.openForm(null)",'tasks'],['file','New Quotation',"go('quotations');Quotations.openForm(null)",'quotations']].filter(x=>hasMenuAccess(x[3]));
+    document.getElementById('content').innerHTML =
+      '<div class="d2-wrap"><div class="card card-pad d2-hello"><div><div class="d2-greet">'+greet+', '+E(me||'there')+'</div><div class="hint">'+Util.fmtDate(today)+(all?' · showing the whole team':'')+'</div></div><div class="d2-qa">' +
+        (admin ? '<select aria-label="Whose items" onchange="DashboardV2.setScope(this.value)"><option value="mine"'+(all?'':' selected')+'>My items</option><option value="all"'+(all?' selected':'')+'>Everyone</option></select>' : '') +
+        qa.map(x=>'<button class="btn '+(x[0]==='plus'?'btn-primary':'btn-outline')+' btn-sm" onclick="'+E(x[2])+'">'+(x[0]==='plus'?'+ ':'')+x[1]+'</button>').join('') + '</div></div>' +
+      '<div class="d2-kpis">'+kpis+'</div>' +
+      '<div class="d2-grid2">'+prio+snapHTML+'</div>' +
+      '<div class="d2-grid2 d2-grid2b">'+pipe+team+'</div>' +
+      '<div style="margin:6px 0 18px;"><button class="btn btn-outline btn-sm" onclick="DashboardV2.showClassic(true)">Detailed dashboard (charts, field activity, recent activity) &rarr;</button></div></div>';
+  }
+};
+(function(){
+  const classic = Views.dashboard;
+  Views.dashboard = function(){
+    if(!DashboardV2.classic) return DashboardV2.render();
+    const rv = classic.apply(this, arguments);
+    const c = document.getElementById('content');
+    if(c) c.insertAdjacentHTML('afterbegin','<div style="margin-bottom:10px;"><button class="btn btn-outline btn-sm" onclick="DashboardV2.showClassic(false)">&larr; Back to summary dashboard</button></div>');
+    return rv;
+  };
+  const css = document.createElement('style'); css.id = 'p2css';
+  css.textContent = `
+  .d2-wrap{max-width:1400px;} .d2-wrap *{min-width:0;}
+  .d2-hello{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px;}
+  .d2-greet{font-size:20px;font-weight:800;} .d2-qa{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
+  .d2-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin-bottom:14px;}
+  .d2-kpi,.d2-snap,.d2-stage{font:inherit;text-align:left;background:var(--card,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;cursor:pointer;color:inherit;}
+  .d2-kpi{display:flex;align-items:center;gap:12px;padding:14px;} .d2-kpi:hover,.d2-snap:hover,.d2-stage:hover{border-color:var(--orange,#f26b21);}
+  .d2-kic{width:40px;height:40px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;flex:0 0 40px;background:#eef2f7;} .d2-kic svg{width:20px;height:20px;}
+  .c-amber{background:#fef3c7;color:#b45309;} .c-red{background:#fee2e2;color:#dc2626;} .c-blue{background:#dbeafe;color:#2563eb;} .c-orange{background:#ffedd5;color:#ea580c;} .c-green{background:#d1fae5;color:#059669;} .c-violet{background:#ede9fe;color:#7c3aed;}
+  .d2-kb,.d2-sb{display:flex;flex-direction:column;flex:1;} .d2-kt{font-size:13px;font-weight:700;} .d2-kv{font-size:28px;font-weight:800;line-height:1.1;} .d2-ks{font-size:12px;color:var(--text-mute,#6b7280);} .d2-ch{font-size:22px;color:var(--text-mute,#6b7280);}
+  .d2-grid2{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(0,1fr);gap:14px;margin-bottom:14px;align-items:start;} .d2-grid2b{grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);}
+  @media(max-width:1000px){.d2-grid2,.d2-grid2b{grid-template-columns:minmax(0,1fr);}}
+  .d2-head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;} .d2-head h3{margin:0;font-size:15px;}
+  .d2-chips{display:flex;gap:6px;flex-wrap:wrap;} .d2-chip{font:inherit;font-size:12px;padding:5px 10px;border-radius:999px;border:1px solid var(--border,#e5e7eb);background:#fff;cursor:pointer;} .d2-chip.on{background:var(--orange,#f26b21);color:#fff;border-color:var(--orange,#f26b21);}
+  .d2-snap{display:flex;align-items:center;gap:12px;padding:12px;width:100%;margin-bottom:8px;} .d2-st{display:flex;justify-content:space-between;gap:8px;font-size:13px;font-weight:700;} .d2-st i{font-style:normal;font-weight:400;font-size:11.5px;color:var(--text-mute,#6b7280);text-align:right;} .d2-sv{font-size:22px;font-weight:800;}
+  .d2-bar{display:block;height:6px;border-radius:999px;background:#eef2f7;overflow:hidden;margin-top:4px;} .d2-bar>span{display:block;height:100%;border-radius:999px;background:currentColor;}
+  .d2-pipe{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;} .d2-stage{display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:12px;} .d2-sn{font-size:26px;font-weight:800;} .d2-sl{font-size:12.5px;font-weight:700;} .d2-sw{font-size:11.5px;color:var(--text-mute,#6b7280);}
+  `;
+  document.head.appendChild(css);
+})();
+
+/* ---------- Tab strip: related pages shown as tabs above the page ---------- */
+const TAB_GROUPS = [
+  ['actioncentre','mywork','tasks','followupcentre','mycalls','officequeue'],
+  ['officework','handover'],
+  ['leads','customers'],
+  ['quotations','rate_docs'],
+  ['biddocs','tendervault'],
+  ['gemcrac','emdpbg'],
+  ['suppliers','rfq','purchaseorders'],
+  ['payments','outstanding'],
+  ['expenses','siteexp'],
+  ['reports','fieldreports'],
+  ['visits','requirements','travel'],
+  ['fieldmap','findlocation','officefinder'],
+  ['complaints','amc']
+];
+const TabStrip = {
+  find(id){ return TAB_GROUPS.find(g=>g.includes(id)) || null; },
+  label(id){ for(const s of NAV){ const it = s.items.find(x=>x.id===id); if(it) return it; } return null; },
+  render(){
+    let el = document.getElementById('tabStrip'); const content = document.getElementById('content'); if(!content) return;
+    if(!el){ el = document.createElement('div'); el.id = 'tabStrip'; el.setAttribute('role','tablist'); content.parentNode.insertBefore(el, content); }
+    const g = this.find(UI.currentView);
+    const its = g ? g.map(id=>this.label(id)).filter(it=>it && navItemAllowed(it)) : [];
+    if(its.length < 2){ el.style.display = 'none'; el.innerHTML = ''; return; }
+    el.style.display = '';
+    el.innerHTML = its.map(it=>{ const n = navBadgeCount(it.id), act = it.id===UI.currentView;
+      return '<button type="button" role="tab" class="ts-tab'+(act?' on':'')+'" aria-selected="'+act+'" data-view="'+it.id+'">'+it.label+(n?' <span class="ts-n">'+n+'</span>':'')+'</button>'; }).join('');
+    if(!el._wired){ el._wired = true; el.addEventListener('click', e=>{ const b = e.target.closest('.ts-tab'); if(b && b.getAttribute('data-view')!==UI.currentView) go(b.getAttribute('data-view')); }); }
+  }
+};
+(function(){
+  const css = document.createElement('style'); css.id = 'tabstripcss';
+  css.textContent = `#tabStrip{display:flex;gap:4px;flex-wrap:wrap;padding:8px 22px 0;background:var(--bg,#f6f7f9);border-bottom:1px solid var(--border,#e5e7eb);}
+  #tabStrip .ts-tab{font:inherit;font-size:13px;font-weight:700;padding:8px 14px;border:none;border-bottom:3px solid transparent;background:none;color:var(--text-mute,#6b7280);cursor:pointer;border-radius:8px 8px 0 0;}
+  #tabStrip .ts-tab:hover{color:var(--text,#111827);} #tabStrip .ts-tab.on{color:var(--orange,#f26b21);border-bottom-color:var(--orange,#f26b21);}
+    .nav-compact-row{padding:10px 12px 16px;} .nav-compact-btn{font:inherit;font-size:12px;width:100%;padding:7px 10px;border-radius:8px;border:1px dashed rgba(255,255,255,.35);background:transparent;color:inherit;opacity:.8;cursor:pointer;} .nav-compact-btn:hover{opacity:1;}
+  #tabStrip .ts-n{display:inline-block;min-width:18px;padding:0 5px;border-radius:999px;background:#e5e7eb;color:#374151;font-size:11px;text-align:center;margin-left:4px;}
+  @media(max-width:700px){#tabStrip{padding:6px 10px 0;overflow-x:auto;flex-wrap:nowrap;} #tabStrip .ts-tab{white-space:nowrap;}}`;
+  document.head.appendChild(css);
+  const _go = go;
+  go = function(view){ const rv = _go.apply(this, arguments); try{ TabStrip.render(); }catch(e){ console.error('TabStrip', e); } return rv; };
+})();
 
 /* ---------- Closed tenders you did not take part in: removed 7 days after closing, with a restore list ---------- */
 const BID_CLEAN_STATUSES = ['New','Saved','Under Review','Go / No-Go Decision','Not Participating'];
@@ -18480,7 +18783,7 @@ const BackupSched = {
   async save(){ const s = Store.data.settings; s.backupAutoEnabled = document.getElementById('bs_en').checked; s.backupEveryDays = Math.max(1, Math.min(90, Number(document.getElementById('bs_days').value)||7)); if(await Store.save('settings')){ UI.toast('Saved'); this.mount(); } },
   async now(){ try{ if(await this.run()){ UI.toast('Backup downloaded'); this.mount(); } }catch(e){ console.error(e); UI.toast('Backup failed: '+(e.message||e)); } }
 };
-Views.oppfinder = ()=>OppFinder.seedKeywordGroups().then(()=>OppFinder.prepare()).then(()=>OppFinder.render());
+Views.oppfinder = ()=>{ Store.ensureOppProjects(); return OppFinder.seedKeywordGroups().then(()=>OppFinder.prepare()).then(()=>OppFinder.render()); };
 
 const Reports = {
   render(){
@@ -18700,6 +19003,7 @@ const Backup = {
     // Full-database export (every customer, quotation, payment...) -
     // restricted to Admins, same as restore/import below.
     if(!Auth.isAdmin()){ UI.toast("You don't have permission to export the full database"); return; }
+    if(!light && !(await this.needOpp())) return;
     const snap = this.snapshot();
     if(light){ delete snap.oppProjects; snap._note = 'Weekly backup: project opportunity rows are not included (too large). Re-import them from the source files.'; }
     /* Tender Centre data lives in its own database tables, not in Store,
@@ -18754,8 +19058,18 @@ const Backup = {
       Router.render('backup');
     }catch(e){ Store.forceOverwrite = false; console.error(e); UI.toast('Restore failed — invalid backup file'); }
   },
-  exportDatabaseExcel(){
+  /* a full backup or export must contain every project row, so make sure the list is loaded first */
+  async needOpp(){
+    const ok = ()=>Store._oppStarted && Store.oppLoad && Store.oppLoad.complete && !Store.oppLoad.loading;
+    if(ok()) return true;
+    UI.toast('Loading the project list so this is complete\u2026', 6000);
+    try{ await Store.ensureOppProjects(); }catch(e){}
+    if(ok()) return true;
+    return confirm('The project list could not be loaded completely ('+(Store.data.oppProjects||[]).length+' rows). Continue without all project rows?');
+  },
+  async exportDatabaseExcel(){
     if(!Auth.isAdmin()){ UI.toast("You don't have permission to export the full database"); return; }
+    if(!(await this.needOpp())) return;
     try{
       const wb = XLSX.utils.book_new();
       const sheets = {
@@ -21684,12 +21998,12 @@ const Ico = {
   svg(name, cls){ const d = this.p[name]; return d ? '<svg class="'+(cls||'')+'" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">'+d+'</svg>' : ''; }
 };
 /* menu id -> icon; anything not listed keeps its existing emoji so nothing is ever blank */
-const NAV_ICON = { dashboard:'dashboard', growth:'trend', notifications:'bell', leads:'users', customers:'user', pipeline:'trend', mywork:'target', followupcentre:'clock', officework:'list', handover:'swap',
+const NAV_ICON = { actioncentre:'bolt', dashboard:'dashboard', growth:'trend', notifications:'bell', leads:'users', customers:'user', pipeline:'trend', mywork:'target', followupcentre:'clock', officework:'list', handover:'swap',
   mycalls:'phone', officequeue:'list', quotations:'file', rate_docs:'file', orders:'box', bidsearch:'search', tenders:'briefcase', oppfinder:'landmark', biddocs:'file', tendervault:'lock', gemcrac:'list', emdpbg:'lock',
   products:'box', inventory:'store', suppliers:'truck', purchaseorders:'cart', rfq:'list', payments:'wallet', outstanding:'alert', expenses:'receipt', siteexp:'wallet',
   fieldhome:'pin', visits:'pin', requirements:'list', travel:'truck', fieldmap:'pin', findlocation:'search', officefinder:'search',
   complaints:'alert', amc:'wrench', tasks:'check', attendance:'calendar', notes:'file', reports:'chart', fieldreports:'chart', workmgmt:'list', callalloc:'phone', users:'users', settings:'sliders', backup:'db' };
-const NAV_SEC_ICON = { 'Site Expenses':'receipt', 'My Workspace':'target', 'Sales &amp; Customers':'users', 'Government Tenders':'landmark', 'Products &amp; Inventory':'box', 'Payments &amp; Accounts':'wallet', 'Field Sales':'pin', 'Tasks &amp; Operations':'check', 'Reports &amp; Analytics':'chart', 'Admin &amp; Settings':'sliders' };
+const NAV_SEC_ICON = { 'Overview':'dashboard', 'Work Centre':'bolt', 'Sales &amp; Customers':'users', 'Government Business':'landmark', 'Products &amp; Procurement':'box', 'Finance':'wallet', 'Field Operations &amp; Service':'pin', 'Reports &amp; Administration':'sliders' };
 const NavIcons = {
   item(it){ return NAV_ICON[it.id] ? Ico.svg(NAV_ICON[it.id]) : it.ic; },
   sec(s){ return NAV_SEC_ICON[s.sec] ? Ico.svg(NAV_SEC_ICON[s.sec]) : s.ic; }
@@ -22125,7 +22439,7 @@ Views.settings = function(){
     </div>
     <div class="card card-pad" style="max-width:520px;margin-top:16px;border-left:4px solid var(--red,#dc2626);">
       <h3 style="margin:0 0 4px;font-size:14px;">Project Opportunity Data</h3>
-      <div class="hint" style="margin-bottom:12px;">Currently <b>${Store.data.oppProjects.length} project record(s)</b> saved. This only removes imported project rows and the import log \u2014 your saved "My Opportunities" tracking, product keyword list, and the keyword matching library are not affected.</div>
+      <div class="hint" style="margin-bottom:12px;">${Store._oppStarted ? 'Currently <b>'+Store.data.oppProjects.length+' project record(s)</b> loaded on this device.' : 'The project list is not loaded on this device yet (it loads when you open Project Opportunities).'} This only removes imported project rows and the import log \u2014 your saved "My Opportunities" tracking, product keyword list, and the keyword matching library are not affected.</div>
       <button class="btn btn-outline" style="color:var(--red,#dc2626);border-color:var(--red,#dc2626);" onclick="SettingsView.deleteAllProjectRecords()">&#128465; Delete All Saved Project Records</button>
     </div>
   `;
@@ -22134,6 +22448,7 @@ Views.settings = function(){
 };
 const SettingsView = {
   async deleteAllProjectRecords(){
+    if(!Store._oppStarted){ UI.toast('Open Project Opportunities first so the list loads, then try again'); return; }
     const n = Store.data.oppProjects.length;
     if(!n){ UI.toast('There are no project records to delete'); return; }
     if(!confirm('Delete all '+n+' saved project record(s)? This cannot be undone. Your "My Opportunities" tracking, product keywords and keyword library will NOT be affected.')) return;
