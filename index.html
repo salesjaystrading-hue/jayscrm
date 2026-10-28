@@ -1454,7 +1454,7 @@ const Store = {
     customers: [], products: [], quotations: [], payments: [],
     followups: [], tasks: [], notes: [], users: [], settings: {}, activityLog: [],
     gemcrac: [], orders: [], complaints: [], bids: [], waTemplates: [], waHistory: [],
-    emdPbg: [], suppliers: [], purchaseOrders: [], amcRecords: [], rfqs: [], officeExpenses: [], officeWork: [], handovers: [], siteOrders: [], siteExpenses: [], sitePayments: [], siteCollections: [], siteTemplates: [], lbContacts: [],
+    emdPbg: [], suppliers: [], purchaseOrders: [], amcRecords: [], rfqs: [], officeExpenses: [], officeWork: [], handovers: [], siteOrders: [], siteExpenses: [], sitePayments: [], siteCollections: [], siteTemplates: [],
     rateTemplates: [], rateDocs: [], rateTerms: [], rateDocTemplates: [],
     oppProjects: [], oppTracking: {}, oppProducts: [], oppImportHistory: [], oppKeywordGroups: [],
     attendance: [], leaveRequests: [], bidDocs: [],
@@ -1589,33 +1589,13 @@ const Store = {
      overwrites if the server still has that version; otherwise it merges the
      teammate's newer changes with ours (see mergeStore) instead of replacing them. */
   ver: {}, baseStr: {}, forceOverwrite: false,
-  /* The two big records (Bid Documents ~10 MB, Bids ~2 MB) used to be downloaded again on EVERY page load and login - the main use of the
-     free plan's monthly data (egress) allowance. They are now kept in this browser (IndexedDB) together with their version number; a load
-     asks the server only for the tiny version number and downloads the record only when it has really changed. */
-  BIG_KEYS: ['jays_biddocs','jays_bids'],
-  _bigIdb(){ return new Promise((res,rej)=>{ try{ const q = indexedDB.open('jays_big_cache', 1); q.onupgradeneeded = ()=>q.result.createObjectStore('kv'); q.onsuccess = ()=>res(q.result); q.onerror = ()=>rej(q.error); }catch(e){ rej(e); } }); },
-  async bigGet(key){ try{ const db = await this._bigIdb(); return await new Promise(res=>{ const r = db.transaction('kv').objectStore('kv').get(key); r.onsuccess = ()=>res(r.result||null); r.onerror = ()=>res(null); }); }catch(e){ return null; } },
-  async bigSet(key, obj){ try{ const db = await this._bigIdb(); await new Promise((res,rej)=>{ const tx = db.transaction('kv','readwrite'); tx.objectStore('kv').put(obj, key); tx.oncomplete = res; tx.onerror = ()=>rej(tx.error); }); }catch(e){ console.warn('big cache write', key, e); } },
   async loadKey(key, fallback){
     try{
-      if(this.BIG_KEYS.includes(key)){
-        try{
-          const c = await this.bigGet(key);
-          if(c && c.version != null && c.value !== undefined && c.value !== null){
-            const vr = await sb.from('jays_crm_store').select('version').eq('key', key).maybeSingle();
-            if(!vr.error && vr.data && vr.data.version != null && Number(vr.data.version) === Number(c.version)){
-              this.loadFailed[key] = false; this.ver[key] = Number(c.version); try{ this.baseStr[key] = JSON.stringify(c.value); }catch(e){}
-              return c.value;                                   /* unchanged on the server: nothing downloaded */
-            }
-          }
-        }catch(e){ /* any doubt: fall through to a normal download */ }
-      }
       const { data, error } = await sb.from('jays_crm_store').select('value, version').eq('key', key).maybeSingle();
       if(error) throw error;
       this.loadFailed[key] = false;
       if(data && data.value !== null && data.value !== undefined){
-        if(data.version != null){ this.ver[key] = Number(data.version); try{ this.baseStr[key] = JSON.stringify(data.value); }catch(e){}
-          if(this.BIG_KEYS.includes(key)) this.bigSet(key, { version:Number(data.version), value:data.value }); }
+        if(data.version != null){ this.ver[key] = Number(data.version); try{ this.baseStr[key] = JSON.stringify(data.value); }catch(e){} }
         return data.value;
       }
       return fallback;
@@ -1694,7 +1674,6 @@ const Store = {
         }
         if(data && data.ok){
           this.ver[key] = Number(data.version); try{ this.baseStr[key] = JSON.stringify(mine); }catch(e){}
-          if(this.BIG_KEYS.includes(key)) this.bigSet(key, { version:Number(data.version), value:mine });   /* keep the local copy in step with what we just saved */
           if(merged){ this.applyMerged(key, mine); this.lastMerge = { key, at: Date.now() }; UI.toast('Saved. A teammate changed the same list at the same time, so both sets of changes were combined.', 6000); }
           return true;
         }
@@ -1895,23 +1874,17 @@ const Store = {
     const sleep = ms=>new Promise(r=>setTimeout(r, ms));
     let total = null;
     try{ const { data } = await sb.rpc('opp_get_count'); if(typeof data === 'number') total = data; }catch(e){ /* best-effort only */ }
-    this._oppDelCount = 0;                                   /* rows deleted since this count was taken */
-    const eff = ()=> total===null ? null : Math.max(0, total-(this._oppDelCount||0));
     const part = (resume && this._oppPartial) ? this._oppPartial : null;
     const all = part ? part.all : [];
     let afterKey = part ? part.afterKey : null, limit = part ? part.limit : 2000, okRun = 0;
     this._oppPartial = null;
-    this.oppLoad = { loaded:all.length, total:eff(), complete:false, loading:true };
+    this.oppLoad = { loaded:all.length, total, complete:false, loading:true };
     try{
       while(true){
         let page = null, lastErr = null;
         for(let attempt=0; attempt<6; attempt++){
           try{
-            while(this._oppPause) await sleep(300);          /* a delete is running: wait so deleted rows are not re-added */
-            const { data, error } = await Promise.race([
-              sb.rpc('opp_get_page_v2', { p_after_key: afterKey, p_limit: limit }),
-              new Promise((_,rej)=>setTimeout(()=>rej(new Error('Request timed out (server busy)')), 45000))   /* a request that never answers used to freeze the load */
-            ]);
+            const { data, error } = await sb.rpc('opp_get_page_v2', { p_after_key: afterKey, p_limit: limit });
             if(error) throw error;
             page = data || []; lastErr = null; okRun++;
             if(okRun>=3 && limit<2000){ limit = Math.min(2000, limit*2); okRun = 0; }
@@ -1919,30 +1892,26 @@ const Store = {
           }catch(e){
             lastErr = e; okRun = 0; limit = Math.max(250, Math.floor(limit/2));
             console.warn('opp page failed (attempt '+(attempt+1)+', next size '+limit+')', e);
-            this.oppLoad = Object.assign({}, this.oppLoad, { msg:'Server is slow - retrying (attempt '+(attempt+1)+' of 6)\u2026' });
-            if(typeof OppFinder!=='undefined') OppFinder.updateLoadBanner();
             if(attempt<5) await sleep(1000*(attempt+1));
           }
         }
         if(lastErr){ this._oppPartial = { all, afterKey, limit }; throw lastErr; }
         if(!page.length) break;
-        while(this._oppPause) await sleep(300);
-        const gone = this._oppDeleted;
-        for(const row of page){ if(gone && gone.has(row.key)) continue; all.push(row.data); }
+        for(const row of page) all.push(row.data);
         afterKey = page[page.length-1].key;
-        this.oppLoad = { loaded:all.length, total:eff(), complete:false, loading:true };
-        if(onProgress) onProgress(all, eff());
+        this.oppLoad = { loaded:all.length, total, complete:false, loading:true };
+        if(onProgress) onProgress(all, total);
       }
-      const complete = !(eff() && all.length < eff()*0.995);
-      this.oppLoad = { loaded:all.length, total:eff(), complete, loading:false };
+      const complete = !(total && all.length < total*0.995);
+      this.oppLoad = { loaded:all.length, total, complete, loading:false };
       this.loadFailed['jays_oppprojects'] = !complete;
-      if(complete) this.oppCacheSet(all, eff());
+      if(complete) this.oppCacheSet(all, total);
       else this._oppPartial = { all, afterKey, limit };
       return all;
     }catch(e){
       console.error('opp load failed', e);
       this.loadFailed['jays_oppprojects'] = true;
-      this.oppLoad = { loaded:all.length, total:eff(), complete:false, loading:false };
+      this.oppLoad = { loaded:all.length, total, complete:false, loading:false };
       return all;   /* keep what did load; Resume continues from the last row */
     }
   },
@@ -1964,7 +1933,7 @@ const Store = {
   /* Local copy of the project list (IndexedDB, this browser only). Logging in no longer downloads the whole table from Supabase every time -
      that download was the main cause of the "Disk IO budget" warning. The copy is reused for OPP_CACHE_HOURS, then refreshed in the background;
      "Reload from database" and every import / delete refresh it at once. */
-  OPP_CACHE_HOURS: 168,
+  OPP_CACHE_HOURS: 24,
   _oppIdb(){
     return new Promise((res,rej)=>{
       try{ const q = indexedDB.open('jays_opp_cache', 1); q.onupgradeneeded = ()=>q.result.createObjectStore('kv'); q.onsuccess = ()=>res(q.result); q.onerror = ()=>rej(q.error); }catch(e){ rej(e); }
@@ -1979,32 +1948,17 @@ const Store = {
   async oppCacheClear(){
     try{ const db = await this._oppIdb(); await new Promise((res)=>{ const tx = db.transaction('kv','readwrite'); tx.objectStore('kv').delete('rows'); tx.oncomplete = res; tx.onerror = res; }); }catch(e){}
   },
-  /* The project list is big (tens of MB). It is no longer downloaded at every login: a fresh copy kept on this
-     device is used silently; otherwise it is fetched only when Project Opportunity (or a full backup/export) needs it. */
-  _oppStarted:false, _oppEnsureP:null,
-  ensureOppProjects(){
-    if(this._oppStarted) return this._oppEnsureP || Promise.resolve();
-    this._oppStarted = true;
-    this.oppLoad = { loaded:0, total:null, complete:false, loading:true, msg:'Starting\u2026' };
-    this._oppEnsureP = this.loadOppProjectsBackground().catch(e=>{ console.error('opp ensure', e); this._oppStarted = false; });
-    return this._oppEnsureP;
-  },
-  async loadOppProjectsBackground(opts){
-    const cacheOnly = !!(opts && opts.cacheOnly);
+  async loadOppProjectsBackground(){
     const c = await this.oppCacheGet();
     if(c && Array.isArray(c.rows) && c.rows.length && (!c.total || c.rows.length >= c.total*0.995) && (Date.now()-c.savedAt) < this.OPP_CACHE_HOURS*3600*1000){
-      this.data.oppProjects = c.rows; this.loadFailed['jays_oppprojects'] = false; this._oppStarted = true;
-      this.oppLoad = { loaded:c.rows.length, total:c.total||c.rows.length, complete:true, loading:false };
+      this.data.oppProjects = c.rows; this.loadFailed['jays_oppprojects'] = false;
       try{ if(typeof OppMatch!=='undefined') await OppMatch.warm(); }catch(e){ console.warn('opp warm', e); }
       if(UI.currentView==='dashboard' || UI.currentView==='oppfinder') Router.render(UI.currentView);
       return;
     }
-    if(cacheOnly) return;
-    this._oppStarted = true;
     const prog = (soFar)=>{
       this.data.oppProjects = soFar;
-      if(UI.currentView==='oppfinder') OppFinder.updateLoadBanner();          /* do not redraw the page: it would wipe a preview / delete message the admin is using */
-      else if(UI.currentView==='dashboard') Router.render(UI.currentView);
+      if(UI.currentView==='dashboard' || UI.currentView==='oppfinder') Router.render(UI.currentView);
     };
     let rows = await this.loadOppProjects(prog);
     /* if it stopped part-way, keep going automatically from where it stopped (waits get longer each time) */
@@ -2015,8 +1969,7 @@ const Store = {
     }
     this.data.oppProjects = rows;
     try{ if(typeof OppMatch!=='undefined') await OppMatch.warm(); }catch(e){ console.warn('opp warm', e); }
-    if(UI.currentView==='oppfinder' && typeof OppFinder!=='undefined' && OppFinder.tab==='deldata') OppFinder.updateLoadBanner();
-    else if(UI.currentView==='dashboard' || UI.currentView==='oppfinder') Router.render(UI.currentView);
+    if(UI.currentView==='dashboard' || UI.currentView==='oppfinder') Router.render(UI.currentView);
   },
   /* Full replace - only for the rare occasions the ENTIRE collection
      needs rewriting at once (Recalculate All Scores, Delete All Project
@@ -2055,7 +2008,7 @@ const Store = {
      loadOppProjectsBackground()), so login finishes as soon as the data it
      actually needs is in. */
   async loadAll(){
-    this.loadFailed = {}; this._oppStarted = false; this._oppEnsureP = null;
+    this.loadFailed = {};
     /* _users is a deliberate placeholder, not dead code: this.loadUsers()
        below self-assigns this.data.users and its own Promise resolves to
        undefined, so it needs SOME name here to hold that slot. It used to
@@ -2075,7 +2028,7 @@ const Store = {
       attendance, leaveRequests, bidDocs, visits, requirements, travelLogs,
       lsgOfficeGeo, settings, counters, _users, dayPlans, staffTargets,
       emdPbg, suppliers, purchaseOrders, amcRecords, rfqs, officeExpenses, officeWork, handovers,
-      siteOrders, siteExpenses, sitePayments, siteCollections, siteTemplates, lbContacts
+      siteOrders, siteExpenses, sitePayments, siteCollections, siteTemplates
     ] = await Promise.all([
       this.loadCustomersDb(),
       this.loadKey('jays_products', null),
@@ -2124,7 +2077,6 @@ const Store = {
       this.loadKey('jays_sitepayments', []),
       this.loadKey('jays_sitecollections', []),
       this.loadKey('jays_sitetemplates', []),
-      this.loadKey('jays_lbcontacts', []),
     ]);
 
     /* customers now reads from public.customers (Phase 6 cutover), with
@@ -2190,7 +2142,6 @@ const Store = {
     this.data.sitePayments = sitePayments;
     this.data.siteCollections = siteCollections;
     this.data.siteTemplates = siteTemplates;
-    this.data.lbContacts = Array.isArray(lbContacts) ? lbContacts : [];
 
     await this.migrateWaTemplates();
     await this.migrateOppMachineKeywords();
@@ -2227,7 +2178,7 @@ const Store = {
 
     /* Fire-and-forget: login/boot does not wait on this (see the comment
        above loadAll() for why). */
-    if(navigator.onLine) this.loadOppProjectsBackground({cacheOnly:true});   /* uses the copy on this device if fresh; never downloads */
+    if(navigator.onLine) this.loadOppProjectsBackground();
 
     const anyFailed = Object.values(this.loadFailed).some(Boolean);
     if(anyFailed && navigator.onLine){
@@ -2849,22 +2800,19 @@ const UI = {
    NAV
 ===================================================================== */
 const NAV = [
-  {sec:'Overview', ic:'&#127968;', items:[
+  {sec:'My Workspace', ic:'&#127919;', items:[
     {id:'dashboard', ic:'&#127968;', label:'Dashboard'},
+    {id:'todayplan', ic:'&#128197;', label:"Today's Actions"},
     {id:'growth', ic:'&#128200;', label:'Growth Centre'},
     {id:'notifications', ic:'&#128276;', label:'Notifications'},
-  ]},
-  {sec:'Work Centre', ic:'&#9889;', items:[
-    {id:'actioncentre', ic:'&#9889;', label:'Action Centre'},
     {id:'mywork', ic:'&#127919;', label:'My Work'},
     {id:'tasks', ic:'&#9989;', label:'Tasks &amp; To-Do'},
+    {id:'officework', ic:'&#128203;', label:'Office Work Register'},
     {id:'followupcentre', ic:'&#9200;', label:'Follow-ups'},
+    {id:'handover', ic:'&#129309;', label:'Work Handover'},
     {id:'mycalls', ic:'&#9742;', label:'My Calling List'},
     {id:'officequeue', ic:'&#128203;', label:'Office Queue'},
-    {id:'officework', ic:'&#128203;', label:'Office Work Register'},
-    {id:'handover', ic:'&#129309;', label:'Work Handover'},
     {id:'attendance', ic:'&#128343;', label:'Attendance &amp; Leave'},
-    {id:'notes', ic:'&#128221;', label:'Notes'},
   ]},
   {sec:'Sales &amp; Customers', ic:'&#128101;', items:[
     {id:'leads', ic:'&#128101;', label:'Leads'},
@@ -2874,29 +2822,31 @@ const NAV = [
     {id:'rate_docs', ic:'&#128196;', label:'Rate / Offer PDF'},
     {id:'orders', ic:'&#128230;', label:'Orders'},
   ]},
-  {sec:'Government Business', ic:'&#127963;', items:[
+  {sec:'Government Tenders', ic:'&#127963;', items:[
     {id:'bidsearch', ic:'&#128269;', label:'GeM Bid Search'},
-    {id:'oppfinder', ic:'&#127963;', label:'Project Opportunities'},
     {id:'tenders', ic:'&#128209;', label:'Tender Centre'},
+    {id:'oppfinder', ic:'&#127963;', label:'Project Opportunities'},
     {id:'biddocs', ic:'&#128196;', label:'Bid Documents'},
     {id:'tendervault', ic:'&#128193;', label:'Tender Vault'},
     {id:'gemcrac', ic:'&#128203;', label:'GEM CRAC'},
     {id:'emdpbg', ic:'&#128274;', label:'EMD / PBG Tracker'},
   ]},
-  {sec:'Products &amp; Procurement', ic:'&#128230;', items:[
+  {sec:'Products &amp; Inventory', ic:'&#128230;', items:[
     {id:'products', ic:'&#128230;', label:'Product Master'},
     {id:'inventory', ic:'&#127974;', label:'Inventory'},
     {id:'suppliers', ic:'&#127981;', label:'Suppliers'},
-    {id:'rfq', ic:'&#128209;', label:'Supplier RFQs'},
     {id:'purchaseorders', ic:'&#128722;', label:'Purchase Orders'},
+    {id:'rfq', ic:'&#128209;', label:'Supplier RFQs'},
   ]},
-  {sec:'Finance', ic:'&#128176;', items:[
+  {sec:'Payments &amp; Accounts', ic:'&#128176;', items:[
     {id:'payments', ic:'&#128176;', label:'Payments Follow-up'},
     {id:'outstanding', ic:'&#9888;', label:'Outstanding'},
     {id:'expenses', ic:'&#129534;', label:'Office Expenses'},
+  ]},
+  {sec:'Site Expenses', ic:'&#127959;', items:[
     {id:'siteexp', ic:'&#127959;', label:'Site Expenses'},
   ]},
-  {sec:'Field Operations &amp; Service', ic:'&#128204;', items:[
+  {sec:'Field Sales', ic:'&#128204;', items:[
     {id:'fieldhome', ic:'&#128204;', label:'My Day'},
     {id:'visits', ic:'&#128100;', label:'Visits'},
     {id:'requirements', ic:'&#128221;', label:'Requirements'},
@@ -2904,12 +2854,17 @@ const NAV = [
     {id:'fieldmap', ic:'&#128506;', label:'Field Map'},
     {id:'findlocation', ic:'&#128205;', label:'Find Location'},
     {id:'officefinder', ic:'&#127970;', label:'Nearby Offices'},
+  ]},
+  {sec:'Tasks &amp; Operations', ic:'&#9989;', items:[
     {id:'complaints', ic:'&#128736;', label:'Complaints'},
     {id:'amc', ic:'&#128295;', label:'Service &amp; AMC'},
+    {id:'notes', ic:'&#128221;', label:'Notes'},
   ]},
-  {sec:'Reports &amp; Administration', ic:'&#9881;', items:[
+  {sec:'Reports &amp; Analytics', ic:'&#128200;', items:[
     {id:'reports', ic:'&#128200;', label:'Reports'},
     {id:'fieldreports', ic:'&#128202;', label:'Field Reports'},
+  ]},
+  {sec:'Admin &amp; Settings', ic:'&#9881;', items:[
     {id:'workmgmt', ic:'&#128203;', label:'Work Management', adminOnly:true},
     {id:'callalloc', ic:'&#128222;', label:'Contact Allocation', adminOnly:true},
     {id:'users', ic:'&#128272;', label:'Users &amp; Roles', adminOnly:true},
@@ -2957,7 +2912,6 @@ const PAGE_META = {
   tasks:['Tasks & To-Do','Team to-do list &amp; task tracking'],
   notes:['Notes','Quick notes & reminders'],
   reports:['Reports','Business performance'],
-  actioncentre:['Action Centre','One place to see what needs to happen next'],
   todayplan:["Today's Actions",'Follow-ups, quotations, payments, tasks and tender deadlines in one list'],
   fieldhome:['My Day','Today’s visits, plan and field activity'],
   visits:['Visits','Record and track every field visit'],
@@ -2986,7 +2940,7 @@ function assignableMenus(){
    array exists, it's the source of truth. */
 function hasMenuAccess(viewId){
   if(!Auth.session) return false;
-  if(viewId==='todayplan' || viewId==='actioncentre') return true;   /* everyone's own to-do list; items inside still respect their module access */
+  if(viewId==='todayplan') return true;   /* everyone's own to-do list; items inside still respect their module access */
   if(Auth.session.role==='Admin') return true;
   if(Access.menuHidden(viewId)) return false;
   const perms = Auth.session.permissions;
@@ -3032,7 +2986,6 @@ function navBadgeCount(id){
   if(id==='biddocs'){
     return Store.data.bidDocs.filter(d=>d.status==='Draft').length;
   }
-  if(id==='actioncentre') return (typeof ActionCentre!=='undefined') ? ActionCentre.badge() : 0;
   if(id==='mywork') return (typeof Work!=='undefined' && Work.badge) || 0;
   if(id==='emdpbg') return Alerts.collect().filter(a=>a.view==='emdpbg').length;
   if(id==='purchaseorders') return Alerts.collect().filter(a=>a.view==='purchaseorders').length;
@@ -3049,8 +3002,6 @@ const NavPrefs = {
   write(n, v){ try{ localStorage.setItem(this.key(n), JSON.stringify(v)); }catch(e){} },
   favs(){ return this.read('fav', []); },
   openGroups(){ return this.read('open', null); },
-  compact(){ try{ return localStorage.getItem('jays_nav_compact')!=='0'; }catch(e){ return true; } },
-  setCompact(on){ try{ localStorage.setItem('jays_nav_compact', on?'1':'0'); }catch(e){} },
   toggleFav(id){ const f = this.favs(), i = f.indexOf(id); if(i>=0) f.splice(i,1); else f.push(id); this.write('fav', f); },
   setOpen(sec, on){ let o = this.openGroups() || []; o = o.filter(x=>x!==sec); if(on) o.push(sec); this.write('open', o); }
 };
@@ -3064,28 +3015,22 @@ function renderNav(){
   const activeSec = navGroupOf(UI.currentView);
   if(open === null){ open = [activeSec].filter(Boolean); }
   if(activeSec && !open.includes(activeSec)){ open = open.concat(activeSec); NavPrefs.write('open', open); }
-  const compact = NavPrefs.compact();
-  const allowed = new Set(); NAV.forEach(s=>s.items.forEach(i=>{ if(navItemAllowed(i)) allowed.add(i.id); }));
-  const grpOf = it=>TabStrip.find(it.id);
-  const members = it=>{ const g = grpOf(it); return (compact && g) ? g.filter(id=>allowed.has(id)) : [it.id]; };
-  const isHidden = it=>{ const m = members(it); return m.length>1 && m[0]!==it.id; };       /* only the first page of a tab group gets a sidebar entry */
-  const rowCnt = it=>members(it).reduce((n,id)=>n+(navBadgeCount(id)||0),0);
   const row = (it, inFav)=>{
-    const cnt = rowCnt(it), label = plain(it.label), pinned = favs.includes(it.id), act = UI.currentView===it.id || (!inFav && members(it).length>1 && members(it).includes(UI.currentView));
+    const cnt = navBadgeCount(it.id), label = plain(it.label), pinned = favs.includes(it.id), act = UI.currentView===it.id;
     return `<div class="nav-item ${act?'active':''}" role="link" tabindex="0" data-view="${it.id}" title="${Util.escapeHtml(label)}"${act?' aria-current="page"':''}>
       <span class="ic" aria-hidden="true">${NavIcons.item(it)}</span><span>${it.label}</span>${cnt?`<span class="cnt" aria-label="${cnt} pending">${cnt}</span>`:''}
       <button type="button" class="nav-star ${pinned?'on':''}" data-fav="${it.id}" aria-pressed="${pinned}" aria-label="${pinned?'Remove '+Util.escapeHtml(label)+' from Favorites':'Add '+Util.escapeHtml(label)+' to Favorites'}" title="${pinned?'Unpin from Favorites':'Pin to Favorites'}">${pinned?'&#9733;':'&#9734;'}</button>
     </div>`;
   };
   let html = '';
-  const favItems = favs.map(id=>id==='todayplan'?'actioncentre':id).filter((id,i,a)=>a.indexOf(id)===i).map(id=>{ for(const sec of NAV){ const it = sec.items.find(x=>x.id===id); if(it) return it; } return null; }).filter(it=>it && navItemAllowed(it));
+  const favItems = favs.map(id=>{ for(const sec of NAV){ const it = sec.items.find(x=>x.id===id); if(it) return it; } return null; }).filter(it=>it && navItemAllowed(it));
   if(favItems.length){
     html += `<div class="nav-group nav-fav"><div class="nav-section-label">&#9733; Favorites</div>${favItems.map(it=>row(it,true)).join('')}</div>`;
   }
   NAV.forEach((sec, gi)=>{
-    const items = sec.items.filter(navItemAllowed).filter(it=>!isHidden(it));
+    const items = sec.items.filter(navItemAllowed);
     if(!items.length) return;
-    const isOpen = open.includes(sec.sec), total = items.reduce((n,it)=>n+rowCnt(it),0);
+    const isOpen = open.includes(sec.sec), total = items.reduce((n,it)=>n+(navBadgeCount(it.id)||0),0);
     html += `<div class="nav-group ${isOpen?'open':''}" data-sec="${Util.escapeHtml(sec.sec)}">
       <button type="button" class="nav-group-head" data-sec="${Util.escapeHtml(sec.sec)}" aria-expanded="${isOpen}" aria-controls="navg${gi}" title="${Util.escapeHtml(plain(sec.sec))}">
         <span class="ic" aria-hidden="true">${NavIcons.sec(sec)}</span><span class="gl">${sec.sec}</span>${(!isOpen && total)?`<span class="cnt" aria-label="${total} pending">${total}</span>`:''}<span class="chev" aria-hidden="true">&#9662;</span>
@@ -3093,13 +3038,10 @@ function renderNav(){
       <div class="nav-group-body" id="navg${gi}">${items.map(it=>row(it,false)).join('')}</div>
     </div>`;
   });
-  html += '<div class="nav-compact-row"><button type="button" class="nav-compact-btn" data-compact="'+(compact?'0':'1')+'" title="'+(compact?'Related pages are shown as tabs. Click to list every page in the menu.':'Click to group related pages into one menu entry with tabs.')+'">'+(compact?'Show all pages in menu':'Use compact menu')+'</button></div>';
   box.innerHTML = html;
   if(!box._wired){
     box._wired = true;
     box.addEventListener('click', e=>{
-      const cb = e.target.closest('.nav-compact-btn');
-      if(cb){ NavPrefs.setCompact(cb.getAttribute('data-compact')==='1'); renderNav(); return; }
       const star = e.target.closest('.nav-star');
       if(star){ e.stopPropagation(); NavPrefs.toggleFav(star.getAttribute('data-fav')); renderNav(); return; }
       const head = e.target.closest('.nav-group-head');
@@ -3155,8 +3097,6 @@ const App = {
     setTimeout(()=>{ try{ Work.runAlerts(); Work.refreshBadge(); }catch(e){} }, 1500);
     setTimeout(()=>{ try{ TenderAlerts.toastOnLogin(); }catch(e){ console.error(e); } }, 2500);
     setTimeout(()=>{ try{ BidClean.auto(); }catch(e){ console.error(e); } }, 9000);
-    setTimeout(()=>{ try{ DbMeter.bootCheck(); }catch(e){ console.error(e); } }, 12000);
-    setTimeout(()=>{ try{ BackupSched.check(); }catch(e){ console.error(e); } }, 20000);
   }
 };
 document.getElementById('loginPass').addEventListener('keydown', e=>{ if(e.key==='Enter') Auth.login(); });
@@ -17057,16 +16997,16 @@ const OppFinder = {
       const list = todo.sort((a,c)=>(c.x.s-a.x.s) || (c.fund-a.fund));
       const pg = Paginate.slice('oppboard', list);
       return fil + stats + '<div class="hint" style="margin:0 0 8px;">Matched projects that are not saved in My Opportunities beyond &ldquo;New&rdquo; and whose local body has no lead yet &mdash; strongest match first.</div>' +
-        (pg.pageItems.length ? '<div class="card"><div class="table-wrap"><table><thead><tr><th>Local body</th><th>Project</th><th>Category</th><th>Fund</th><th>Impl Code</th><th>Contact</th><th></th></tr></thead><tbody>' +
+        (pg.pageItems.length ? '<div class="card"><div class="table-wrap"><table><thead><tr><th>Local body</th><th>Project</th><th>Category</th><th>Fund</th><th>Impl Code</th><th></th></tr></thead><tbody>' +
           pg.pageItems.map(p=>'<tr><td><b>'+E(p.r['LB Name']||'')+'</b><div class="hint">'+E(p.r['District']||'')+'</div></td><td style="white-space:normal;min-width:240px;">'+E(p.r['Project Name Eng']||p.r['Project Name Mal']||'')+'<div class="hint">'+E(p.r['Project Name Mal']||'')+'</div></td>' +
-            '<td><span class="badge badge-blue">'+E(OPP_CATEGORY_NAMES[p.x.c]||p.x.c)+'</span> <b style="font-size:11px;color:'+this.BAND_COLOR[p.x.b]+';">'+OppEngine.BAND_NAME[p.x.b]+'</b></td><td>'+E(p.r['FundTotal']||'')+'</td><td>'+E(p.r['Impl Code']||'')+'</td><td>'+LbBook.cellHTML(p.r['District']||'',p.r['LB Name']||'')+'</td>' +
+            '<td><span class="badge badge-blue">'+E(OPP_CATEGORY_NAMES[p.x.c]||p.x.c)+'</span> <b style="font-size:11px;color:'+this.BAND_COLOR[p.x.b]+';">'+OppEngine.BAND_NAME[p.x.b]+'</b></td><td>'+E(p.r['FundTotal']||'')+'</td><td>'+E(p.r['Impl Code']||'')+'</td>' +
             '<td style="white-space:nowrap;"><button class="btn btn-outline btn-sm" data-k="'+E(p.key)+'" onclick="OppFinder.viewProject(this.dataset.k)">View</button> <button class="btn btn-outline btn-sm" data-k="'+E(p.key)+'" onclick="OppFinder.markContacted(this.dataset.k)">Mark contacted</button> <button class="btn btn-primary btn-sm" data-k="'+E(p.key)+'" onclick="OppFinder.convertToLead(this.dataset.k)">Convert to Lead</button></td></tr>').join('') +
           '</tbody></table></div>'+Paginate.controlsHTML('oppboard', pg, 'OppFinder.render()')+'</div>' : '<div class="card card-pad"><div class="empty-state"><div class="t">Nothing waiting</div><div class="d">Every matched project here is already worked on or its local body has a lead.</div></div></div>');
     }
     const list = d.groups.sort((a,c)=>(c.high-a.high) || (c.fund-a.fund));
     const pg = Paginate.slice('oppboard', list);
-    return fil + stats + (pg.pageItems.length ? '<div class="card"><div class="table-wrap"><table><thead><tr><th>Local body</th><th>District</th><th>Matched projects</th><th>High</th><th>Matched fund</th><th>Worked on</th><th>Lead</th><th>Contact</th><th></th></tr></thead><tbody>' +
-      pg.pageItems.map(g=>'<tr><td><b>'+E(g.lb)+'</b></td><td>'+E(g.district)+'</td><td>'+g.n+'</td><td>'+g.high+'</td><td>'+money(g.fund)+'</td><td>'+g.worked+' / '+g.n+'</td><td>'+(g.hasLead?'<span class="badge badge-green">Lead exists</span>':'<span class="badge badge-gray">No lead</span>')+'</td><td>'+LbBook.cellHTML(g.district,g.lb)+'</td>' +
+    return fil + stats + (pg.pageItems.length ? '<div class="card"><div class="table-wrap"><table><thead><tr><th>Local body</th><th>District</th><th>Matched projects</th><th>High</th><th>Matched fund</th><th>Worked on</th><th>Lead</th><th></th></tr></thead><tbody>' +
+      pg.pageItems.map(g=>'<tr><td><b>'+E(g.lb)+'</b></td><td>'+E(g.district)+'</td><td>'+g.n+'</td><td>'+g.high+'</td><td>'+money(g.fund)+'</td><td>'+g.worked+' / '+g.n+'</td><td>'+(g.hasLead?'<span class="badge badge-green">Lead exists</span>':'<span class="badge badge-gray">No lead</span>')+'</td>' +
         '<td><button class="btn btn-outline btn-sm" data-d="'+E(g.district)+'" data-l="'+E(g.lb)+'" onclick="OppFinder.viewBoardLB(this.dataset.d,this.dataset.l)">Projects</button></td></tr>').join('') +
       '</tbody></table></div>'+Paginate.controlsHTML('oppboard', pg, 'OppFinder.render()')+'</div>' : '<div class="card card-pad"><div class="empty-state"><div class="t">No matched projects</div><div class="d">Try a lower relevance or another category.</div></div></div>');
   },
@@ -17074,7 +17014,7 @@ const OppFinder = {
     const d = this.boardData(), E = Util.escapeHtml, g = d.groups.find(x=>x.district===district && x.lb===lb); if(!g) return;
     const items = d.projects.filter(p=>p.g===g).sort((a,c)=>(c.x.s-a.x.s)||(c.fund-a.fund));
     UI.openModal(lb+' \u2014 '+items.length+' matched project(s)',
-      '<div class="hint" style="margin-bottom:8px;">'+E(district)+' &middot; '+(g.hasLead?'a lead already exists for this local body':'no lead yet')+'</div>'+LbBook.lbBlock(district, lb)+'<div class="table-wrap"><table><thead><tr><th>Project</th><th>Category</th><th>Fund</th><th>Impl Code</th><th>Status</th><th></th></tr></thead><tbody>' +
+      '<div class="hint" style="margin-bottom:8px;">'+E(district)+' &middot; '+(g.hasLead?'a lead already exists for this local body':'no lead yet')+'</div><div class="table-wrap"><table><thead><tr><th>Project</th><th>Category</th><th>Fund</th><th>Impl Code</th><th>Status</th><th></th></tr></thead><tbody>' +
       items.map(p=>'<tr><td style="white-space:normal;min-width:220px;">'+E(p.r['Project Name Eng']||p.r['Project Name Mal']||'')+'</td><td><span class="badge badge-blue">'+E(OPP_CATEGORY_NAMES[p.x.c]||p.x.c)+'</span> <b style="font-size:11px;color:'+this.BAND_COLOR[p.x.b]+';">'+OppEngine.BAND_NAME[p.x.b]+'</b></td><td>'+E(p.r['FundTotal']||'')+'</td><td>'+E(p.r['Impl Code']||'')+'</td><td>'+E(p.st)+'</td>' +
         '<td style="white-space:nowrap;"><button class="btn btn-outline btn-sm" data-k="'+E(p.key)+'" onclick="OppFinder.viewProject(this.dataset.k)">View</button> <button class="btn btn-primary btn-sm" data-k="'+E(p.key)+'" onclick="OppFinder.convertToLead(this.dataset.k)">Convert to Lead</button></td></tr>').join('') + '</tbody></table></div>',
       '<button class="btn btn-outline" onclick="UI.closeModal()">Close</button>', true);
@@ -17099,7 +17039,8 @@ const OppFinder = {
   umMsg(html, bad){ const el = document.getElementById('umOut'); if(el) el.innerHTML = '<div style="padding:10px 12px;border-radius:8px;font-size:13px;'+(bad?'background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;':'background:#f0f9ff;color:#075985;border:1px solid #bae6fd;')+'">'+html+'</div>'; },
   async unmatchedPreview(){
     if(!Auth.isAdmin()){ UI.toast('Only an Admin can use this'); return; }
-    this.umMsg('Analysing the projects loaded so far&hellip; please wait.');
+    if(Store.loadFailed['jays_oppprojects']){ this.umMsg('The project list did not load completely. Use Reload from Database first, then preview again.', true); return; }
+    this.umMsg('Analysing all projects&hellip; please wait.');
     try{ await OppMatch.warm(); }catch(e){}
     const E = Util.escapeHtml, rows = Store.data.oppProjects, trk = Store.data.oppTracking || {};
     const eligible = [], prot = []; let weak = 0, matched = 0; const byD = {};
@@ -17110,10 +17051,9 @@ const OppFinder = {
       eligible.push(r); if(m.cats.length) weak++; const d = r['District']||'Unknown'; byD[d] = (byD[d]||0)+1;
     });
     this._um = { eligible, backedUp:false };
-    const L = Store.oppLoad, partialNote = (L && !L.complete) ? '<div style="margin-bottom:8px;padding:8px 10px;border-radius:8px;background:#fffbeb;color:#92400e;border:1px solid #fde68a;"><b>Only '+rows.length.toLocaleString()+(L.total?' of '+L.total.toLocaleString():'')+' projects are loaded so far.</b> This list covers those only. You can delete these now and run the preview again after the rest has loaded.</div>' : '';
     const bd = document.getElementById('umBackupBtn'), dl = document.getElementById('umDeleteBtn');
     if(bd) bd.disabled = !eligible.length; if(dl) dl.disabled = true;
-    this.umMsg(partialNote+'<b>Preview &mdash; nothing has been deleted.</b><br>Total projects loaded: <b>'+rows.length.toLocaleString()+'</b><br>' +
+    this.umMsg('<b>Preview &mdash; nothing has been deleted.</b><br>Total projects: <b>'+rows.length.toLocaleString()+'</b><br>' +
       'Matched (kept): <b>'+matched.toLocaleString()+'</b><br>Unmatched &mdash; protected in My Opportunities (kept): '+prot.length.toLocaleString()+'<br>' +
       'Will be removed: <b style="color:#b91c1c;">'+eligible.length.toLocaleString()+'</b> (of which '+weak.toLocaleString()+' have only a weak keyword match)' +
       (eligible.length ? '<br><br>By district: '+Object.entries(byD).sort((a,b)=>b[1]-a[1]).map(([d,n])=>E(d)+' '+n.toLocaleString()).join(' &middot; ') +
@@ -17151,8 +17091,6 @@ const OppFinder = {
     const rows = c.eligible.filter(r=>OppMatch.get(r).unmatched && !trk[oppKeyOf(r)]);
     const keys = rows.map(oppKeyOf), SIZE = 2000; let done = 0, err = null; const removed = new Set();
     const dl = document.getElementById('umDeleteBtn'); if(dl) dl.disabled = true;
-    Store._oppPause = true;                                   /* pause a running load while rows are being deleted */
-    try{
     for(let i=0;i<keys.length;i+=SIZE){
       const part = keys.slice(i,i+SIZE); let res;
       try{ res = await sb.rpc('opp_delete_keys', { p_keys: part }); }catch(e){ res = { error:e }; }
@@ -17161,17 +17099,10 @@ const OppFinder = {
       this.umMsg('Deleting&hellip; '+Math.min(i+SIZE,keys.length).toLocaleString()+' of '+keys.length.toLocaleString()+' processed. Please keep this page open.');
       if(i+SIZE < keys.length) await new Promise(r=>setTimeout(r, 2000 + Math.random()*2000));
     }
-    } finally { Store._oppPause = false; }
     if(removed.size){
-      /* filter IN PLACE: a load that is still running keeps appending to this same array */
-      const arr = Store.data.oppProjects; let w = 0; for(let q=0;q<arr.length;q++){ if(!removed.has(oppKeyOf(arr[q]))) arr[w++] = arr[q]; } arr.length = w;
-      Store._oppDeleted = Store._oppDeleted || new Set(); removed.forEach(k=>Store._oppDeleted.add(k));
-      if(Store._oppPartial){ const pa = Store._oppPartial.all; if(pa!==arr){ let w2=0; for(let q=0;q<pa.length;q++){ if(!removed.has(oppKeyOf(pa[q]))) pa[w2++]=pa[q]; } pa.length=w2; } }
-      Store._oppDelCount = (Store._oppDelCount||0) + removed.size;
-      if(Store.oppLoad && Store.oppLoad.total) Store.oppLoad = Object.assign({}, Store.oppLoad, { total: Math.max(0, Store.oppLoad.total - removed.size), loaded: arr.length });
+      Store.data.oppProjects = Store.data.oppProjects.filter(r=>!removed.has(oppKeyOf(r)));
       try{ OppMatch.invalidate(); }catch(e){}
-      if(!Store.oppLoad || Store.oppLoad.complete) Store.oppCacheSet(Store.data.oppProjects, Store.oppLoad && Store.oppLoad.total);   /* never cache a partial list */
-      this.updateLoadBanner();
+      Store.oppCacheSet(Store.data.oppProjects);
       try{ await Activity.log('Unmatched projects removed', done+' project(s)'); }catch(e){}
     }
     if(err){
@@ -17423,7 +17354,6 @@ const OppFinder = {
            ['Zero Expenditure',r.scoreBreakdown.zeroExpenditure||0,5]]
            .map(([label,val,max])=>'<div class="card card-pad" style="padding:7px;text-align:center;"><div class="hint">'+E(label)+'</div><b>'+val+'</b><span class="hint">/'+max+'</span></div>').join('') +
         '</div>' : '') +
-      LbBook.projectBlock(r, key) +
       '<h3 style="margin:16px 0 8px;">\u2b50 My Opportunity</h3>' +
       '<div class="form-row" style="grid-template-columns:1fr 1fr 1fr;">' +
         '<div class="field"><label>Priority</label><select id="oppPriority">'+['Low','Medium','High'].map(p=>'<option '+(tr.priority===p?'selected':'')+'>'+p+'</option>').join('')+'</select></div>' +
@@ -17612,7 +17542,7 @@ const OppFinder = {
   switcherHTML(){
     const tabs = [['dashboard','&#127968; Dashboard'],['projects','&#128269; Projects'],
       ['opportunities','&#11088; My Opportunities'],['import','&#128229; Import'],
-      ['board','&#128222; Follow-up Board'],['contacts','&#128210; Contacts'],['products','&#128230; Products'],['reports','&#128202; Reports']];
+      ['board','&#128222; Follow-up Board'],['products','&#128230; Products'],['reports','&#128202; Reports']];
     if(Auth.isAdmin()) tabs.push(['deldata','&#128465; Delete Data']);
     return '<div class="rp-switcher" style="flex-wrap:wrap;">' +
       tabs.map(([id,label])=>'<button class="'+(this.tab===id?'active':'')+'" onclick="OppFinder.setTab(\''+id+'\')">'+label+'</button>').join('') +
@@ -17625,7 +17555,6 @@ const OppFinder = {
       : this.tab==='import' ? this.renderImport()
       : this.tab==='products' ? this.renderProducts()
       : this.tab==='board' ? this.renderBoard()
-      : this.tab==='contacts' ? LbBook.render()
       : this.tab==='deldata' ? this.renderDeleteData()
       : this.renderReports();
     document.getElementById('content').innerHTML = this.switcherHTML() + this.loadBannerHTML() + body;
@@ -17633,24 +17562,21 @@ const OppFinder = {
   },
 
   /* shown whenever the project list is still loading or stopped before the end, so a partial list is never mistaken for the full one */
-  loadBannerHTML(){ return '<div id="oppLoadBanner">'+this.loadBannerInner()+'</div>'; },
-  updateLoadBanner(){ const el = document.getElementById('oppLoadBanner'); if(el) el.innerHTML = this.loadBannerInner(); },
-  loadBannerInner(){
+  loadBannerHTML(){
     const L = Store.oppLoad; if(!L || L.complete) return '';
     if(!L.loading && !Store.loadFailed['jays_oppprojects']) return '';
     const of = L.total ? ' of '+L.total.toLocaleString('en-IN') : '';
-    const tools = Auth.isAdmin() ? '<button class="btn btn-outline btn-sm" onclick="OppFinder.setTab(\'deldata\')">Remove unmatched projects</button>' : '';
-    if(L.loading) return '<div class="card card-pad" style="margin-bottom:12px;border-left:4px solid var(--blue,#2563eb);display:flex;gap:10px;align-items:center;flex-wrap:wrap;"><div style="flex:1;min-width:220px;"><b>Loading projects\u2026 '+L.loaded.toLocaleString('en-IN')+of+'</b><div class="hint">'+Util.escapeHtml(L.msg||'Counts and lists are complete only when loading finishes.')+'</div></div>'+tools+'</div>';
-    return '<div class="card card-pad" style="margin-bottom:12px;border-left:4px solid var(--amber,#d97706);display:flex;gap:10px;align-items:center;flex-wrap:wrap;"><div style="flex:1;min-width:220px;"><b>Only '+L.loaded.toLocaleString('en-IN')+of+' projects are loaded</b><div class="hint">The connection stopped part-way. Numbers and lists below are incomplete. Tap Resume to carry on from where it stopped.</div></div>'+tools+'<button class="btn btn-primary btn-sm" onclick="OppFinder.resumeLoad()">Resume loading</button></div>';
+    if(L.loading) return '<div class="card card-pad" style="margin-bottom:12px;border-left:4px solid var(--blue,#2563eb);"><b>Loading projects\u2026 '+L.loaded.toLocaleString('en-IN')+of+'</b><div class="hint">Counts and lists are complete only when loading finishes.</div></div>';
+    return '<div class="card card-pad" style="margin-bottom:12px;border-left:4px solid var(--amber,#d97706);display:flex;gap:10px;align-items:center;flex-wrap:wrap;"><div style="flex:1;min-width:220px;"><b>Only '+L.loaded.toLocaleString('en-IN')+of+' projects are loaded</b><div class="hint">The connection stopped part-way. Numbers and lists below are incomplete. Tap Resume to carry on from where it stopped.</div></div><button class="btn btn-primary btn-sm" onclick="OppFinder.resumeLoad()">Resume loading</button></div>';
   },
   async resumeLoad(){
-    const prog = soFar=>{ Store.data.oppProjects = soFar; this.updateLoadBanner(); };
+    const prog = soFar=>{ Store.data.oppProjects = soFar; if(UI.currentView==='oppfinder' && !this._resumeBusy){ this._resumeBusy = true; setTimeout(()=>{ this._resumeBusy = false; if(UI.currentView==='oppfinder' && Store.oppLoad.loading) this.render(); }, 1500); } };
     UI.toast('Resuming\u2026');
     Store.data.oppProjects = await Store.resumeOppLoad(prog);
     try{ await OppMatch.warm(); }catch(e){ console.warn(e); }
     if(Store.loadFailed['jays_oppprojects']) UI.toast('Still stopped at '+Store.data.oppProjects.length.toLocaleString('en-IN')+' - tap Resume again', 6000);
     else UI.toast('All '+Store.data.oppProjects.length.toLocaleString('en-IN')+' projects loaded');
-    if(UI.currentView==='oppfinder'){ if(this.tab==='deldata') this.updateLoadBanner(); else this.render(); }
+    if(UI.currentView==='oppfinder') this.render();
   },
   renderDashboard(){
     const rows = Store.data.oppProjects;
@@ -18020,13 +17946,12 @@ const WA_TEMPLATES = [
   { id:'intro',     label:'Introduction',        text:'Hi {name}, this is {staff} from {company}. We would like to introduce our products and services. May we share more details with you?' },
   { id:'followup',  label:'Follow-up',           text:'Hi {name}, this is {staff} from {company}, following up regarding: {topic}. Please let us know a convenient time to talk.' },
   { id:'quotation', label:'Quotation follow-up', text:'Hi {name}, this is {company}. We sent you quotation {ref} for {amount}. Could you let us know if you have any questions or would like to go ahead?' },
-  { id:'panchayat', label:'Local body / project', text:'Hello {name}, this is {staff} from {company}. We supply products related to {topic} for local bodies and would like to share our details and a quotation for {lb}. May we send them to you?' },
   { id:'payment',   label:'Payment reminder',    text:'Hi {name}, this is a reminder that invoice {ref} for {amount} is pending. Kindly clear at the earliest. - {company}' }
 ];
 const WaQuick = {
   ctx: null,
   fill(text, c){
-    const v = { name:c.name||'there', staff:(Auth.session&&(Auth.session.name||Auth.session.username))||'', company:(Store.data.settings&&Store.data.settings.companyName)||'Jays Trading and Business Solution', topic:c.topic||'your enquiry', ref:c.ref||'', amount:c.amount||'', lb:c.lb||'your local body' };
+    const v = { name:c.name||'there', staff:(Auth.session&&(Auth.session.name||Auth.session.username))||'', company:(Store.data.settings&&Store.data.settings.companyName)||'Jays Trading and Business Solution', topic:c.topic||'your enquiry', ref:c.ref||'', amount:c.amount||'' };
     return String(text).replace(/\{(\w+)\}/g,(m,k)=>v[k]!==undefined?v[k]:'').replace(/ {2,}/g,' ').replace(/\s+([.,])/g,'$1');
   },
   open(ctx){
@@ -18039,14 +17964,13 @@ const WaQuick = {
       '<div class="field"><label>Message type</label><select id="waq_tpl" onchange="WaQuick.pick()">'+tpls.map(t=>'<option value="'+t.id+'"'+(t.id===cur?' selected':'')+'>'+E(t.label)+'</option>').join('')+'</select></div>' +
       '<div class="field"><label>Message (you can edit it before sending)</label><textarea id="waq_text" rows="6"></textarea></div>' +
       '<div class="hint">WhatsApp opens with this message ready; press Send there. Opening it is recorded in the contact\u2019s history.</div>',
-      '<button class="btn btn-outline" onclick="WaQuick.cancel()">Cancel</button><button class="btn btn-wa" onclick="WaQuick.send()">&#128172; Open WhatsApp &amp; log</button>');
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-wa" onclick="WaQuick.send()">&#128172; Open WhatsApp &amp; log</button>');
     this.pick();
   },
   pick(){
     const t = this._tpls.find(x=>x.id===document.getElementById('waq_tpl').value); if(!t) return;
     document.getElementById('waq_text').value = t.raw ? t.text : this.fill(t.text, this.ctx);
   },
-  cancel(){ const c = this.ctx; this.ctx = null; if(c && typeof c.back==='function') c.back(); else UI.closeModal(); },
   async send(){
     const c = this.ctx; if(!c) return;
     const phone = document.getElementById('waq_phone').value.trim(), text = document.getElementById('waq_text').value.trim();
@@ -18054,7 +17978,7 @@ const WaQuick = {
     if(!text){ UI.toast('Message is empty'); return; }
     window.open(Util.waLink(phone, text), '_blank');   /* opened first so the browser does not block the pop-up */
     const label = (this._tpls.find(x=>x.id===document.getElementById('waq_tpl').value)||{}).label || 'WhatsApp';
-    if(typeof c.back==='function'){ try{ c.back(); }catch(e){ UI.closeModal(); } } else UI.closeModal();
+    UI.closeModal();
     try{
       if(c.customerId) await Customers.logTimeline(c.customerId, 'WhatsApp Sent', 'WhatsApp opened ('+label+'): '+text.slice(0,140), {silent:true});
       await Activity.log('WhatsApp opened', (c.name||phone)+' \u2014 '+label);
@@ -18106,7 +18030,7 @@ const TodayPlan = {
   },
   dueLabel(d, today){ if(!d) return ''; if(d<today) return '<span class="badge" style="background:var(--red,#dc2626);color:#fff;">Overdue '+Util.fmtDate(d)+'</span>'; return '<span class="badge badge-blue">Today</span>'; },
   openBid(id){ go('bidsearch'); setTimeout(()=>{ try{ BidSearch.openDetail(id); }catch(e){ console.error(e); } }, 80); },
-  openProject(key){ go('oppfinder'); setTimeout(async()=>{ try{ await Store.ensureOppProjects(); OppFinder.viewProject(key); }catch(e){ console.error(e); } }, 120); },
+  openProject(key){ go('oppfinder'); setTimeout(async()=>{ try{ if(!Store.data.oppProjects.length) await Store.loadOppProjects(); OppFinder.viewProject(key); }catch(e){ console.error(e); } }, 120); },
   render(){
     const E = Util.escapeHtml, S = this.collect(), total = S.reduce((a,s)=>a+s.rows.length,0);
     const sec = s=> '<div class="card card-pad" style="margin-bottom:14px;"><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><h3 style="margin:0;font-size:15px;">'+s.icon+' '+E(s.title)+'</h3><span class="badge '+(s.rows.length?'badge-blue':'badge-gray')+'">'+s.rows.length+'</span><span style="flex:1"></span><button class="btn btn-outline btn-sm" onclick="go(\''+s.view+'\')">Open</button></div>' +
@@ -18123,270 +18047,11 @@ const TodayPlan = {
 };
 Views.todayplan = ()=>TodayPlan.render();
 
-/* =====================================================================
-   ACTION CENTRE - one queue for everything that needs doing next.
-   Reads the existing follow-ups, tasks, quotations, payments, tender
-   deadlines, project follow-ups and field requirements. No new tables;
-   every row links back to its original record.
-===================================================================== */
-const ActionCentre = {
-  scope:'mine', tab:'today', q:'', LIMIT:100, UPCOMING_DAYS:14,
-  setScope(v){ this.scope = v; Router.render('actioncentre'); },
-  setTab(t){ this.tab = t; Router.render('actioncentre'); },
-  setQ(v){ this.q = String(v||''); this.renderBody(); },
-  addDays(iso, n){ return new Date(Date.parse(iso+'T00:00:00Z') + n*864e5).toISOString().slice(0,10); },
-  bucket(due, today){ if(!due) return 'office'; if(due<today) return 'overdue'; if(due===today) return 'today'; return due<=this.addDays(today,this.UPCOMING_DAYS) ? 'upcoming' : null; },
-  cleanTxt(v){ return String(v||'').replace(/['\\<>&"]/g,''); },
-  /* opts.names=false skips the (slow) project-name lookup, used for the sidebar badge */
-  collect(opts){
-    opts = opts||{}; const D = Store.data, today = Util.todayISO(), me = (Auth.session&&(Auth.session.name||Auth.session.username))||'';
-    const all = Auth.isAdmin() && this.scope==='all';
-    const custOwner = id=>{ const c = (D.customers||[]).find(x=>x.id===id); return c ? (c.assignedTo||'') : ''; };
-    const mine = a=> all || !a || a===me, strict = a=> all || a===me;
-    const out = [], seen = new Set();
-    const add = it=>{ const b = this.bucket(it.due, today); if(!b) return; const k = it.key; if(seen.has(k)) return; seen.add(k);
-      it.bucket = b; it.priority = (b==='overdue' || it.urgent) ? 'High' : (b==='today' ? 'Medium' : 'Low'); out.push(it); };
-    const norm = v=>String(v||'').trim().toLowerCase();
-    /* follow-ups first, so a task that repeats the same follow-up (same customer, day and wording) is not listed twice */
-    const fus = (D.followups||[]).filter(f=>f.status!=='Done' && f.date && mine(custOwner(f.customerId)));
-    const fuSig = new Set();
-    fus.forEach(f=>{ if(f.customerId) fuSig.add([f.customerId, f.date, norm(f.purpose)].join('|')); });
-    fus.forEach(f=>add({ key:'fu:'+f.id, kind:'Follow-up', main:f.customerName||'Follow-up', sub:f.purpose||'', owner:custOwner(f.customerId), due:f.date, status:f.status||'Pending',
-      view:'followupcentre', open: f.customerId ? "go('followupcentre');Customers.openDetail('"+f.customerId+"')" : "go('followupcentre')", wa:f.phone?"WaQuick.followup('"+f.id+"')":'', tel:f.phone||'' }));
-    (D.tasks||[]).filter(t=>t.status!=='Completed' && t.date && strict(t.assignedTo)).forEach(t=>{
-      if(t.customerId && fuSig.has([t.customerId, t.date, norm(t.todo)].join('|'))) return;
-      add({ key:'task:'+t.id, kind:'Task', main:t.todo||'Task', sub:t.customerName||'', owner:t.assignedTo||'', due:t.date, status:t.status||'Not Started',
-        view:'tasks', open:"go('tasks');Tasks.openForm('"+t.id+"')", wa:t.phone?"WaQuick.open({kind:'followup',name:'"+this.cleanTxt(t.customerName)+"',phone:'"+String(t.phone).replace(/[^0-9+]/g,'')+"',topic:'"+this.cleanTxt(t.todo)+"'})":'', tel:t.phone||'' }); });
-    (D.quotations||[]).filter(q=>q.status==='Sent' && mine(custOwner(q.customerId))).forEach(q=>{
-      add({ key:'quo:'+q.id, kind:'Quotation', main:q.customerName||q.id, sub:'Chase reply \u00b7 '+q.id+' \u00b7 '+Util.fmtMoney(q.total), owner:custOwner(q.customerId), due: q.date ? this.addDays(q.date,3) : today, status:'Sent',
-        view:'quotations', open:"go('quotations');Quotations.openForm('"+q.id+"')", wa:"WaQuick.quotation('"+q.id+"')", tel:q.phone||'' }); });
-    (D.payments||[]).filter(p=>p.status==='Pending' && p.followupDate && mine(custOwner(p.customerId))).forEach(p=>{
-      const pend = p.dueAmount!==undefined ? Math.max(Number(p.dueAmount)||0,0) : Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0);
-      add({ key:'pay:'+p.id, kind:'Payment', main:p.party||p.contact||'Party', sub:'Collect '+Util.fmtMoney(pend)+' \u00b7 '+(p.invoiceNumber||p.id||''), owner:custOwner(p.customerId), due:p.followupDate, status:'Pending',
-        view:'payments', open:"go('payments')", wa:p.phone?"WaQuick.payment('"+p.id+"')":'', tel:p.phone||'' }); });
-    if(hasMenuAccess('bidsearch')){
-      (D.bids||[]).forEach(b=>{ if(TENDER_ALERT_SKIP.includes(b.status)) return; const d = bidDeadlineInfo(b.endDate).days; if(d===null || d<0) return;
-        add({ key:'bid:'+b.id, kind:'Tender', main:b.title||b.bidNumber||'Bid', sub:'Bid closes \u00b7 '+(b.organisation||'')+(b.bidNumber?' \u00b7 '+b.bidNumber:''), owner:b.assignedTo||'', due:this.addDays(today,d), status:b.status||'Open', urgent:d<=1,
-          view:'bidsearch', open:"TodayPlan.openBid('"+b.id+"')" }); }); }
-    if(hasMenuAccess('oppfinder')){
-      const trk = D.oppTracking||{}, keys = Object.keys(trk).filter(k=>{ const t = trk[k]; return t && t.followup && !['Won','Lost'].includes(t.status) && (all || !t.staff || t.staff===me); });
-      const names = {}; const dueKeys = keys.filter(k=>this.bucket(trk[k].followup, today));
-      if(dueKeys.length && opts.names!==false){ const want = new Set(dueKeys); (D.oppProjects||[]).forEach(r=>{ const k = oppKeyOf(r); if(want.has(k)) names[k] = r; }); }
-      dueKeys.forEach(k=>{ const r = names[k]||{}, t = trk[k];
-        add({ key:'opp:'+k, kind:'Project', main:r['Project Name Eng']||r['Project Name Mal']||'Project follow-up', sub:(r['LB Name']||'')+(r['District']?' \u00b7 '+r['District']:'')+' \u00b7 '+(t.status||'New'), owner:t.staff||'', due:t.followup, status:t.status||'New',
-          view:'oppfinder', open:"TodayPlan.openProject('"+String(k).replace(/['\\]/g,'')+"')" }); }); }
-    if(hasMenuAccess('officequeue')){
-      (D.requirements||[]).filter(r=>r.status==='New'||r.status==='Quotation Required').forEach(r=>{
-        const cu = (D.customers||[]).find(c=>c.id===r.customerId);
-        add({ key:'req:'+r.id, kind:'Requirement', main:(cu?cu.name:'Customer')+' \u2014 '+(r.title||r.product||'Requirement'), sub:'From '+(r.createdBy||'field staff')+(r.qty?' \u00b7 Qty '+r.qty+(r.unit?' '+r.unit:''):''), owner:'Office', due:'', status:r.status,
-          view:'officequeue', open:"go('officequeue')", tel:'' }); }); }
-    const rank = {High:0, Medium:1, Low:2};
-    out.sort((a,b)=> (rank[a.priority]-rank[b.priority]) || String(a.due||'9999').localeCompare(String(b.due||'9999')) || String(a.main).localeCompare(String(b.main)));
-    return out;
-  },
-  counts(items){ const c = {today:0, overdue:0, upcoming:0, office:0}; items.forEach(i=>{ c[i.bucket]++; }); return c; },
-  badge(){ try{ const c = this.counts(this.collect({names:false})); return c.today + c.overdue; }catch(e){ return 0; } },
-  _items:null,
-  renderBody(){
-    const box = document.getElementById('acBody'); if(!box) return;
-    const E = Util.escapeHtml, items = this._items||[], q = this.q.trim().toLowerCase();
-    let rows = items.filter(i=>i.bucket===this.tab);
-    if(q) rows = rows.filter(i=>[i.main,i.sub,i.owner,i.kind,i.status].join(' ').toLowerCase().includes(q));
-    const pbadge = p=>'<span class="badge '+(p==='High'?'badge-red':p==='Medium'?'badge-amber':'badge-gray')+'">'+p+'</span>';
-    const dueCell = i=>{ if(!i.due) return '<span class="hint">Needs office action</span>'; const t = Util.todayISO();
-      return i.due<t ? '<span style="color:var(--red,#dc2626);font-weight:600;">'+Util.fmtDate(i.due)+'</span><div class="hint">overdue</div>' : (i.due===t ? '<b>Today</b>' : Util.fmtDate(i.due)); };
-    box.innerHTML = rows.length ?
-      '<div class="table-wrap"><table><thead><tr><th>Priority</th><th>Action / Record</th><th>Owner</th><th>Due</th><th>Status</th><th>Action</th></tr></thead><tbody>' +
-      rows.slice(0,this.LIMIT).map(i=>'<tr><td>'+pbadge(i.priority)+'</td>' +
-        '<td style="white-space:normal;min-width:220px;"><span class="badge badge-blue" style="margin-right:6px;">'+E(i.kind)+'</span><b>'+E(i.main)+'</b><div class="hint">'+E(i.sub)+'</div></td>' +
-        '<td>'+E(i.owner||'\u2014')+'</td><td>'+dueCell(i)+'</td><td><span class="badge badge-gray">'+E(i.status||'')+'</span></td>' +
-        '<td style="white-space:nowrap;"><button class="btn btn-primary btn-sm" onclick="'+E(i.open)+'">View</button>' +
-        (i.tel?' <a class="btn btn-outline btn-sm" style="text-decoration:none;" href="tel:'+E(String(i.tel).replace(/[^0-9+]/g,''))+'">&#9742;</a>':'') +
-        (i.wa?' <button class="btn btn-wa btn-sm" title="WhatsApp" onclick="'+E(i.wa)+'">&#128172;</button>':'') + '</td></tr>').join('') +
-      '</tbody></table></div>' + (rows.length>this.LIMIT ? '<div class="hint" style="padding:8px 12px;">Showing the first '+this.LIMIT+' of '+rows.length+'. Use search to narrow the list.</div>' : '')
-      : '<div class="empty-state"><div class="ic">&#9989;</div><div class="t">'+(q?'No matches':'All clear')+'</div><div class="d">'+(q?'Nothing in this tab matches your search.':'Nothing waiting in this tab.')+'</div></div>';
-  },
-  render(){
-    const E = Util.escapeHtml; this._items = this.collect(); const c = this.counts(this._items);
-    const tabs = [['today','Today'],['overdue','Overdue'],['upcoming','Upcoming'],['office','Waiting on Office']];
-    const qa = [['users','Add Lead',"go('customers');Customers.openForm(null)",'customers'],['check','Assign Task',"go('tasks');Tasks.openForm(null)",'tasks'],['file','Create Quotation',"go('quotations');Quotations.openForm(null)",'quotations'],
-                ['phone','Log Call',"go('mycalls')",'mycalls'],['search','Review Bid',"go('bidsearch')",'bidsearch']].filter(x=>hasMenuAccess(x[3]));
-    document.getElementById('content').innerHTML =
-      '<div class="toolbar" style="flex-wrap:wrap;"><div><b style="font-size:16px;">'+(c.today+c.overdue ? (c.today+c.overdue)+' item(s) need action now' : 'You are all caught up')+'</b><div class="hint">'+Util.fmtDate(Util.todayISO())+' \u00b7 each item appears once and opens its original record</div></div><div class="toolbar-spacer"></div>' +
-        (Auth.isAdmin() ? '<select aria-label="Whose items" onchange="ActionCentre.setScope(this.value)"><option value="mine"'+(this.scope==='mine'?' selected':'')+'>My items</option><option value="all"'+(this.scope==='all'?' selected':'')+'>Everyone</option></select>' : '') + '</div>' +
-      (qa.length ? '<div class="toolbar" style="flex-wrap:wrap;gap:8px;">'+qa.map(x=>'<button class="btn btn-outline btn-sm" onclick="'+E(x[2])+'">+ '+x[1]+'</button>').join('')+'</div>' : '') +
-      '<div class="toolbar" style="flex-wrap:wrap;">'+tabs.map(t=>'<button class="tab-btn '+(this.tab===t[0]?'active':'')+'" onclick="ActionCentre.setTab(\''+t[0]+'\')">'+t[1]+' <span class="cnt">'+c[t[0]]+'</span></button>').join('') +
-        '<div class="toolbar-spacer"></div><input type="search" id="acSearch" placeholder="Search this list\u2026" aria-label="Search this list" value="'+E(this.q)+'" oninput="ActionCentre.setQ(this.value)" style="max-width:240px;"></div>' +
-      '<div class="card" id="acBody"></div>';
-    this.renderBody();
-  }
-};
-Views.actioncentre = ()=>ActionCentre.render();
-
-/* =====================================================================
-   DASHBOARD V2 (summary dashboard) and TAB STRIP (related pages grouped
-   as tabs). The previous dashboard is kept untouched as "Detailed
-   dashboard"; the tab strip only adds navigation - every page keeps its
-   own address, data and permissions.
-===================================================================== */
-const DashboardV2 = {
-  classic:false,
-  setScope(v){ ActionCentre.scope = v; this.render(); },
-  openTab(t){ ActionCentre.tab = t; go('actioncentre'); },
-  showClassic(on){ this.classic = !!on; Router.render('dashboard'); },
-  render(){
-    const E = Util.escapeHtml, D = Store.data, today = Util.todayISO(), me = Dash.me(), admin = Auth.isAdmin();
-    const all = admin && ActionCentre.scope==='all', strict = a=> all || a===me;
-    const custOwner = id=>{ const c = (D.customers||[]).find(x=>x.id===id); return c ? (c.assignedTo||'') : ''; };
-    const mineOwner = a=> all || !a || a===me;
-    const week = ActionCentre.addDays(today,-7);
-    const items = ActionCentre.collect(), cnt = ActionCentre.counts(items);
-    const openTasks = (D.tasks||[]).filter(t=>t.status!=='Completed' && strict(t.assignedTo)).length;
-    const overdueFU = (D.followups||[]).filter(f=>f.status!=='Done' && f.date && f.date<today && mineOwner(custOwner(f.customerId))).length;
-    const openQ = (D.quotations||[]).filter(q=>QUOTATION_OPEN_STATUSES.includes(q.status)).length;
-    const canBids = hasMenuAccess('bidsearch');
-    const bidsSoon = canBids ? (D.bids||[]).filter(b=>{ const d = bidDeadlineInfo(b.endDate).days; return d!==null && d>=0 && d<=7 && !BID_TERMINAL_STATUSES.includes(b.status); }).length : 0;
-    const kpi = (cls, ic, title, val, sub, click)=>'<button type="button" class="d2-kpi" onclick="'+E(click)+'" aria-label="'+E(title+': '+val)+'"><span class="d2-kic '+cls+'">'+Ico.svg(ic)+'</span><span class="d2-kb"><span class="d2-kt">'+E(title)+'</span><span class="d2-kv">'+val+'</span><span class="d2-ks">'+E(sub)+'</span></span><span class="d2-ch" aria-hidden="true">&rsaquo;</span></button>';
-    const kpis = kpi('c-amber','check','Open Tasks',openTasks,'Assigned and in progress',"go('tasks')") +
-      kpi('c-red','clock','Overdue Follow-ups',overdueFU,'Follow-ups past due',"DashboardV2.openTab('overdue')") +
-      kpi('c-blue','file','Open Quotations',openQ,'Draft, sent or in negotiation',"go('quotations')") +
-      (canBids ? kpi('c-orange','landmark','GeM Bids Closing Soon',bidsSoon,'Deadlines in next 7 days',"go('bidsearch')") : '');
-    /* priority table: the most urgent items from the Action Centre */
-    const top = items.filter(i=>i.bucket==='today'||i.bucket==='overdue').slice(0,6);
-    const pb = p=>'<span class="badge '+(p==='High'?'badge-red':p==='Medium'?'badge-amber':'badge-gray')+'">'+p+'</span>';
-    const chip = (t,l)=>'<button type="button" class="d2-chip'+(t==='today'?' on':'')+'" onclick="DashboardV2.openTab(\''+t+'\')">'+l+' <b>'+cnt[t]+'</b></button>';
-    const prio = '<div class="card card-pad d2-card"><div class="d2-head"><h3>&#9889; Priority Action Centre</h3><div class="d2-chips">'+chip('today','Today')+chip('overdue','Overdue')+chip('upcoming','Upcoming')+chip('office','Waiting on Office')+'</div></div>' +
-      (top.length ? '<div class="table-wrap"><table><thead><tr><th>Priority</th><th>Action / Record</th><th>Owner</th><th>Due</th><th></th></tr></thead><tbody>' +
-        top.map(i=>'<tr><td>'+pb(i.priority)+'</td><td style="white-space:normal;min-width:180px;"><b>'+E(i.main)+'</b><div class="hint">'+E(i.kind+(i.sub?' · '+i.sub:''))+'</div></td><td>'+E(i.owner||'—')+'</td><td>'+(i.bucket==='overdue'?'<span style="color:var(--red,#dc2626);font-weight:600;">'+Util.fmtDate(i.due)+'</span>':'Today')+'</td><td><button class="btn btn-primary btn-sm" onclick="'+E(i.open)+'">View</button></td></tr>').join('') +
-        '</tbody></table></div><div style="margin-top:8px;"><button class="btn btn-outline btn-sm" onclick="go(\'actioncentre\')">Open Action Centre ('+(cnt.today+cnt.overdue)+' due now) &rarr;</button></div>'
-        : '<div class="empty-state" style="padding:18px;"><div class="d">Nothing due today or overdue. Nice work.</div></div>') + '</div>';
-    /* business snapshot */
-    const pays = (D.payments||[]).filter(p=>p.status==='Pending'), owe = p=>p.dueAmount!==undefined ? Math.max(Number(p.dueAmount)||0,0) : Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0);
-    const payAmt = pays.reduce((a,p)=>a+owe(p),0), payTotal = (D.payments||[]).reduce((a,p)=>a+(Number(p.amount)||0),0);
-    const payParties = new Set(pays.map(p=>p.party||p.customerId).filter(Boolean)).size;
-    const rfqOpen = (D.rfqs||[]).filter(r=>['Draft','Sent to Suppliers'].includes(r.status)).length, rfqAll = (D.rfqs||[]).length;
-    const ordAct = (D.orders||[]).filter(o=>o.status && o.status!=='Payment Received').length, ordAll = (D.orders||[]).length;
-    const canOpp = hasMenuAccess('oppfinder'), oppRows = D.oppProjects||[], oppNew = canOpp ? oppRows.filter(r=>r.score>=80 && !(D.oppTracking||{})[oppKeyOf(r)]).length : 0;
-    const pct = (a,b)=> b>0 ? Math.min(100,Math.round(a*100/b)) : 0;
-    const snap = (cls,ic,title,val,side,p,click)=>'<button type="button" class="d2-snap" onclick="'+E(click)+'"><span class="d2-kic '+cls+'">'+Ico.svg(ic)+'</span><span class="d2-sb"><span class="d2-st"><span>'+E(title)+'</span><i>'+E(side)+'</i></span><span class="d2-sv">'+val+'</span><span class="d2-bar"><span class="'+cls+'" style="width:'+p+'%"></span></span></span><span class="d2-ch" aria-hidden="true">&rsaquo;</span></button>';
-    const snapHTML = '<div class="card card-pad d2-card"><div class="d2-head"><h3>&#128200; Business Snapshot</h3></div>' +
-      snap('c-green','wallet','Payments to follow up',Util.fmtMoney(payAmt),payParties+' customer(s) · '+pct(payAmt,payTotal)+'% of billed',pct(payAmt,payTotal),"go('payments')") +
-      snap('c-violet','truck','Supplier prices pending',rfqOpen,rfqAll+' RFQ(s) in total',pct(rfqOpen,rfqAll),"go('rfq')") +
-      snap('c-orange','cart','Orders awaiting action',ordAct,ordAll+' order(s) in total',pct(ordAct,ordAll),"go('orders')") +
-      (canOpp ? (Store._oppStarted ? snap('c-blue','landmark','Project opportunities',oppNew,oppRows.length.toLocaleString('en-IN')+' loaded · 80+ match, not yet tracked',pct(oppNew,oppRows.length),"go('oppfinder')") : snap('c-blue','landmark','Project opportunities','—','Opens and loads when you visit it',0,"go('oppfinder')")) : '') + '</div>';
-    /* pipeline */
-    const cs = D.customers||[], wk = d=> d && String(d).slice(0,10)>=week;
-    const stages = [
-      ['New Lead','users','c-blue', cs.filter(c=>c.status==='New Lead'), cs.filter(c=>c.status==='New Lead' && wk(c.createdDate)).length, 'leads'],
-      ['Contacted','phone','c-green', cs.filter(c=>['First Contact','WhatsApp Sent','Follow-up Scheduled','Call Not Taken'].includes(c.status)), null, 'customers'],
-      ['Quotation','file','c-orange', (D.quotations||[]).filter(q=>QUOTATION_OPEN_STATUSES.includes(q.status)), (D.quotations||[]).filter(q=>QUOTATION_OPEN_STATUSES.includes(q.status) && wk(q.date)).length, 'quotations'],
-      ['Order in progress','cart','c-violet', (D.orders||[]).filter(o=>['In Progress','Work Order Done'].includes(o.status)), (D.orders||[]).filter(o=>['In Progress','Work Order Done'].includes(o.status) && wk(o.orderDate)).length, 'orders'],
-      ['Dispatched','truck','c-amber', (D.orders||[]).filter(o=>['Product Reached','Dispatched'].includes(o.status)), null, 'orders'],
-      ['Paid','wallet','c-green', (D.orders||[]).filter(o=>o.status==='Payment Received'), null, 'orders']];
-    const pipe = '<div class="card card-pad d2-card"><div class="d2-head"><h3>&#128260; Sales &amp; Procurement Pipeline</h3><button class="btn btn-outline btn-sm" onclick="go(\'pipeline\')">View all &rarr;</button></div><div class="d2-pipe">' +
-      stages.map(s=>'<button type="button" class="d2-stage" onclick="go(\''+s[5]+'\')"><span class="d2-kic '+s[2]+'">'+Ico.svg(s[1])+'</span><span class="d2-sn">'+s[3].length+'</span><span class="d2-sl">'+E(s[0])+'</span><span class="d2-sw">'+(s[4]!==null? '+'+s[4]+' this week' : '&nbsp;')+'</span></button>').join('') + '</div></div>';
-    /* team workload (admin) */
-    let team = '';
-    if(admin){
-      const by = {}; (D.tasks||[]).forEach(t=>{ const o = t.assignedTo; if(!o) return; const r = by[o] || (by[o] = {name:o, open:0, done:0, late:0}); if(t.status==='Completed') r.done++; else { r.open++; if(t.date && t.date<today) r.late++; } });
-      const rows = Object.values(by).sort((a,b)=>b.open-a.open).slice(0,8);
-      team = '<div class="card card-pad d2-card"><div class="d2-head"><h3>&#128101; Team Workload</h3><button class="btn btn-outline btn-sm" onclick="go(\'workmgmt\')">View all &rarr;</button></div>' +
-        (rows.length ? '<div class="table-wrap"><table><thead><tr><th>Staff</th><th>Open</th><th>Overdue</th><th>Done</th><th>Progress</th></tr></thead><tbody>' + rows.map(r=>{ const tot = r.open+r.done, p = pct(r.done,tot);
-          return '<tr><td><b>'+E(r.name)+'</b></td><td>'+r.open+'</td><td'+(r.late?' style="color:var(--red,#dc2626);font-weight:600;"':'')+'>'+r.late+'</td><td>'+r.done+'</td><td style="min-width:110px;"><span class="d2-bar"><span class="c-green" style="width:'+p+'%"></span></span><span class="hint">'+p+'%</span></td></tr>'; }).join('') + '</tbody></table></div>'
-          : '<div class="empty-state" style="padding:18px;"><div class="d">No assigned tasks yet.</div></div>') + '</div>';
-    }
-    const hour = new Date().getHours(), greet = hour<12?'Good morning':hour<17?'Good afternoon':'Good evening';
-    const qa = [['plus','New Lead',"go('customers');Customers.openForm(null)",'customers'],['check','Assign Task',"go('tasks');Tasks.openForm(null)",'tasks'],['file','New Quotation',"go('quotations');Quotations.openForm(null)",'quotations']].filter(x=>hasMenuAccess(x[3]));
-    document.getElementById('content').innerHTML =
-      '<div class="d2-wrap"><div class="card card-pad d2-hello"><div><div class="d2-greet">'+greet+', '+E(me||'there')+'</div><div class="hint">'+Util.fmtDate(today)+(all?' · showing the whole team':'')+'</div></div><div class="d2-qa">' +
-        (admin ? '<select aria-label="Whose items" onchange="DashboardV2.setScope(this.value)"><option value="mine"'+(all?'':' selected')+'>My items</option><option value="all"'+(all?' selected':'')+'>Everyone</option></select>' : '') +
-        qa.map(x=>'<button class="btn '+(x[0]==='plus'?'btn-primary':'btn-outline')+' btn-sm" onclick="'+E(x[2])+'">'+(x[0]==='plus'?'+ ':'')+x[1]+'</button>').join('') + '</div></div>' +
-      '<div class="d2-kpis">'+kpis+'</div>' +
-      '<div class="d2-grid2">'+prio+snapHTML+'</div>' +
-      '<div class="d2-grid2 d2-grid2b">'+pipe+team+'</div>' +
-      '<div style="margin:6px 0 18px;"><button class="btn btn-outline btn-sm" onclick="DashboardV2.showClassic(true)">Detailed dashboard (charts, field activity, recent activity) &rarr;</button></div></div>';
-  }
-};
-(function(){
-  const classic = Views.dashboard;
-  Views.dashboard = function(){
-    if(!DashboardV2.classic) return DashboardV2.render();
-    const rv = classic.apply(this, arguments);
-    const c = document.getElementById('content');
-    if(c) c.insertAdjacentHTML('afterbegin','<div style="margin-bottom:10px;"><button class="btn btn-outline btn-sm" onclick="DashboardV2.showClassic(false)">&larr; Back to summary dashboard</button></div>');
-    return rv;
-  };
-  const css = document.createElement('style'); css.id = 'p2css';
-  css.textContent = `
-  .d2-wrap{max-width:1400px;} .d2-wrap *{min-width:0;}
-  .d2-hello{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px;}
-  .d2-greet{font-size:20px;font-weight:800;} .d2-qa{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
-  .d2-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin-bottom:14px;}
-  .d2-kpi,.d2-snap,.d2-stage{font:inherit;text-align:left;background:var(--card,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;cursor:pointer;color:inherit;}
-  .d2-kpi{display:flex;align-items:center;gap:12px;padding:14px;} .d2-kpi:hover,.d2-snap:hover,.d2-stage:hover{border-color:var(--orange,#f26b21);}
-  .d2-kic{width:40px;height:40px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;flex:0 0 40px;background:#eef2f7;} .d2-kic svg{width:20px;height:20px;}
-  .c-amber{background:#fef3c7;color:#b45309;} .c-red{background:#fee2e2;color:#dc2626;} .c-blue{background:#dbeafe;color:#2563eb;} .c-orange{background:#ffedd5;color:#ea580c;} .c-green{background:#d1fae5;color:#059669;} .c-violet{background:#ede9fe;color:#7c3aed;}
-  .d2-kb,.d2-sb{display:flex;flex-direction:column;flex:1;} .d2-kt{font-size:13px;font-weight:700;} .d2-kv{font-size:28px;font-weight:800;line-height:1.1;} .d2-ks{font-size:12px;color:var(--text-mute,#6b7280);} .d2-ch{font-size:22px;color:var(--text-mute,#6b7280);}
-  .d2-grid2{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(0,1fr);gap:14px;margin-bottom:14px;align-items:start;} .d2-grid2b{grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);}
-  @media(max-width:1000px){.d2-grid2,.d2-grid2b{grid-template-columns:minmax(0,1fr);}}
-  .d2-head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;} .d2-head h3{margin:0;font-size:15px;}
-  .d2-chips{display:flex;gap:6px;flex-wrap:wrap;} .d2-chip{font:inherit;font-size:12px;padding:5px 10px;border-radius:999px;border:1px solid var(--border,#e5e7eb);background:#fff;cursor:pointer;} .d2-chip.on{background:var(--orange,#f26b21);color:#fff;border-color:var(--orange,#f26b21);}
-  .d2-snap{display:flex;align-items:center;gap:12px;padding:12px;width:100%;margin-bottom:8px;} .d2-st{display:flex;justify-content:space-between;gap:8px;font-size:13px;font-weight:700;} .d2-st i{font-style:normal;font-weight:400;font-size:11.5px;color:var(--text-mute,#6b7280);text-align:right;} .d2-sv{font-size:22px;font-weight:800;}
-  .d2-bar{display:block;height:6px;border-radius:999px;background:#eef2f7;overflow:hidden;margin-top:4px;} .d2-bar>span{display:block;height:100%;border-radius:999px;background:currentColor;}
-  .d2-pipe{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;} .d2-stage{display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:12px;} .d2-sn{font-size:26px;font-weight:800;} .d2-sl{font-size:12.5px;font-weight:700;} .d2-sw{font-size:11.5px;color:var(--text-mute,#6b7280);}
-  `;
-  document.head.appendChild(css);
-})();
-
-/* ---------- Tab strip: related pages shown as tabs above the page ---------- */
-const TAB_GROUPS = [
-  ['actioncentre','mywork','tasks','followupcentre','mycalls','officequeue'],
-  ['officework','handover'],
-  ['leads','customers'],
-  ['quotations','rate_docs'],
-  ['biddocs','tendervault'],
-  ['gemcrac','emdpbg'],
-  ['suppliers','rfq','purchaseorders'],
-  ['payments','outstanding'],
-  ['expenses','siteexp'],
-  ['reports','fieldreports'],
-  ['visits','requirements','travel'],
-  ['fieldmap','findlocation','officefinder'],
-  ['complaints','amc']
-];
-const TabStrip = {
-  find(id){ return TAB_GROUPS.find(g=>g.includes(id)) || null; },
-  label(id){ for(const s of NAV){ const it = s.items.find(x=>x.id===id); if(it) return it; } return null; },
-  render(){
-    let el = document.getElementById('tabStrip'); const content = document.getElementById('content'); if(!content) return;
-    if(!el){ el = document.createElement('div'); el.id = 'tabStrip'; el.setAttribute('role','tablist'); content.parentNode.insertBefore(el, content); }
-    const g = this.find(UI.currentView);
-    const its = g ? g.map(id=>this.label(id)).filter(it=>it && navItemAllowed(it)) : [];
-    if(its.length < 2){ el.style.display = 'none'; el.innerHTML = ''; return; }
-    el.style.display = '';
-    el.innerHTML = its.map(it=>{ const n = navBadgeCount(it.id), act = it.id===UI.currentView;
-      return '<button type="button" role="tab" class="ts-tab'+(act?' on':'')+'" aria-selected="'+act+'" data-view="'+it.id+'">'+it.label+(n?' <span class="ts-n">'+n+'</span>':'')+'</button>'; }).join('');
-    if(!el._wired){ el._wired = true; el.addEventListener('click', e=>{ const b = e.target.closest('.ts-tab'); if(b && b.getAttribute('data-view')!==UI.currentView) go(b.getAttribute('data-view')); }); }
-  }
-};
-(function(){
-  const css = document.createElement('style'); css.id = 'tabstripcss';
-  css.textContent = `#tabStrip{display:flex;gap:4px;flex-wrap:wrap;padding:8px 22px 0;background:var(--bg,#f6f7f9);border-bottom:1px solid var(--border,#e5e7eb);}
-  #tabStrip .ts-tab{font:inherit;font-size:13px;font-weight:700;padding:8px 14px;border:none;border-bottom:3px solid transparent;background:none;color:var(--text-mute,#6b7280);cursor:pointer;border-radius:8px 8px 0 0;}
-  #tabStrip .ts-tab:hover{color:var(--text,#111827);} #tabStrip .ts-tab.on{color:var(--orange,#f26b21);border-bottom-color:var(--orange,#f26b21);}
-    .nav-compact-row{padding:10px 12px 16px;} .nav-compact-btn{font:inherit;font-size:12px;width:100%;padding:7px 10px;border-radius:8px;border:1px dashed rgba(255,255,255,.35);background:transparent;color:inherit;opacity:.8;cursor:pointer;} .nav-compact-btn:hover{opacity:1;}
-  #tabStrip .ts-n{display:inline-block;min-width:18px;padding:0 5px;border-radius:999px;background:#e5e7eb;color:#374151;font-size:11px;text-align:center;margin-left:4px;}
-  @media(max-width:700px){#tabStrip{padding:6px 10px 0;overflow-x:auto;flex-wrap:nowrap;} #tabStrip .ts-tab{white-space:nowrap;}}`;
-  document.head.appendChild(css);
-  const _go = go;
-  go = function(view){ const rv = _go.apply(this, arguments); try{ TabStrip.render(); }catch(e){ console.error('TabStrip', e); } return rv; };
-})();
-
 /* ---------- Closed tenders you did not take part in: removed 7 days after closing, with a restore list ---------- */
 const BID_CLEAN_STATUSES = ['New','Saved','Under Review','Go / No-Go Decision','Not Participating'];
 const BidClean = {
   cfg(){ const s = Store.data.settings||{}; return { enabled: s.bidCleanEnabled!==false, days: Math.max(1, Math.min(365, Number(s.bidCleanDays)||7)) }; },
-  canRun(){ return !!(Auth.session && Auth.session.role==='Admin' && typeof Access!=='undefined' && Access.level('jays_bids')==='edit' && !Store.loadFailed['jays_bids']); },
+  canRun(){ return !!(Auth.session && (Auth.session.role==='Admin'||Auth.session.role==='Manager') && typeof Access!=='undefined' && Access.level('jays_bids')==='edit' && !Store.loadFailed['jays_bids']); },
   eligible(b, days){
     if(!b || !b.endDate || !BID_CLEAN_STATUSES.includes(b.status)) return false;
     const d = bidDeadlineInfo(b.endDate).days; if(d===null || d > -days) return false;          /* closed at least N days ago */
@@ -18450,340 +18115,7 @@ const BidClean = {
     UI.toast('Restored'); this.openPanel(); if(UI.currentView==='bidsearch') Router.render('bidsearch');
   }
 };
-
-/* =====================================================================
-   CONTACT BOOK PER LOCAL BODY, STORAGE METER, SCHEDULED BACKUP
-   lbContacts (jays_lbcontacts): [{id, district, lb, person, designation, implCode, phone,
-   whatsapp, email, notes, lastContact, createdAt, createdBy, updatedAt, updatedBy, source}]
-   One row per person at a local body; the same person is never stored twice.
-===================================================================== */
-const LB_DESIGNATIONS = ['Secretary','President','Vice President','Assistant Secretary','Standing Committee Chairperson','Ward Member','Engineer','Overseer','Accountant','Headmaster','Medical Officer','Supervisor','Other'];
-const LbBook = {
-  _idx: null, _ver: 0, _idxVer: -1, _ret: null, _editId: null, _pending: null,
-  filters: { district:'', des:'', q:'' },
-  data(){ return Array.isArray(Store.data.lbContacts) ? Store.data.lbContacts : (Store.data.lbContacts = []); },
-  dg(s){ return String(s==null?'':s).replace(/\D/g,''); },
-  lk(d,l){ return oppNorm(d||'')+'|'+oppNorm(l||''); },
-  invalidate(){ this._ver++; },
-  index(){
-    if(this._idx && this._idxVer===this._ver && this._idxN===this.data().length) return this._idx;
-    const m = new Map(); this.data().forEach(c=>{ const k = this.lk(c.district, c.lb); (m.get(k) || m.set(k,[]).get(k)).push(c); });
-    this._idx = m; this._idxVer = this._ver; this._idxN = this.data().length; return m;
-  },
-  forLB(d,l){ return this.index().get(this.lk(d,l)) || []; },
-  rank(c){ const i = LB_DESIGNATIONS.indexOf(c.designation); return i<0 ? 50 : i; },
-  sorted(list){ return list.slice().sort((a,b)=>this.rank(a)-this.rank(b) || String(a.person||'').localeCompare(String(b.person||''))); },
-  primary(list){ const wp = list.filter(c=>this.dg(c.whatsapp||c.phone).length>=10); return this.sorted(wp.length?wp:list)[0] || null; },
-  phoneOf(c){ return c.whatsapp || c.phone || ''; },
-  byId(id){ return this.data().find(c=>c.id===id); },
-  sameImpl(a,b){ return !!a && !!b && String(a).trim().toLowerCase()===String(b).trim().toLowerCase(); },
-  /* ---- small HTML pieces ---- */
-  actionsHTML(c, key){
-    const E = Util.escapeHtml, ph = this.phoneOf(c), has = this.dg(ph).length>=10;
-    return (has ? '<a class="btn btn-outline btn-sm" style="text-decoration:none;" href="tel:'+E(this.dg(ph))+'">&#9742; Call</a> <button class="btn btn-wa btn-sm" data-c="'+E(c.id)+'" data-k="'+E(key||'')+'" onclick="LbBook.wa(this.dataset.c,this.dataset.k)">&#128172; WhatsApp</button> ' : '<span class="hint">no phone</span> ') +
-      '<button class="btn btn-outline btn-sm" data-c="'+E(c.id)+'" data-k="'+E(key||'')+'" onclick="LbBook.edit(this.dataset.c,this.dataset.k)">Edit</button>';
-  },
-  rowHTML(c, key, hi){
-    const E = Util.escapeHtml;
-    return '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:7px 0;border-bottom:1px solid var(--border,#e5e7eb);"><div style="flex:1;min-width:190px;"><b>'+E(c.person||'(no name)')+'</b> '+(c.designation?'<span class="badge badge-gray">'+E(c.designation)+'</span> ':'')+(c.implCode?'<span class="badge '+(hi?'badge-blue':'badge-gray')+'">'+E(c.implCode)+'</span> ':'')+
-      '<div class="hint">'+E(this.phoneOf(c)||'no phone yet')+(c.lastContact?' · last contacted '+E(Util.fmtDate(c.lastContact)):'')+(c.notes?' · '+E(c.notes):'')+'</div></div><div style="white-space:nowrap;">'+this.actionsHTML(c,key)+'</div></div>';
-  },
-  /* contacts for the local body of a project, the one with the project's Impl Code first */
-  projectBlock(r, key){
-    const E = Util.escapeHtml, list = this.forLB(r['District'], r['LB Name']), code = r['Impl Code'];
-    const match = this.sorted(list.filter(c=>this.sameImpl(c.implCode, code))), rest = this.sorted(list.filter(c=>!this.sameImpl(c.implCode, code)));
-    const off = String(r['Impl Officer Name']||'').trim(), known = off && list.some(c=>String(c.person||'').trim().toLowerCase()===off.toLowerCase());
-    return '<div class="card card-pad" style="margin:12px 0;"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><h4 style="margin:0;flex:1;">&#128210; Contacts — '+E(r['LB Name']||'local body')+'</h4>' +
-      '<button class="btn btn-outline btn-sm" data-k="'+E(key)+'" onclick="LbBook.addForProject(this.dataset.k)">&#65291; Add contact</button></div>' +
-      (off ? '<div class="hint" style="margin:6px 0;">Implementing officer in the project data: <b>'+E(off)+'</b>'+(code?' ('+E(code)+')':'')+(known?'':' <button class="btn btn-outline btn-sm" data-k="'+E(key)+'" onclick="LbBook.saveOfficer(this.dataset.k)">Save to contact book</button>')+'</div>' : '') +
-      (list.length ? match.map(c=>this.rowHTML(c,key,true)).join('') + rest.map(c=>this.rowHTML(c,key,false)).join('') : '<div class="hint" style="margin-top:6px;">No contacts saved for this local body yet.</div>') + '</div>';
-  },
-  /* contacts for a local body (Follow-up Board popup) */
-  lbBlock(district, lb){
-    const list = this.sorted(this.forLB(district, lb));
-    return '<div class="card card-pad" style="margin-bottom:10px;"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><b style="flex:1;">&#128210; Contacts</b><button class="btn btn-outline btn-sm" data-d="'+Util.escapeHtml(district)+'" data-l="'+Util.escapeHtml(lb)+'" onclick="LbBook.addForLB(this.dataset.d,this.dataset.l)">&#65291; Add contact</button></div>' +
-      (list.length ? list.map(c=>this.rowHTML(c,'',false)).join('') : '<div class="hint">No contacts saved for this local body yet.</div>') + '</div>';
-  },
-  /* one-line cell for the Follow-up Board tables */
-  cellHTML(district, lb){
-    const E = Util.escapeHtml, list = this.forLB(district, lb), p = this.primary(list);
-    if(!p) return '<button class="btn btn-outline btn-sm" data-d="'+E(district)+'" data-l="'+E(lb)+'" onclick="LbBook.addForLB(this.dataset.d,this.dataset.l)">&#65291; Add contact</button>';
-    return '<div style="min-width:150px;"><b>'+E(p.person||'')+'</b>'+(p.designation?' <span class="hint">'+E(p.designation)+'</span>':'')+(list.length>1?' <span class="hint">+'+(list.length-1)+' more</span>':'')+'<div style="white-space:nowrap;margin-top:3px;">'+this.actionsHTML(p,'')+'</div></div>';
-  },
-  /* ---- WhatsApp ---- */
-  wa(id, key){
-    const c = this.byId(id); if(!c) return;
-    let topic = '', r = null;
-    if(key){ r = Store.data.oppProjects.find(x=>oppKeyOf(x)===key); if(r) topic = r['Project Name Eng'] || r['Project Name Mal'] || ''; }
-    const modalOpen = document.getElementById('modalOverlay').style.display==='flex';
-    WaQuick.open({ kind:'panchayat', name:c.person||c.designation||'Sir/Madam', phone:this.phoneOf(c), lb:c.lb, topic:topic||'local body projects',
-      back: (modalOpen && typeof OppFinder!=='undefined' && OppFinder._cur) ? ()=>OppFinder._cur() : null,
-      after: ()=>this.touch(id) });
-  },
-  async touch(id){ const c = this.byId(id); if(!c) return; c.lastContact = Util.todayISO(); c.updatedAt = new Date().toISOString(); await Store.save('lbContacts'); if(UI.currentView==='oppfinder' && document.getElementById('modalOverlay').style.display!=='flex') OppFinder.render(); },
-  /* ---- add / edit form ---- */
-  addForProject(key){
-    const r = Store.data.oppProjects.find(x=>oppKeyOf(x)===key); if(!r) return;
-    this._ret = ()=>{ if(OppFinder._cur) OppFinder._cur(); else UI.closeModal(); };
-    this.form(null, { district:r['District']||'', lb:r['LB Name']||'', implCode:r['Impl Code']||'' });
-  },
-  addForLB(district, lb){
-    const open = document.getElementById('modalOverlay').style.display==='flex';
-    this._ret = open ? ()=>{ if(OppFinder._cur) OppFinder._cur(); else UI.closeModal(); } : null;
-    this.form(null, { district, lb });
-  },
-  saveOfficer(key){
-    const r = Store.data.oppProjects.find(x=>oppKeyOf(x)===key); if(!r) return;
-    this._ret = ()=>{ if(OppFinder._cur) OppFinder._cur(); else UI.closeModal(); };
-    this.form(null, { district:r['District']||'', lb:r['LB Name']||'', person:r['Impl Officer Name']||'', implCode:r['Impl Code']||'', source:'project data' });
-  },
-  edit(id, key){
-    const c = this.byId(id); if(!c) return;
-    const open = document.getElementById('modalOverlay').style.display==='flex';
-    this._ret = open ? ()=>{ if(OppFinder._cur) OppFinder._cur(); else UI.closeModal(); } : null;
-    this.form(c);
-  },
-  form(c, pre){
-    const E = Util.escapeHtml, v = c || Object.assign({ district:'', lb:'', person:'', designation:'', implCode:'', phone:'', whatsapp:'', email:'', notes:'' }, pre||{});
-    this._editId = c ? c.id : null; this._pending = pre && pre.source ? pre.source : null;
-    const dl = (id, arr)=>'<datalist id="'+id+'">'+arr.map(x=>'<option value="'+E(x)+'">').join('')+'</datalist>';
-    const dists = (typeof OppFinder!=='undefined') ? OppFinder.districtOptions() : [];
-    UI.openModal(c ? 'Edit contact' : 'Add contact',
-      '<div class="form-row" style="grid-template-columns:1fr 1fr;"><div class="field"><label>District</label><input id="lc_district" list="lc_dl_d" value="'+E(v.district)+'" onchange="LbBook.refreshLBList()"></div>' +
-      '<div class="field"><label>Local body *</label><input id="lc_lb" list="lc_dl_l" value="'+E(v.lb)+'"></div></div>' +
-      '<div class="form-row" style="grid-template-columns:1fr 1fr;"><div class="field"><label>Person name</label><input id="lc_person" value="'+E(v.person)+'"></div>' +
-      '<div class="field"><label>Designation</label><input id="lc_des" list="lc_dl_s" value="'+E(v.designation)+'" placeholder="Secretary, President, ..."></div></div>' +
-      '<div class="form-row" style="grid-template-columns:1fr 1fr 1fr;"><div class="field"><label>Impl Code</label><input id="lc_impl" list="lc_dl_i" value="'+E(v.implCode)+'"></div>' +
-      '<div class="field"><label>Phone</label><input id="lc_phone" type="tel" value="'+E(v.phone)+'"></div><div class="field"><label>WhatsApp (if different)</label><input id="lc_wa" type="tel" value="'+E(v.whatsapp)+'"></div></div>' +
-      '<div class="form-row" style="grid-template-columns:1fr 1fr;"><div class="field"><label>Email</label><input id="lc_email" value="'+E(v.email)+'"></div><div class="field"><label>Notes</label><input id="lc_notes" value="'+E(v.notes)+'"></div></div>' +
-      dl('lc_dl_d', dists) + '<datalist id="lc_dl_l"></datalist>' + dl('lc_dl_s', LB_DESIGNATIONS) + dl('lc_dl_i', (typeof OppFinder!=='undefined' ? OppFinder.implOptions('', '') : []).map(x=>x[0])),
-      (c ? '<button class="btn btn-outline" style="color:#dc2626;margin-right:auto;" onclick="LbBook.remove(\''+E(c.id)+'\')">Delete</button>' : '') +
-      '<button class="btn btn-outline" onclick="LbBook.cancelForm()">Cancel</button><button class="btn btn-primary" onclick="LbBook.saveForm()">Save contact</button>');
-    this.refreshLBList();
-  },
-  refreshLBList(){
-    const el = document.getElementById('lc_dl_l'); if(!el || typeof OppFinder==='undefined') return;
-    const d = (document.getElementById('lc_district')||{}).value || '';
-    el.innerHTML = OppFinder.localBodyOptions(d).slice(0,3000).map(x=>'<option value="'+Util.escapeHtml(x)+'">').join('');
-  },
-  cancelForm(){ const r = this._ret; this._ret = null; this._editId = null; if(r) r(); else UI.closeModal(); },
-  async saveForm(){
-    const g = id=>document.getElementById(id).value.trim();
-    const rec = { district:g('lc_district'), lb:g('lc_lb'), person:g('lc_person'), designation:g('lc_des'), implCode:g('lc_impl'), phone:g('lc_phone'), whatsapp:g('lc_wa'), email:g('lc_email'), notes:g('lc_notes') };
-    if(!rec.lb){ UI.toast('Enter the local body'); return; }
-    if(!rec.person && !rec.phone && !rec.whatsapp){ UI.toast('Enter a person name or a phone number'); return; }
-    for(const f of ['phone','whatsapp']) if(rec[f] && this.dg(rec[f]).length<10){ UI.toast('The '+(f==='phone'?'phone':'WhatsApp')+' number looks too short'); return; }
-    const dup = this.findDup(rec, this._editId);
-    if(dup){ UI.toast('Already saved: '+(dup.person||dup.phone)+' at '+dup.lb); return; }
-    const list = this.data(), prev = JSON.stringify(list), now = new Date().toISOString(), me = (Auth.session&&(Auth.session.name||Auth.session.username))||'';
-    if(this._editId){ const c = this.byId(this._editId); Object.assign(c, rec, { updatedAt:now, updatedBy:me }); }
-    else list.push(Object.assign({ id:'LC'+Date.now()+Math.floor(Math.random()*1000) }, rec, { createdAt:now, createdBy:me, updatedAt:now, updatedBy:me, source:this._pending||'manual' }));
-    if(!(await Store.save('lbContacts'))){ list.length = 0; JSON.parse(prev).forEach(x=>list.push(x)); this.invalidate(); return; }
-    this.invalidate(); this._editId = null; this._pending = null;
-    try{ await Activity.log('Contact saved', (rec.person||rec.phone)+' — '+rec.lb); }catch(e){}
-    UI.toast('Contact saved');
-    const r = this._ret; this._ret = null; if(r) r(); else { UI.closeModal(); if(UI.currentView==='oppfinder') OppFinder.render(); }
-  },
-  findDup(rec, exceptId){
-    const ph = this.dg(rec.phone).slice(-10), nm = String(rec.person||'').trim().toLowerCase(), ds = String(rec.designation||'').trim().toLowerCase();
-    return this.forLB(rec.district, rec.lb).find(c=>c.id!==exceptId && ((ph.length===10 && this.dg(c.phone).slice(-10)===ph) || (nm && String(c.person||'').trim().toLowerCase()===nm && String(c.designation||'').trim().toLowerCase()===ds))) || null;
-  },
-  async remove(id){
-    const c = this.byId(id); if(!c) return;
-    if(!confirm('Delete the contact '+(c.person||c.phone||'')+' ('+c.lb+')?')) return;
-    const list = this.data(), prev = JSON.stringify(list); const i = list.indexOf(c); list.splice(i,1);
-    if(!(await Store.save('lbContacts'))){ list.length = 0; JSON.parse(prev).forEach(x=>list.push(x)); this.invalidate(); return; }
-    this.invalidate(); try{ await Activity.log('Contact deleted', (c.person||c.phone||'')+' — '+c.lb); }catch(e){}
-    UI.toast('Deleted'); const r = this._ret; this._ret = null; if(r) r(); else { UI.closeModal(); if(UI.currentView==='oppfinder') OppFinder.render(); }
-  },
-  /* ---- Contacts tab ---- */
-  readFilters(){ const g = id=>{ const e = document.getElementById(id); return e ? e.value : null; }; const d = g('lbcDistrict'); if(d!==null) this.filters = { district:d, des:g('lbcDes')||'', q:g('lbcQ')||'' }; },
-  setFilter(){ this.readFilters(); Paginate.get('lbcontacts').page = 1; OppFinder.render(); },
-  filtered(){
-    const f = this.filters, q = oppNormMl(f.q||'');
-    return this.sorted(this.data().filter(c=>(!f.district || c.district===f.district) && (!f.des || c.designation===f.des) &&
-      (!q || oppNormMl([c.lb,c.district,c.person,c.designation,c.implCode,c.phone,c.whatsapp,c.notes].join(' ')).indexOf(q)>=0)))
-      .sort((a,b)=>String(a.district||'').localeCompare(String(b.district||'')) || String(a.lb||'').localeCompare(String(b.lb||'')) || this.rank(a)-this.rank(b));
-  },
-  render(){
-    this.readFilters();
-    const E = Util.escapeHtml, all = this.data(), list = this.filtered(), f = this.filters;
-    const dists = [...new Set(all.map(c=>c.district).filter(Boolean))].sort();
-    const withPhone = all.filter(c=>this.dg(this.phoneOf(c)).length>=10).length, lbs = new Set(all.map(c=>this.lk(c.district,c.lb))).size;
-    const pg = Paginate.slice('lbcontacts', list);
-    return '<div class="card card-pad" style="margin-bottom:12px;"><div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">' +
-      '<div class="field" style="margin:0;"><label>District</label><select id="lbcDistrict" onchange="LbBook.setFilter()"><option value="">All</option>'+dists.map(d=>'<option '+(f.district===d?'selected':'')+'>'+E(d)+'</option>').join('')+'</select></div>' +
-      '<div class="field" style="margin:0;"><label>Designation</label><select id="lbcDes" onchange="LbBook.setFilter()"><option value="">All</option>'+[...new Set(all.map(c=>c.designation).filter(Boolean))].sort().map(d=>'<option '+(f.des===d?'selected':'')+'>'+E(d)+'</option>').join('')+'</select></div>' +
-      '<div class="field" style="margin:0;min-width:200px;"><label>Search</label><input id="lbcQ" value="'+E(f.q||'')+'" placeholder="name, local body, phone, Impl Code" onchange="LbBook.setFilter()"></div>' +
-      '<div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;"><button class="btn btn-primary btn-sm" onclick="LbBook.addForLB(\'\',\'\')">&#65291; Add contact</button><button class="btn btn-outline btn-sm" onclick="LbBook.pasteForm()">&#128203; Paste list</button><button class="btn btn-outline btn-sm" onclick="LbBook.seedPreview()">Add officers from project data</button><button class="btn btn-outline btn-sm" onclick="LbBook.exportCSV()">&#128228; Export</button></div></div></div>' +
-      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:12px;">' +
-      [['Contacts',all.length.toLocaleString()],['Local bodies covered',lbs.toLocaleString()],['With a phone number',withPhone.toLocaleString()]].map(([l,v])=>'<div class="card card-pad" style="padding:10px;"><div class="hint">'+l+'</div><div style="font-size:20px;font-weight:800;">'+v+'</div></div>').join('') + '</div>' +
-      (pg.pageItems.length ? '<div class="card"><div class="table-wrap"><table><thead><tr><th>Local body</th><th>Person</th><th>Designation</th><th>Impl Code</th><th>Phone</th><th>Last contacted</th><th></th></tr></thead><tbody>' +
-        pg.pageItems.map(c=>'<tr><td><b>'+E(c.lb||'')+'</b><div class="hint">'+E(c.district||'')+'</div></td><td>'+E(c.person||'')+'</td><td>'+E(c.designation||'')+'</td><td>'+E(c.implCode||'')+'</td><td>'+E(this.phoneOf(c))+'</td><td>'+(c.lastContact?E(Util.fmtDate(c.lastContact)):'<span class="hint">never</span>')+'</td><td style="white-space:nowrap;">'+this.actionsHTML(c,'')+'</td></tr>').join('') +
-        '</tbody></table></div>'+Paginate.controlsHTML('lbcontacts', pg, 'OppFinder.render()')+'</div>'
-        : '<div class="card card-pad"><div class="empty-state"><div class="t">'+(all.length?'No contacts match':'No contacts yet')+'</div><div class="d">'+(all.length?'Change the filters.':'Add a contact, paste a list, or use &ldquo;Add officers from project data&rdquo; to start from the officer names already in your projects.')+'</div></div></div>');
-  },
-  /* ---- paste a list ---- */
-  pasteForm(){
-    UI.openModal('Paste contact list',
-      '<div class="hint" style="margin-bottom:8px;">One person per line, columns separated by a Tab (copy straight from Excel): <b>District, Local body, Person, Designation, Impl Code, Phone, WhatsApp, Email</b>. Only Local body and a person or phone are required. A header row is skipped. Contacts already saved (same phone, or same name and designation at the same local body) are skipped.</div>' +
-      '<textarea id="lc_paste" rows="10" style="width:100%;font-family:monospace;font-size:12px;" placeholder="Malappuram&#9;Ozhur&#9;Name&#9;Secretary&#9;SEC (GP)&#9;9876543210"></textarea><div id="lc_pasteMsg" class="hint" style="margin-top:6px;"></div>',
-      '<button class="btn btn-outline" onclick="UI.closeModal();OppFinder.render()">Cancel</button><button class="btn btn-primary" onclick="LbBook.pasteRun()">Import</button>');
-  },
-  parsePaste(text){
-    const rows = [];
-    String(text||'').split(/\r?\n/).forEach(line=>{
-      if(!line.trim()) return;
-      const cells = (line.indexOf('\t')>=0 ? line.split('\t') : line.split(',')).map(x=>x.trim());
-      if(/^district$/i.test(cells[0]) || /^local ?body$/i.test(cells[1]||'')) return;
-      const o = { district:cells[0]||'', lb:cells[1]||'', person:cells[2]||'', designation:cells[3]||'', implCode:cells[4]||'', phone:cells[5]||'', whatsapp:cells[6]||'', email:cells[7]||'', notes:'' };
-      rows.push(o);
-    });
-    return rows;
-  },
-  async addMany(rows, source){
-    const list = this.data(), prev = JSON.stringify(list), now = new Date().toISOString(), me = (Auth.session&&(Auth.session.name||Auth.session.username))||'';
-    let added = 0, skipped = 0, bad = 0;
-    rows.forEach(r=>{
-      if(!r.lb || (!r.person && !r.phone && !r.whatsapp)){ bad++; return; }
-      if(this.findDup(r, null)){ skipped++; return; }
-      list.push(Object.assign({ id:'LC'+Date.now()+'_'+added+Math.floor(Math.random()*1000) }, r, { createdAt:now, createdBy:me, updatedAt:now, updatedBy:me, source:source||'import' })); added++;
-      this.invalidate();
-    });
-    if(!added) return { added, skipped, bad, ok:true };
-    if(!(await Store.save('lbContacts'))){ list.length = 0; JSON.parse(prev).forEach(x=>list.push(x)); this.invalidate(); return { added:0, skipped, bad, ok:false }; }
-    try{ await Activity.log('Contacts imported', added+' contact(s) ('+(source||'import')+')'); }catch(e){}
-    return { added, skipped, bad, ok:true };
-  },
-  async pasteRun(){
-    const rows = this.parsePaste((document.getElementById('lc_paste')||{}).value);
-    if(!rows.length){ const m = document.getElementById('lc_pasteMsg'); if(m) m.textContent = 'Nothing to import.'; return; }
-    const r = await this.addMany(rows, 'pasted list');
-    UI.toast(r.ok ? 'Imported '+r.added+' contact(s)'+(r.skipped?', skipped '+r.skipped+' already saved':'')+(r.bad?', '+r.bad+' row(s) missing local body or person/phone':'') : 'Not saved - nothing was imported', 7000);
-    UI.closeModal(); OppFinder.render();
-  },
-  /* ---- start from the officer names already in the project data ---- */
-  async seedCandidates(onlyMatched){
-    if(onlyMatched){ try{ await OppMatch.warm(); }catch(e){} }
-    const seen = new Set(), out = [];
-    (Store.data.oppProjects||[]).forEach(r=>{
-      const person = String(r['Impl Officer Name']||'').trim(), lb = String(r['LB Name']||'').trim(); if(!person || !lb) return;
-      if(onlyMatched && OppMatch.get(r).unmatched) return;
-      const k = this.lk(r['District'],lb)+'|'+person.toLowerCase()+'|'+String(r['Impl Code']||'').trim().toLowerCase(); if(seen.has(k)) return; seen.add(k);
-      if(this.forLB(r['District'], lb).some(c=>String(c.person||'').trim().toLowerCase()===person.toLowerCase() && this.sameImpl(c.implCode, r['Impl Code']))) return;
-      out.push({ district:r['District']||'', lb, person, designation:'', implCode:String(r['Impl Code']||'').trim(), phone:'', whatsapp:'', email:'', notes:'' });
-    });
-    return out;
-  },
-  async seedPreview(){
-    UI.toast('Reading the project data…');
-    const only = true, c = await this.seedCandidates(only); this._seed = c;
-    const L = Store.oppLoad, part = (L && !L.complete) ? '<div style="margin-bottom:8px;padding:8px 10px;border-radius:8px;background:#fffbeb;color:#92400e;border:1px solid #fde68a;">Only '+Store.data.oppProjects.length.toLocaleString()+' projects are loaded so far, so this covers those only. You can run it again later.</div>' : '';
-    UI.openModal('Add officers from project data',
-      part + '<p style="margin:0 0 8px;">Found <b>'+c.length.toLocaleString()+'</b> implementing officer(s) at local bodies whose projects match a JAYS category, who are not in the contact book yet.</p>' +
-      '<p class="hint" style="margin:0 0 8px;">Each is saved with the local body, name and Impl Code from the project data. There is no phone number in that data, so add the numbers afterwards (Edit, or Paste list). Nothing already saved is changed.</p>' +
-      (c.length ? '<div class="table-wrap" style="max-height:200px;overflow:auto;"><table><thead><tr><th>Local body</th><th>Officer</th><th>Impl Code</th></tr></thead><tbody>'+c.slice(0,10).map(x=>'<tr><td>'+Util.escapeHtml(x.lb)+'</td><td>'+Util.escapeHtml(x.person)+'</td><td>'+Util.escapeHtml(x.implCode)+'</td></tr>').join('')+'</tbody></table></div><div class="hint">Showing the first 10.</div>' : ''),
-      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button>' + (c.length ? '<button class="btn btn-primary" onclick="LbBook.seedRun()">Add '+c.length.toLocaleString()+' contact(s)</button>' : ''));
-  },
-  async seedRun(){
-    const c = this._seed || []; if(!c.length) return; this._seed = null;
-    const r = await this.addMany(c, 'project data');
-    UI.toast(r.ok ? 'Added '+r.added+' officer(s) to the contact book' : 'Not saved - nothing was added', 6000);
-    UI.closeModal(); OppFinder.render();
-  },
-  exportCSV(){
-    const q = v => { const t = String(v==null?'':v); return /[",\n\r]/.test(t) ? '"'+t.replace(/"/g,'""')+'"' : t; };
-    const head = ['District','Local body','Person','Designation','Impl Code','Phone','WhatsApp','Email','Notes','Last contacted'];
-    const lines = [head.join(',')].concat(this.filtered().map(c=>[c.district,c.lb,c.person,c.designation,c.implCode,c.phone,c.whatsapp,c.email,c.notes,c.lastContact].map(q).join(',')));
-    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['﻿'+lines.join('\n')], {type:'text/csv;charset=utf-8'}));
-    a.download = 'local-body-contacts-'+Util.todayISO()+'.csv'; document.body.appendChild(a); a.click(); a.remove();
-  }
-};
-
-/* ---------- Storage meter (Settings): database size against the plan limit ---------- */
-const DB_METER_SQL = `create or replace function public.app_db_size() returns jsonb
-language plpgsql security definer set search_path = public as $$
-begin
-  if not public.is_admin() then raise exception 'Admins only'; end if;
-  return jsonb_build_object(
-    'db_bytes', pg_database_size(current_database()),
-    'tables', (select coalesce(jsonb_agg(jsonb_build_object('name', t.relname, 'bytes', t.b, 'rows', t.rows) order by t.b desc), '[]'::jsonb)
-               from (select c.relname, pg_total_relation_size(c.oid) b, c.reltuples::bigint rows
-                     from pg_class c where c.relnamespace = 'public'::regnamespace and c.relkind = 'r'
-                     order by pg_total_relation_size(c.oid) desc limit 8) t));
-end $$;
-revoke all on function public.app_db_size() from public, anon;
-grant execute on function public.app_db_size() to authenticated;`;
-const DbMeter = {
-  limitMb(){ return Math.max(50, Number((Store.data.settings||{}).dbLimitMb)||500); },
-  async fetch(){ const { data, error } = await sb.rpc('app_db_size'); if(error) throw error; return data; },
-  mb(b){ return (Number(b)||0)/1048576; },
-  level(pct){ return pct>=90 ? 'red' : pct>=80 ? 'amber' : 'ok'; },
-  async mount(){
-    const box = document.getElementById('dbMeterCard'); if(!box) return;
-    box.innerHTML = '<div class="card card-pad" style="max-width:520px;margin-top:16px;"><h3 style="margin:0 0 4px;font-size:14px;">Storage</h3><div class="hint">Checking the database size…</div></div>';
-    try{ const d = await this.fetch(); box.innerHTML = this.html(d); }
-    catch(e){
-      const msg = String((e && e.message) || e);
-      box.innerHTML = '<div class="card card-pad" style="max-width:520px;margin-top:16px;"><h3 style="margin:0 0 4px;font-size:14px;">Storage</h3>' +
-        (/could not find|does not exist|schema cache/i.test(msg)
-          ? '<div class="hint" style="margin-bottom:8px;">The storage meter needs a one-time setup. Open Supabase &rarr; SQL Editor, paste the text below, click Run, then reload this page.</div><textarea readonly rows="9" style="width:100%;font-family:monospace;font-size:11px;" onclick="this.select()">'+Util.escapeHtml(DB_METER_SQL)+'</textarea>'
-          : '<div class="hint" style="color:#b91c1c;">Could not read the database size: '+Util.escapeHtml(msg)+'</div>') + '</div>';
-    }
-  },
-  html(d){
-    const E = Util.escapeHtml, used = this.mb(d.db_bytes), lim = this.limitMb(), pct = Math.min(100, Math.round(used/lim*100)), lv = this.level(pct);
-    const col = lv==='red' ? '#dc2626' : lv==='amber' ? '#d97706' : '#16a34a';
-    return '<div class="card card-pad" style="max-width:520px;margin-top:16px;border-left:4px solid '+col+';"><h3 style="margin:0 0 4px;font-size:14px;">Storage</h3>' +
-      '<div style="font-size:22px;font-weight:800;">'+used.toFixed(0)+' MB <span class="hint" style="font-size:13px;font-weight:400;">of '+lim+' MB ('+pct+'%)</span></div>' +
-      '<div style="background:var(--border,#e5e7eb);border-radius:6px;height:10px;overflow:hidden;margin:8px 0;"><div style="width:'+pct+'%;height:100%;background:'+col+';"></div></div>' +
-      (lv!=='ok' ? '<div style="padding:8px 10px;border-radius:8px;background:'+(lv==='red'?'#fef2f2':'#fffbeb')+';margin-bottom:8px;font-size:13px;"><b>'+(lv==='red'?'Almost full.':'Getting full.')+'</b> Free space by removing data you no longer need (buttons below). Deleting rows does not shrink the file by itself — run <code>VACUUM FULL table_name;</code> afterwards.</div>' : '') +
-      '<div class="hint" style="margin-bottom:4px;">Largest tables</div><table style="font-size:12.5px;width:100%;"><tbody>'+(d.tables||[]).slice(0,6).map(t=>'<tr><td>'+E(t.name)+'</td><td style="text-align:right;">'+this.mb(t.bytes).toFixed(1)+' MB</td><td style="text-align:right;" class="hint">'+(Number(t.rows)>0?Number(t.rows).toLocaleString()+' rows':'')+'</td></tr>').join('')+'</tbody></table>' +
-      '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;"><button class="btn btn-outline btn-sm" onclick="DbMeter.openCleanup()">Remove unmatched projects</button>' + (BidClean.canRun() ? '<button class="btn btn-outline btn-sm" onclick="BidClean.openPanel()">Closed tender clean-up</button>' : '') + '<button class="btn btn-outline btn-sm" onclick="DbMeter.mount()">Refresh</button></div>' +
-      '<div class="field" style="margin:12px 0 0;max-width:220px;"><label>Plan limit (MB)</label><input id="dbm_limit" type="number" min="50" value="'+lim+'" onchange="DbMeter.saveLimit()"></div></div>';
-  },
-  openCleanup(){ go('oppfinder'); setTimeout(()=>{ try{ OppFinder.setTab('deldata'); }catch(e){} }, 150); },
-  async saveLimit(){ const v = Number(document.getElementById('dbm_limit').value); if(!(v>=50)) return; Store.data.settings.dbLimitMb = v; if(await Store.save('settings')) this.mount(); },
-  /* one quiet check per sign-in for Admins: warn at 80% */
-  async bootCheck(){
-    if(this._checked || !Auth.session || Auth.session.role!=='Admin') return; this._checked = true;
-    try{ const d = await this.fetch(), used = this.mb(d.db_bytes), pct = Math.round(used/this.limitMb()*100);
-      if(pct>=80) UI.toast('⚠ Storage is '+pct+'% full ('+used.toFixed(0)+' of '+this.limitMb()+' MB). See Settings → Storage.', 9000); }catch(e){ /* meter not installed yet: stay silent */ }
-  }
-};
-
-/* ---------- Scheduled backup: when it is due, an Admin signing in gets a backup file downloaded ---------- */
-const BackupSched = {
-  cfg(){ const s = Store.data.settings||{}; return { enabled: s.backupAutoEnabled!==false, days: Math.max(1, Math.min(90, Number(s.backupEveryDays)||7)) }; },
-  ageDays(){ const l = (Store.data.settings||{}).lastBackupAt; if(!l) return Infinity; return (Date.now()-new Date(l).getTime())/86400000; },
-  due(){ const c = this.cfg(); return c.enabled && this.ageDays() >= c.days; },
-  async run(){
-    const ok = await Backup.downloadJSON({ light:true });
-    if(ok===false) return false;
-    Store.data.settings.lastBackupAt = new Date().toISOString();
-    await Store.save('settings');
-    try{ await Activity.log('Scheduled backup', 'Backup file downloaded (without project opportunity rows)'); }catch(e){}
-    return true;
-  },
-  async check(){
-    if(this._ran || !Auth.session || Auth.session.role!=='Admin') return; this._ran = true;
-    if(!this.due()) return;
-    try{ if(await this.run()) UI.toast('✅ Scheduled backup downloaded — keep the file somewhere safe (Google Drive, a pen drive).', 10000); }
-    catch(e){ console.error('scheduled backup', e); UI.toast('Backup is due but could not be created. Open Backup and download it manually.', 9000); }
-  },
-  mount(){
-    const box = document.getElementById('backupSchedCard'); if(!box) return;
-    const c = this.cfg(), last = (Store.data.settings||{}).lastBackupAt, age = this.ageDays();
-    box.innerHTML = '<div class="card card-pad" style="max-width:520px;margin-top:16px;"><h3 style="margin:0 0 4px;font-size:14px;">Scheduled backup</h3>' +
-      '<div class="hint" style="margin-bottom:10px;">When a backup is due, it is downloaded to the computer of the first Admin who opens the CRM. It cannot run while nobody has the CRM open. The file holds every module including contacts and tenders, but <b>not</b> the project opportunity rows (too large &mdash; re-import them from your source files).</div>' +
-      '<div class="form-row" style="grid-template-columns:1fr 1fr;"><div class="field"><label><input type="checkbox" id="bs_en" '+(c.enabled?'checked':'')+'> Download automatically</label></div><div class="field"><label>Every (days)</label><input type="number" id="bs_days" min="1" max="90" value="'+c.days+'"></div></div>' +
-      '<div style="font-size:13px;margin:6px 0;">Last backup: <b>'+(last?Util.fmtDateTime(last)+' ('+Math.floor(age)+' day(s) ago)':'never')+'</b>'+(this.due()?' <span class="badge" style="background:#d97706;color:#fff;">due</span>':'')+'</div>' +
-      '<div style="display:flex;gap:6px;flex-wrap:wrap;"><button class="btn btn-outline btn-sm" onclick="BackupSched.save()">Save</button><button class="btn btn-primary btn-sm" onclick="BackupSched.now()">Back up now</button></div></div>';
-  },
-  async save(){ const s = Store.data.settings; s.backupAutoEnabled = document.getElementById('bs_en').checked; s.backupEveryDays = Math.max(1, Math.min(90, Number(document.getElementById('bs_days').value)||7)); if(await Store.save('settings')){ UI.toast('Saved'); this.mount(); } },
-  async now(){ try{ if(await this.run()){ UI.toast('Backup downloaded'); this.mount(); } }catch(e){ console.error(e); UI.toast('Backup failed: '+(e.message||e)); } }
-};
-Views.oppfinder = ()=>{ Store.ensureOppProjects(); return OppFinder.seedKeywordGroups().then(()=>OppFinder.prepare()).then(()=>OppFinder.render()); };
+Views.oppfinder = ()=>OppFinder.seedKeywordGroups().then(()=>OppFinder.prepare()).then(()=>OppFinder.render());
 
 const Reports = {
   render(){
@@ -18995,30 +18327,26 @@ const Backup = {
       emdPbg: Store.data.emdPbg, suppliers: Store.data.suppliers, purchaseOrders: Store.data.purchaseOrders, amcRecords: Store.data.amcRecords,
       rfqs: Store.data.rfqs, officeExpenses: Store.data.officeExpenses,
       officeWork: Store.data.officeWork, handovers: Store.data.handovers,
-      siteOrders: Store.data.siteOrders, siteExpenses: Store.data.siteExpenses, sitePayments: Store.data.sitePayments, siteCollections: Store.data.siteCollections, siteTemplates: Store.data.siteTemplates, lbContacts: Store.data.lbContacts
+      siteOrders: Store.data.siteOrders, siteExpenses: Store.data.siteExpenses, sitePayments: Store.data.sitePayments, siteCollections: Store.data.siteCollections, siteTemplates: Store.data.siteTemplates
     };
   },
-  async downloadJSON(opts){
-    const light = !!(opts && opts.light);
+  async downloadJSON(){
     // Full-database export (every customer, quotation, payment...) -
     // restricted to Admins, same as restore/import below.
     if(!Auth.isAdmin()){ UI.toast("You don't have permission to export the full database"); return; }
-    if(!light && !(await this.needOpp())) return;
     const snap = this.snapshot();
-    if(light){ delete snap.oppProjects; snap._note = 'Weekly backup: project opportunity rows are not included (too large). Re-import them from the source files.'; }
     /* Tender Centre data lives in its own database tables, not in Store,
        so it is fetched separately. If that fails the rest of the backup
        is still produced, but the admin is told it's incomplete. */
     try{ snap.tenderIntel = await TenderCentre.exportAll(); }
     catch(e){ console.error('Tender backup failed', e); UI.toast('Warning: tender data could not be included in this backup ('+(e.message||e)+')', 6000); }
-    const data = light ? JSON.stringify(snap) : JSON.stringify(snap, null, 2);
+    const data = JSON.stringify(snap, null, 2);
     const blob = new Blob([data], {type:'application/json'});
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = (light ? 'jays-crm-weekly-backup-' : 'jays-crm-backup-')+Util.todayISO()+'.json';
+    a.href = url; a.download = 'jays-crm-backup-'+Util.todayISO()+'.json';
     document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(()=>URL.revokeObjectURL(url), 60000);
-    return true;
+    URL.revokeObjectURL(url);
   },
   async googleDriveBackup(){
     if(!Auth.isAdmin()){ UI.toast("You don't have permission to back up the full database"); return; }
@@ -19039,7 +18367,7 @@ const Backup = {
       const data = JSON.parse(text);
       try{ await sb.rpc('store_snapshot', { p_reason:'before file restore' }); }catch(e){ console.warn('pre-restore snapshot failed', e); }   // safety copy of the current data on the server
       Store.forceOverwrite = true;
-      ['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo','dayPlans','staffTargets','emdPbg','suppliers','purchaseOrders','amcRecords','rfqs','officeExpenses','officeWork','handovers','siteOrders','siteExpenses','sitePayments','siteCollections','siteTemplates','lbContacts'].forEach(k=>{
+      ['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo','dayPlans','staffTargets','emdPbg','suppliers','purchaseOrders','amcRecords','rfqs','officeExpenses','officeWork','handovers','siteOrders','siteExpenses','sitePayments','siteCollections','siteTemplates'].forEach(k=>{
         if(data[k]!==undefined) Store.data[k] = data[k];
       });
       // oppProjects lives in its own indexed table now, not the
@@ -19047,7 +18375,7 @@ const Backup = {
       // the dedicated full-replace path so opp_projects_rows (what
       // imports actually merge against) gets restored too, not just
       // the legacy blob.
-      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo','dayPlans','staffTargets','emdPbg','suppliers','purchaseOrders','amcRecords','rfqs','officeExpenses','officeWork','handovers','siteOrders','siteExpenses','sitePayments','siteCollections','siteTemplates','lbContacts'].map(k=>Store.save(k)));
+      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo','dayPlans','staffTargets','emdPbg','suppliers','purchaseOrders','amcRecords','rfqs','officeExpenses','officeWork','handovers','siteOrders','siteExpenses','sitePayments','siteCollections','siteTemplates'].map(k=>Store.save(k)));
       Store.forceOverwrite = false;
       if(data['oppProjects']!==undefined) await Store.replaceAllOppProjects(Store.data.oppProjects);
       // Tender Centre tables: merged back by id (never deleted), only when the backup has them.
@@ -19058,18 +18386,8 @@ const Backup = {
       Router.render('backup');
     }catch(e){ Store.forceOverwrite = false; console.error(e); UI.toast('Restore failed — invalid backup file'); }
   },
-  /* a full backup or export must contain every project row, so make sure the list is loaded first */
-  async needOpp(){
-    const ok = ()=>Store._oppStarted && Store.oppLoad && Store.oppLoad.complete && !Store.oppLoad.loading;
-    if(ok()) return true;
-    UI.toast('Loading the project list so this is complete\u2026', 6000);
-    try{ await Store.ensureOppProjects(); }catch(e){}
-    if(ok()) return true;
-    return confirm('The project list could not be loaded completely ('+(Store.data.oppProjects||[]).length+' rows). Continue without all project rows?');
-  },
-  async exportDatabaseExcel(){
+  exportDatabaseExcel(){
     if(!Auth.isAdmin()){ UI.toast("You don't have permission to export the full database"); return; }
-    if(!(await this.needOpp())) return;
     try{
       const wb = XLSX.utils.book_new();
       const sheets = {
@@ -20229,7 +19547,7 @@ const ACCESS_MODULES = [
   {id:'payments',  label:'Payments & Outstanding',     keys:['jays_payments'], menus:['payments','outstanding']},
   {id:'bids',      label:'GeM bids, GEM CRAC, EMD/PBG',keys:['jays_bids','jays_gemcrac','jays_emdpbg'], menus:['bidsearch','gemcrac','emdpbg']},
   {id:'biddocs',   label:'Bid documents & letters',    keys:['jays_biddocs'], menus:['biddocs']},
-  {id:'opp',       label:'Project Opportunity (tracking, products, keywords)', keys:['jays_opptracking','jays_oppproducts','jays_oppimporthistory','jays_oppkeywordgroups','jays_lbcontacts'], menus:['oppfinder']},
+  {id:'opp',       label:'Project Opportunity (tracking, products, keywords)', keys:['jays_opptracking','jays_oppproducts','jays_oppimporthistory','jays_oppkeywordgroups'], menus:['oppfinder']},
   {id:'products',  label:'Products, suppliers, purchase orders', keys:['jays_products','jays_suppliers','jays_purchaseorders'], menus:['products','inventory','suppliers','purchaseorders']},
   {id:'rfq',       label:'Supplier RFQs & price comparison (supplier costs)', keys:['jays_rfqs'], menus:['rfq']},
   {id:'officework',label:'Office work register & handover', keys:['jays_officework','jays_handovers'], menus:['officework','handover']},
@@ -21998,12 +21316,12 @@ const Ico = {
   svg(name, cls){ const d = this.p[name]; return d ? '<svg class="'+(cls||'')+'" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">'+d+'</svg>' : ''; }
 };
 /* menu id -> icon; anything not listed keeps its existing emoji so nothing is ever blank */
-const NAV_ICON = { actioncentre:'bolt', dashboard:'dashboard', growth:'trend', notifications:'bell', leads:'users', customers:'user', pipeline:'trend', mywork:'target', followupcentre:'clock', officework:'list', handover:'swap',
+const NAV_ICON = { dashboard:'dashboard', growth:'trend', notifications:'bell', leads:'users', customers:'user', pipeline:'trend', mywork:'target', followupcentre:'clock', officework:'list', handover:'swap',
   mycalls:'phone', officequeue:'list', quotations:'file', rate_docs:'file', orders:'box', bidsearch:'search', tenders:'briefcase', oppfinder:'landmark', biddocs:'file', tendervault:'lock', gemcrac:'list', emdpbg:'lock',
   products:'box', inventory:'store', suppliers:'truck', purchaseorders:'cart', rfq:'list', payments:'wallet', outstanding:'alert', expenses:'receipt', siteexp:'wallet',
   fieldhome:'pin', visits:'pin', requirements:'list', travel:'truck', fieldmap:'pin', findlocation:'search', officefinder:'search',
   complaints:'alert', amc:'wrench', tasks:'check', attendance:'calendar', notes:'file', reports:'chart', fieldreports:'chart', workmgmt:'list', callalloc:'phone', users:'users', settings:'sliders', backup:'db' };
-const NAV_SEC_ICON = { 'Overview':'dashboard', 'Work Centre':'bolt', 'Sales &amp; Customers':'users', 'Government Business':'landmark', 'Products &amp; Procurement':'box', 'Finance':'wallet', 'Field Operations &amp; Service':'pin', 'Reports &amp; Administration':'sliders' };
+const NAV_SEC_ICON = { 'Site Expenses':'receipt', 'My Workspace':'target', 'Sales &amp; Customers':'users', 'Government Tenders':'landmark', 'Products &amp; Inventory':'box', 'Payments &amp; Accounts':'wallet', 'Field Sales':'pin', 'Tasks &amp; Operations':'check', 'Reports &amp; Analytics':'chart', 'Admin &amp; Settings':'sliders' };
 const NavIcons = {
   item(it){ return NAV_ICON[it.id] ? Ico.svg(NAV_ICON[it.id]) : it.ic; },
   sec(s){ return NAV_SEC_ICON[s.sec] ? Ico.svg(NAV_SEC_ICON[s.sec]) : s.ic; }
@@ -22411,8 +21729,6 @@ Views.settings = function(){
       <button class="btn btn-primary" onclick="SettingsView.saveBidPrefs()">Save Bid Preferences</button>
     </div>
     <div id="vaultCard"></div>
-    <div id="dbMeterCard"></div>
-    <div id="backupSchedCard"></div>
     <div class="card card-pad" style="max-width:520px;margin-top:16px;">
       <h3 style="margin:0 0 4px;font-size:14px;">Office Location Data</h3>
       <div class="hint" style="margin-bottom:12px;">${Object.keys(Store.data.lsgOfficeGeo||{}).length} of ${LSG_OFFICES_RAW.length} Kerala LSG office locations are located so far, for the "Nearby Offices" field feature. A few ways to fill in the rest — use whichever suits you, or combine them. For the odd office the free OpenStreetMap lookup can't find (but Google Maps shows correctly), open that office's details in Find Location and use "Set from Google Maps" to paste its coordinates in directly — no key or bulk run needed.</div>
@@ -22439,16 +21755,14 @@ Views.settings = function(){
     </div>
     <div class="card card-pad" style="max-width:520px;margin-top:16px;border-left:4px solid var(--red,#dc2626);">
       <h3 style="margin:0 0 4px;font-size:14px;">Project Opportunity Data</h3>
-      <div class="hint" style="margin-bottom:12px;">${Store._oppStarted ? 'Currently <b>'+Store.data.oppProjects.length+' project record(s)</b> loaded on this device.' : 'The project list is not loaded on this device yet (it loads when you open Project Opportunities).'} This only removes imported project rows and the import log \u2014 your saved "My Opportunities" tracking, product keyword list, and the keyword matching library are not affected.</div>
+      <div class="hint" style="margin-bottom:12px;">Currently <b>${Store.data.oppProjects.length} project record(s)</b> saved. This only removes imported project rows and the import log \u2014 your saved "My Opportunities" tracking, product keyword list, and the keyword matching library are not affected.</div>
       <button class="btn btn-outline" style="color:var(--red,#dc2626);border-color:var(--red,#dc2626);" onclick="SettingsView.deleteAllProjectRecords()">&#128465; Delete All Saved Project Records</button>
     </div>
   `;
   try{ Vault.mount(true); }catch(e){ console.error('vault', e); }
-  try{ DbMeter.mount(); BackupSched.mount(); }catch(e){ console.error('settings cards', e); }
 };
 const SettingsView = {
   async deleteAllProjectRecords(){
-    if(!Store._oppStarted){ UI.toast('Open Project Opportunities first so the list loads, then try again'); return; }
     const n = Store.data.oppProjects.length;
     if(!n){ UI.toast('There are no project records to delete'); return; }
     if(!confirm('Delete all '+n+' saved project record(s)? This cannot be undone. Your "My Opportunities" tracking, product keywords and keyword library will NOT be affected.')) return;
