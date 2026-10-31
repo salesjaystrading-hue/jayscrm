@@ -1593,6 +1593,41 @@ const Store = {
      free plan's monthly data (egress) allowance. They are now kept in this browser (IndexedDB) together with their version number; a load
      asks the server only for the tiny version number and downloads the record only when it has really changed. */
   BIG_KEYS: ['jays_biddocs','jays_bids'],
+  /* Optional Cloudflare R2 copy of the two big records (see cloudflare/worker.js). Leave '' to keep everything on Supabase exactly as before.
+     When set, a device whose cached copy is out of date first asks the mirror for the version Supabase says is current; any problem
+     (down, stale, wrong version, not signed in) falls back to the normal Supabase download. Saving always goes to Supabase only. */
+  MIRROR_URL: 'https://jays-crm-mirror.sales-jaystrading.workers.dev',
+  async _mirrorToken(){ try{ const r = await sb.auth.getSession(); return r && r.data && r.data.session ? r.data.session.access_token : null; }catch(e){ return null; } },
+  async mirrorGet(key, sv){
+    if(!this.MIRROR_URL || !navigator.onLine) return undefined;
+    try{
+      const tok = await this._mirrorToken(); if(!tok) return undefined;
+      const ctl = new AbortController(), tm = setTimeout(()=>ctl.abort(), 20000);
+      let r; try{ r = await fetch(this.MIRROR_URL.replace(/\/$/,'')+'/blob/'+key+'?v='+sv, { headers:{ Authorization:'Bearer '+tok }, signal:ctl.signal }); } finally { clearTimeout(tm); }
+      if(!r.ok) return undefined;
+      const j = await r.json();
+      if(j && Number(j.version) === Number(sv) && j.value !== undefined && j.value !== null) return j.value;
+    }catch(e){ /* mirror trouble is never an error for the user */ }
+    return undefined;
+  },
+  _mq: {}, _mqT: {},
+  mirrorQueue(key, version, value){      /* debounced: only the newest version of a record is ever uploaded */
+    if(!this.MIRROR_URL || !this.BIG_KEYS.includes(key)) return;
+    this._mq[key] = { version:Number(version), value };
+    clearTimeout(this._mqT[key]);
+    this._mqT[key] = setTimeout(()=>this.mirrorPut(key), this.MIRROR_DELAY_MS);
+  },
+  MIRROR_DELAY_MS: 20000,
+  async mirrorPut(key){
+    const q = this._mq[key]; delete this._mq[key];
+    if(!q || !navigator.onLine || Number(this.ver[key]) !== q.version) return;     /* a newer version exists: skip this one */
+    try{
+      const tok = await this._mirrorToken(); if(!tok) return;
+      let body = new Blob([JSON.stringify({ version:q.version, value:q.value })]), hdr = { Authorization:'Bearer '+tok, 'X-Version':String(q.version), 'Content-Type':'application/json' };
+      if(typeof CompressionStream === 'function'){ try{ body = await new Response(body.stream().pipeThrough(new CompressionStream('gzip'))).blob(); hdr['Content-Encoding'] = 'gzip'; }catch(e){} }
+      await fetch(this.MIRROR_URL.replace(/\/$/,'')+'/blob/'+key, { method:'PUT', headers:hdr, body });
+    }catch(e){ /* best effort */ }
+  },
   _bigIdb(){ return new Promise((res,rej)=>{ try{ const q = indexedDB.open('jays_big_cache', 1); q.onupgradeneeded = ()=>q.result.createObjectStore('kv'); q.onsuccess = ()=>res(q.result); q.onerror = ()=>rej(q.error); }catch(e){ rej(e); } }); },
   async bigGet(key){ try{ const db = await this._bigIdb(); return await new Promise(res=>{ const r = db.transaction('kv').objectStore('kv').get(key); r.onsuccess = ()=>res(r.result||null); r.onerror = ()=>res(null); }); }catch(e){ return null; } },
   async bigSet(key, obj){ try{ const db = await this._bigIdb(); await new Promise((res,rej)=>{ const tx = db.transaction('kv','readwrite'); tx.objectStore('kv').put(obj, key); tx.oncomplete = res; tx.onerror = ()=>rej(tx.error); }); }catch(e){ console.warn('big cache write', key, e); } },
@@ -1601,11 +1636,21 @@ const Store = {
       if(this.BIG_KEYS.includes(key)){
         try{
           const c = await this.bigGet(key);
-          if(c && c.version != null && c.value !== undefined && c.value !== null){
+          const haveCache = !!(c && c.version != null && c.value !== undefined && c.value !== null);
+          if(haveCache || this.MIRROR_URL){
             const vr = await sb.from('jays_crm_store').select('version').eq('key', key).maybeSingle();
-            if(!vr.error && vr.data && vr.data.version != null && Number(vr.data.version) === Number(c.version)){
+            const sv = (!vr.error && vr.data && vr.data.version != null) ? Number(vr.data.version) : null;
+            if(sv !== null && haveCache && sv === Number(c.version)){
               this.loadFailed[key] = false; this.ver[key] = Number(c.version); try{ this.baseStr[key] = JSON.stringify(c.value); }catch(e){}
               return c.value;                                   /* unchanged on the server: nothing downloaded */
+            }
+            if(sv !== null && this.MIRROR_URL){
+              const mv = await this.mirrorGet(key, sv);          /* changed: try the free Cloudflare copy of exactly this version */
+              if(mv !== undefined){
+                this.loadFailed[key] = false; this.ver[key] = sv; try{ this.baseStr[key] = JSON.stringify(mv); }catch(e){}
+                this.bigSet(key, { version:sv, value:mv });
+                return mv;
+              }
             }
           }
         }catch(e){ /* any doubt: fall through to a normal download */ }
@@ -1615,7 +1660,7 @@ const Store = {
       this.loadFailed[key] = false;
       if(data && data.value !== null && data.value !== undefined){
         if(data.version != null){ this.ver[key] = Number(data.version); try{ this.baseStr[key] = JSON.stringify(data.value); }catch(e){}
-          if(this.BIG_KEYS.includes(key)) this.bigSet(key, { version:Number(data.version), value:data.value }); }
+          if(this.BIG_KEYS.includes(key)){ this.bigSet(key, { version:Number(data.version), value:data.value }); this.mirrorQueue(key, data.version, data.value); } }   /* the mirror was missing/stale: refill it */
         return data.value;
       }
       return fallback;
@@ -1694,7 +1739,7 @@ const Store = {
         }
         if(data && data.ok){
           this.ver[key] = Number(data.version); try{ this.baseStr[key] = JSON.stringify(mine); }catch(e){}
-          if(this.BIG_KEYS.includes(key)) this.bigSet(key, { version:Number(data.version), value:mine });   /* keep the local copy in step with what we just saved */
+          if(this.BIG_KEYS.includes(key)){ this.bigSet(key, { version:Number(data.version), value:mine }); this.mirrorQueue(key, data.version, mine); }   /* keep the local copy (and the mirror, if on) in step with what we just saved */
           if(merged){ this.applyMerged(key, mine); this.lastMerge = { key, at: Date.now() }; UI.toast('Saved. A teammate changed the same list at the same time, so both sets of changes were combined.', 6000); }
           return true;
         }
@@ -3047,7 +3092,7 @@ function navBadgeCount(id){
    localStorage only (never in the business-data store). */
 /* Which version is running on this device, and a way to drop the saved copy of the app (service worker + cache)
    so that a newly uploaded index.html is really used. Login, settings and saved data are not touched. */
-const APP_BUILD = '2026-10-28 (build 46)';
+const APP_BUILD = '2026-10-31 (build 47)';
 const AppUpdate = {
   reload(){ location.reload(); },
   async refresh(){
