@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
 <title>JAYS CRM PRO | Jays Trading and Business Solution</title>
 <!-- PWA: installable "mobile app" shell for field staff (manifest.json,
      icon-192.png, icon-512.png, icon-maskable-512.png and sw.js must be
@@ -1454,7 +1455,7 @@ const Store = {
     customers: [], products: [], quotations: [], payments: [],
     followups: [], tasks: [], notes: [], users: [], settings: {}, activityLog: [],
     gemcrac: [], orders: [], complaints: [], bids: [], waTemplates: [], waHistory: [],
-    emdPbg: [], suppliers: [], purchaseOrders: [], amcRecords: [], rfqs: [], officeExpenses: [], officeWork: [], handovers: [], siteOrders: [], siteExpenses: [], sitePayments: [], siteCollections: [], siteTemplates: [], lbContacts: [],
+    emdPbg: [], suppliers: [], purchaseOrders: [], amcRecords: [], rfqs: [], officeExpenses: [], officeWork: [], handovers: [], siteOrders: [], siteExpenses: [], sitePayments: [], siteCollections: [], siteTemplates: [], lbContacts: [], fieldCollections: [], fieldClaims: [],
     rateTemplates: [], rateDocs: [], rateTerms: [], rateDocTemplates: [],
     oppProjects: [], oppTracking: {}, oppProducts: [], oppImportHistory: [], oppKeywordGroups: [],
     attendance: [], leaveRequests: [], bidDocs: [],
@@ -1631,6 +1632,58 @@ const Store = {
   _bigIdb(){ return new Promise((res,rej)=>{ try{ const q = indexedDB.open('jays_big_cache', 1); q.onupgradeneeded = ()=>q.result.createObjectStore('kv'); q.onsuccess = ()=>res(q.result); q.onerror = ()=>rej(q.error); }catch(e){ rej(e); } }); },
   async bigGet(key){ try{ const db = await this._bigIdb(); return await new Promise(res=>{ const r = db.transaction('kv').objectStore('kv').get(key); r.onsuccess = ()=>res(r.result||null); r.onerror = ()=>res(null); }); }catch(e){ return null; } },
   async bigSet(key, obj){ try{ const db = await this._bigIdb(); await new Promise((res,rej)=>{ const tx = db.transaction('kv','readwrite'); tx.objectStore('kv').put(obj, key); tx.oncomplete = res; tx.onerror = ()=>rej(tx.error); }); }catch(e){ console.warn('big cache write', key, e); } },
+  /* ---- Cloudflare copy of the Project Opportunity list (see cloudflare/worker.js). Same safety rules as the big records: Supabase is the master;
+     a copy is used only if it is under OPP_CACHE_HOURS old and its row count matches Supabase's count (a few bytes to check); any doubt = normal download. ---- */
+  MIRROR_OPP_CHUNK: 3000, MIRROR_OPP_DELAY_MS: 45000, _moT: null,
+  async _gz(text){
+    let blob = new Blob([text]), gz = false;
+    if(typeof CompressionStream === 'function'){ try{ blob = await new Response(blob.stream().pipeThrough(new CompressionStream('gzip'))).blob(); gz = true; }catch(e){} }
+    return { blob, gz };
+  },
+  async mirrorOppGet(){
+    if(!this.MIRROR_URL || !navigator.onLine) return null;
+    try{
+      const tok = await this._mirrorToken(); if(!tok) return null;
+      const base = this.MIRROR_URL.replace(/\/$/,''), H = { Authorization:'Bearer '+tok };
+      const cnt = await sb.rpc('opp_get_count'); const count = (cnt && typeof cnt.data==='number') ? cnt.data : null;
+      if(!count) return null;
+      const mr = await fetch(base+'/opp/meta', { headers:H }); if(!mr.ok) return null;
+      const m = await mr.json();
+      if(!m || !m.id || !(m.chunks>0) || !(m.n>0)) return null;
+      if(Date.now()-Number(m.savedAt) > this.OPP_CACHE_HOURS*3600*1000) return null;
+      if(Math.abs(m.n-count) > Math.max(5, count*0.005)) return null;
+      const parts = new Array(m.chunks); let next = 0, bad = false;
+      const run = async()=>{ while(!bad){ const i = next++; if(i>=m.chunks) return;
+        try{ const r = await fetch(base+'/opp/chunk/'+m.id+'/'+i, { headers:H }); if(!r.ok) throw new Error('chunk'); const a = await r.json(); if(!Array.isArray(a)) throw new Error('chunk'); parts[i] = a; }catch(e){ bad = true; } } };
+      await Promise.all([run(), run(), run()]);
+      if(bad) return null;
+      const rows = [].concat(...parts);
+      if(rows.length !== m.n) return null;
+      return { rows, count };
+    }catch(e){ return null; }
+  },
+  mirrorOppQueue(){ if(!this.MIRROR_URL) return; clearTimeout(this._moT); this._moT = setTimeout(()=>{ this.mirrorOppPut().catch(()=>{}); }, this.MIRROR_OPP_DELAY_MS); },
+  async mirrorOppInvalidate(){
+    if(!this.MIRROR_URL || !navigator.onLine) return;
+    try{ const tok = await this._mirrorToken(); if(!tok) return; await fetch(this.MIRROR_URL.replace(/\/$/,'')+'/opp/meta', { method:'DELETE', headers:{ Authorization:'Bearer '+tok } }); }catch(e){}
+  },
+  async mirrorOppPut(){
+    if(!this.MIRROR_URL || !navigator.onLine) return;
+    const rows = this.data.oppProjects;
+    if(!Array.isArray(rows) || !rows.length || (this.oppLoad && !this.oppLoad.complete) || this.loadFailed['jays_oppprojects']) return;   /* never publish a partial list */
+    try{
+      const tok = await this._mirrorToken(); if(!tok) return;
+      const base = this.MIRROR_URL.replace(/\/$/,''), H = { Authorization:'Bearer '+tok };
+      try{ const mr = await fetch(base+'/opp/meta', { headers:H }); if(mr.ok){ const m = await mr.json(); if(m && m.id && m.n===rows.length && Date.now()-Number(m.savedAt) < 3600*1000) return; } }catch(e){}   /* another device just published the same list */
+      const id = Date.now().toString(36)+Math.random().toString(36).slice(2,8), size = this.MIRROR_OPP_CHUNK, chunks = Math.ceil(rows.length/size), n = rows.length;
+      for(let i=0;i<chunks;i++){
+        const g = await this._gz(JSON.stringify(rows.slice(i*size,(i+1)*size)));
+        const hdr = Object.assign({}, H, { 'Content-Type':'application/json' }); if(g.gz) hdr['Content-Encoding'] = 'gzip';
+        const r = await fetch(base+'/opp/chunk/'+id+'/'+i, { method:'PUT', headers:hdr, body:g.blob }); if(!r.ok) return;
+      }
+      await fetch(base+'/opp/meta', { method:'PUT', headers:Object.assign({}, H, { 'Content-Type':'application/json' }), body:JSON.stringify({ id, n, chunks }) });
+    }catch(e){ /* best effort */ }
+  },
   async loadKey(key, fallback){
     try{
       if(this.BIG_KEYS.includes(key)){
@@ -2018,10 +2071,12 @@ const Store = {
   async oppCacheGet(){
     try{ const db = await this._oppIdb(); return await new Promise((res)=>{ const r = db.transaction('kv').objectStore('kv').get('rows'); r.onsuccess = ()=>res(r.result||null); r.onerror = ()=>res(null); }); }catch(e){ return null; }
   },
-  async oppCacheSet(rows, total){
+  async oppCacheSet(rows, total, fromMirror){
+    if(this.MIRROR_URL && !fromMirror){ this.mirrorOppInvalidate(); this.mirrorOppQueue(); }   /* the list changed (import / delete / fresh download): replace the Cloudflare copy */
     try{ const db = await this._oppIdb(); await new Promise((res,rej)=>{ const tx = db.transaction('kv','readwrite'); tx.objectStore('kv').put({ rows, savedAt: Date.now(), n: rows.length, total: total||null }, 'rows'); tx.oncomplete = res; tx.onerror = ()=>rej(tx.error); }); }catch(e){ console.warn('opp cache save skipped', e); }
   },
   async oppCacheClear(){
+    if(this.MIRROR_URL) this.mirrorOppInvalidate();
     try{ const db = await this._oppIdb(); await new Promise((res)=>{ const tx = db.transaction('kv','readwrite'); tx.objectStore('kv').delete('rows'); tx.oncomplete = res; tx.onerror = res; }); }catch(e){}
   },
   /* The project list is big (tens of MB). It is no longer downloaded at every login: a fresh copy kept on this
@@ -2046,6 +2101,17 @@ const Store = {
     }
     if(cacheOnly) return;
     this._oppStarted = true;
+    if(this.MIRROR_URL){                                          /* try the free Cloudflare copy before the big download from Supabase */
+      const mo = await this.mirrorOppGet();
+      if(mo){
+        this.data.oppProjects = mo.rows; this.loadFailed['jays_oppprojects'] = false;
+        this.oppLoad = { loaded:mo.rows.length, total:mo.count, complete:true, loading:false };
+        this.oppCacheSet(mo.rows, mo.count, true);
+        try{ if(typeof OppMatch!=='undefined') await OppMatch.warm(); }catch(e){ console.warn('opp warm', e); }
+        if(UI.currentView==='dashboard' || UI.currentView==='oppfinder') Router.render(UI.currentView);
+        return;
+      }
+    }
     const prog = (soFar)=>{
       this.data.oppProjects = soFar;
       if(UI.currentView==='oppfinder') OppFinder.updateLoadBanner();          /* do not redraw the page: it would wipe a preview / delete message the admin is using */
@@ -2120,7 +2186,7 @@ const Store = {
       attendance, leaveRequests, bidDocs, visits, requirements, travelLogs,
       lsgOfficeGeo, settings, counters, _users, dayPlans, staffTargets,
       emdPbg, suppliers, purchaseOrders, amcRecords, rfqs, officeExpenses, officeWork, handovers,
-      siteOrders, siteExpenses, sitePayments, siteCollections, siteTemplates, lbContacts
+      siteOrders, siteExpenses, sitePayments, siteCollections, siteTemplates, lbContacts, fieldCollections, fieldClaims
     ] = await Promise.all([
       this.loadCustomersDb(),
       this.loadKey('jays_products', null),
@@ -2170,6 +2236,8 @@ const Store = {
       this.loadKey('jays_sitecollections', []),
       this.loadKey('jays_sitetemplates', []),
       this.loadKey('jays_lbcontacts', []),
+      this.loadKey('jays_fieldcollections', []),
+      this.loadKey('jays_fieldclaims', []),
     ]);
 
     /* customers now reads from public.customers (Phase 6 cutover), with
@@ -2236,6 +2304,8 @@ const Store = {
     this.data.siteCollections = siteCollections;
     this.data.siteTemplates = siteTemplates;
     this.data.lbContacts = Array.isArray(lbContacts) ? lbContacts : [];
+    this.data.fieldCollections = Array.isArray(fieldCollections) ? fieldCollections : [];
+    this.data.fieldClaims = Array.isArray(fieldClaims) ? fieldClaims : [];
 
     await this.migrateWaTemplates();
     await this.migrateOppMachineKeywords();
@@ -2290,7 +2360,7 @@ const Store = {
      (jays_offlinecache_*) separate from the real jays_crm_store blobs, so
      a stale offline snapshot can never be mistaken for (or accidentally
      overwrite) live cloud data. */
-  OFFLINE_CACHE_KEYS: ['customers','visits','requirements','travelLogs','quotations','followups','products','settings'],
+  OFFLINE_CACHE_KEYS: ['customers','visits','requirements','travelLogs','quotations','followups','products','settings','fieldCollections','fieldClaims','dayPlans'],
   cacheOfflineSnapshot(){
     this.OFFLINE_CACHE_KEYS.forEach(k=>{
       if(this.loadFailed['jays_'+k.toLowerCase()]) return; // don't cache a failed/partial read over a good one
@@ -2633,6 +2703,10 @@ const Util = {
   },
   isoLocal(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); },
   todayISO(){ return this.isoLocal(new Date()); },
+  /* whole days from today to an ISO date (negative = in the past) */
+  daysFrom(iso){ if(!iso) return null; const a = new Date(String(iso).slice(0,10)+'T00:00:00'), t = new Date(this.todayISO()+'T00:00:00'); const n = Math.round((a-t)/864e5); return isNaN(n) ? null : n; },
+  relDue(iso){ const n = this.daysFrom(iso); if(n===null) return ''; if(n===0) return 'Today'; if(n===1) return 'Tomorrow'; if(n===-1) return '1 day late'; if(n<0) return (-n)+' days late'; return 'in '+n+' days'; },
+  relAgo(iso){ const n = this.daysFrom(iso); if(n===null) return ''; if(n===0) return 'today'; if(n===-1) return 'yesterday'; if(n<0) return (-n)+' days ago'; return 'in '+n+' days'; },
   nowStr(){ return new Date().toLocaleString('en-IN', {day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}); },
   fmtDate(d){
     if(!d) return '<span class="cell-mute">&mdash;</span>';
@@ -2944,6 +3018,8 @@ const NAV = [
     {id:'siteexp', ic:'&#127959;', label:'Site Expenses'},
   ]},
   {sec:'Field Operations &amp; Service', ic:'&#128204;', items:[
+    {id:'fieldapp', ic:'&#128241;', label:'Field App'},
+    {id:'fieldmoney', ic:'&#128176;', label:'Collections &amp; Claims'},
     {id:'fieldhome', ic:'&#128204;', label:'My Day'},
     {id:'visits', ic:'&#128100;', label:'Visits'},
     {id:'requirements', ic:'&#128221;', label:'Requirements'},
@@ -2957,6 +3033,7 @@ const NAV = [
   {sec:'Reports &amp; Administration', ic:'&#9881;', items:[
     {id:'reports', ic:'&#128200;', label:'Reports'},
     {id:'fieldreports', ic:'&#128202;', label:'Field Reports'},
+    {id:'datahealth', ic:'&#129658;', label:'Data Health', adminOnly:true},
     {id:'workmgmt', ic:'&#128203;', label:'Work Management', adminOnly:true},
     {id:'callalloc', ic:'&#128222;', label:'Contact Allocation', adminOnly:true},
     {id:'users', ic:'&#128272;', label:'Users &amp; Roles', adminOnly:true},
@@ -3013,6 +3090,9 @@ const PAGE_META = {
   fieldmap:['Field Map','Leads, customers and today’s visits on the map'],
   findlocation:['Find Location','Capture your current GPS position'],
   officefinder:['Nearby Offices','Find and navigate to Kerala LSG (panchayat/municipality/corporation) offices'],
+  datahealth:['Data Health','Records that need fixing: duplicates, missing next steps, stuck quotations and payments'],
+  fieldapp:['Field App','Your day on one screen: start the day, visits, leads, follow-ups, collections'],
+  fieldmoney:['Collections & Claims','Money collected in the field, and travel / expense claims'],
   fieldreports:['Field Reports','Field-sales performance and activity reports'],
   backup:['Backup & Restore','Keep your business data safe'],
   users:['Users & Roles','Manage team access'],
@@ -3034,6 +3114,7 @@ function assignableMenus(){
 function hasMenuAccess(viewId){
   if(!Auth.session) return false;
   if(viewId==='todayplan' || viewId==='actioncentre') return true;   /* everyone's own to-do list; items inside still respect their module access */
+  if((viewId==='fieldapp' || viewId==='fieldmoney') && Auth.session.role!=='Admin' && !Access.menuHidden(viewId)) return ['fieldhome','visits','requirements','travel'].some(v=>hasMenuAccess(v));   /* field staff get these with their field pages */
   if(Auth.session.role==='Admin') return true;
   if(Access.menuHidden(viewId)) return false;
   const perms = Auth.session.permissions;
@@ -3042,6 +3123,7 @@ function hasMenuAccess(viewId){
 }
 function navBadgeCount(id){
   const today = Util.todayISO();
+  if(id==='fieldmoney') return (Auth.isAdmin && Auth.isAdmin()) ? (Store.data.fieldCollections||[]).filter(c=>c.status==='Pending').length + (Store.data.fieldClaims||[]).filter(c=>c.status==='Pending').length : 0;
   if(id==='followupcentre'){
     return Store.data.followups.filter(f=>f.status!=='Done').length;
   }
@@ -3092,7 +3174,7 @@ function navBadgeCount(id){
    localStorage only (never in the business-data store). */
 /* Which version is running on this device, and a way to drop the saved copy of the app (service worker + cache)
    so that a newly uploaded index.html is really used. Login, settings and saved data are not touched. */
-const APP_BUILD = '2026-10-31 (build 47)';
+const APP_BUILD = '2026-11-02 (build 51)';
 const AppUpdate = {
   reload(){ location.reload(); },
   async refresh(){
@@ -3129,9 +3211,12 @@ function renderNav(){
   const isHidden = it=>{ const m = members(it); return m.length>1 && m[0]!==it.id; };       /* only the first page of a tab group gets a sidebar entry */
   const rowCnt = it=>it.id==='actioncentre' ? (navBadgeCount('actioncentre')||0) : members(it).reduce((n,id)=>n+(navBadgeCount(id)||0),0);   /* Action Centre already includes tasks and follow-ups */
   const row = (it, inFav)=>{
-    const cnt = rowCnt(it), label = plain(it.label), pinned = favs.includes(it.id), act = UI.currentView===it.id || (!inFav && members(it).length>1 && members(it).includes(UI.currentView));
-    return `<div class="nav-item ${act?'active':''}" role="link" tabindex="0" data-view="${it.id}" title="${Util.escapeHtml(label)}"${act?' aria-current="page"':''}>
-      <span class="ic" aria-hidden="true">${NavIcons.item(it)}</span><span>${it.label}</span>${cnt?`<span class="cnt" aria-label="${cnt} pending">${cnt}</span>`:''}
+    const act = UI.currentView===it.id || (!inFav && members(it).length>1 && members(it).includes(UI.currentView));
+    /* compact menu: one row stands for a group of tabbed pages - when you are on another page of that group, the row shows THAT page's name */
+    const sh = (act && !inFav && UI.currentView!==it.id) ? (NAV.reduce((f,sec)=>f||sec.items.find(x=>x.id===UI.currentView),null) || it) : it;
+    const cnt = rowCnt(it), label = plain(sh.label), pinned = favs.includes(it.id);
+    return `<div class="nav-item ${act?'active':''}" role="link" tabindex="0" data-view="${sh.id}" title="${Util.escapeHtml(label)}"${act?' aria-current="page"':''}>
+      <span class="ic" aria-hidden="true">${NavIcons.item(sh)}</span><span>${sh.label}</span>${cnt?`<span class="cnt" aria-label="${cnt} pending">${cnt}</span>`:''}
       <button type="button" class="nav-star ${pinned?'on':''}" data-fav="${it.id}" aria-pressed="${pinned}" aria-label="${pinned?'Remove '+Util.escapeHtml(label)+' from Favorites':'Add '+Util.escapeHtml(label)+' to Favorites'}" title="${pinned?'Unpin from Favorites':'Pin to Favorites'}">${pinned?'&#9733;':'&#9734;'}</button>
     </div>`;
   };
@@ -3152,6 +3237,7 @@ function renderNav(){
     </div>`;
   });
   html += '<div class="nav-compact-row"><button type="button" class="nav-compact-btn" data-compact="'+(compact?'0':'1')+'" title="'+(compact?'Related pages are shown as tabs. Click to list every page in the menu.':'Click to group related pages into one menu entry with tabs.')+'">'+(compact?'Show all pages in menu':'Use compact menu')+'</button></div>';
+  if(typeof FieldApp!=='undefined' && hasMenuAccess('fieldapp')) html += '<div class="nav-fieldmode"><button type="button" class="nav-fieldmode-btn" onclick="FieldApp.toggle()">'+(FieldApp.enabled()?'&#128241; Field mode is ON \u2014 switch to full CRM':'&#128241; Switch to field mode')+'</button></div>';
   html += '<div class="nav-build">Version '+APP_BUILD+' &middot; <button type="button" class="nav-refresh-btn" title="Clears the saved copy of the app on this device and loads the newest version. Your login and data are not affected.">Refresh app</button></div>';
   box.innerHTML = html;
   if(!box._wired){
@@ -3879,6 +3965,20 @@ document.addEventListener('keydown', function(e){
 ===================================================================== */
 const Customers = {
   filterMode: 'all',
+  ACTIVE: ['New Lead','First Contact','Call Not Taken','WhatsApp Sent','Quotation Sent','Follow-up Scheduled','Payment Pending'],
+  /* customer id -> short reasons it needs attention (computed from follow-ups, quotations and payments already in memory) */
+  attentionMap(){
+    const D = Store.data, today = Util.todayISO(), out = new Map(), add = (id,t)=>{ if(!id) return; if(!out.has(id)) out.set(id, []); if(!out.get(id).includes(t)) out.get(id).push(t); };
+    const pendingFu = new Set((D.followups||[]).filter(f=>f.status!=='Done').map(f=>f.customerId));
+    (D.quotations||[]).forEach(q=>{ if(q.status!=='Sent' || !q.customerId) return; const age = -(Util.daysFrom(q.date)||0), chased = q.lastChase ? -(Util.daysFrom(q.lastChase)||0) : 999; if(age>=7 && chased>=7) add(q.customerId, 'Quote waiting '+age+'d'); });
+    (D.payments||[]).forEach(p=>{ if(p.status!=='Paid' && p.customerId && p.followupDate && p.followupDate<today) add(p.customerId, 'Payment overdue'); });
+    (D.customers||[]).forEach(c=>{
+      if(!this.ACTIVE.includes(c.status)) return;
+      if(!pendingFu.has(c.id)) add(c.id, 'No next step');
+      const last = c.lastContact || c.createdDate; if(last && -(Util.daysFrom(last)||0) >= 30) add(c.id, 'No contact 30d+');
+    });
+    return out;
+  },
   render(){
     const searchEl = document.getElementById('custSearch');
     const searchHadFocus = document.activeElement === searchEl;
@@ -3889,7 +3989,9 @@ const Customers = {
     const fStatus = document.getElementById('custStatusFilter')?document.getElementById('custStatusFilter').value:'';
     const fAssigned = document.getElementById('custAssignedFilter')?document.getElementById('custAssignedFilter').value:'';
 
-    if(this.filterMode==='leads') list = list.filter(x=>['New Lead','First Contact','Call Not Taken'].includes(x.status));
+    const att = this.attentionMap();
+    if(this.filterMode==='attention') list = list.filter(x=>att.has(x.id));
+    else if(this.filterMode==='leads') list = list.filter(x=>['New Lead','First Contact','Call Not Taken'].includes(x.status));
     else if(this.filterMode==='pipeline') list = list.filter(x=>['WhatsApp Sent','Quotation Sent','Follow-up Scheduled','Payment Pending'].includes(x.status));
     else if(this.filterMode==='customers') list = list.filter(x=>['Payment Received','Converted Customer'].includes(x.status));
     else if(this.filterMode==='lost') list = list.filter(x=>['Not Interested','Closed Lost'].includes(x.status));
@@ -3906,7 +4008,8 @@ const Customers = {
       leads: Store.data.customers.filter(x=>['New Lead','First Contact','Call Not Taken'].includes(x.status)).length,
       pipeline: Store.data.customers.filter(x=>['WhatsApp Sent','Quotation Sent','Follow-up Scheduled','Payment Pending'].includes(x.status)).length,
       customers: Store.data.customers.filter(x=>['Payment Received','Converted Customer'].includes(x.status)).length,
-      lost: Store.data.customers.filter(x=>['Not Interested','Closed Lost'].includes(x.status)).length
+      lost: Store.data.customers.filter(x=>['Not Interested','Closed Lost'].includes(x.status)).length,
+      attention: att.size
     };
     const pg = Paginate.slice('customers', list);
 
@@ -3917,11 +4020,12 @@ const Customers = {
         <button class="tab-btn ${this.filterMode==='pipeline'?'active':''}" onclick="Customers.setFilter('pipeline')">In Pipeline <span class="cnt">${counts.pipeline}</span></button>
         <button class="tab-btn ${this.filterMode==='customers'?'active':''}" onclick="Customers.setFilter('customers')">Customers <span class="cnt">${counts.customers}</span></button>
         <button class="tab-btn ${this.filterMode==='lost'?'active':''}" onclick="Customers.setFilter('lost')">Lost / Not Interested <span class="cnt">${counts.lost}</span></button>
+        <button class="tab-btn ${this.filterMode==='attention'?'active':''}" title="No next step, quotation waiting, payment overdue or no contact for 30 days" onclick="Customers.setFilter('attention')">&#9888; Needs attention <span class="cnt">${counts.attention}</span></button>
       </div>
       <div class="toolbar">
         <input type="file" id="custImportFile" accept=".xlsx,.xls,.csv" style="display:none;" onchange="Customers.importExcel(this.files[0])">
-        <button class="btn btn-outline btn-sm" onclick="Customers.downloadSampleTemplate()">&#128190; Sample Template</button>
-        <button class="btn btn-outline btn-sm" onclick="document.getElementById('custImportFile').click()">&#128229; Import from Excel</button>
+        <button class="btn btn-outline btn-sm" title="Sample Template" onclick="Customers.downloadSampleTemplate()">&#128190;<span class="lbl"> Sample Template</span></button>
+        <button class="btn btn-outline btn-sm" title="Import from Excel" onclick="document.getElementById('custImportFile').click()">&#128229;<span class="lbl"> Import from Excel</span></button>
         <div class="toolbar-spacer"></div>
         <button class="btn btn-primary btn-sm" onclick="Customers.openForm(null)">&#65291; Add Lead / Customer</button>
       </div>
@@ -3939,7 +4043,7 @@ const Customers = {
       </div>
       <div class="card">
         <div class="table-wrap">
-        ${list.length ? `<table><thead><tr><th class="col-actions">Actions</th><th class="sortable ${SortState.customers&&SortState.customers.key==='name'?'active':''}" onclick="toggleSort('customers','name','Customers.render()')">Name ${sortArrow('customers','name')}</th><th>Phone</th><th>District</th><th>Area / Panchayath</th><th>Assigned To</th><th class="sortable ${SortState.customers&&SortState.customers.key==='status'?'active':''}" onclick="toggleSort('customers','status','Customers.render()')">Status ${sortArrow('customers','status')}</th><th>Notes</th><th class="sortable ${SortState.customers&&SortState.customers.key==='lastContact'?'active':''}" onclick="toggleSort('customers','lastContact','Customers.render()')">Last Contact ${sortArrow('customers','lastContact')}</th></tr></thead><tbody>
+        ${list.length ? `<table><thead><tr><th class="col-actions">Actions</th><th class="sortable ${SortState.customers&&SortState.customers.key==='name'?'active':''}" onclick="toggleSort('customers','name','Customers.render()')">Name ${sortArrow('customers','name')}</th><th>Phone</th><th>Place</th><th>Assigned To</th><th class="sortable ${SortState.customers&&SortState.customers.key==='status'?'active':''}" onclick="toggleSort('customers','status','Customers.render()')">Status ${sortArrow('customers','status')}</th><th>Notes</th><th class="sortable ${SortState.customers&&SortState.customers.key==='lastContact'?'active':''}" onclick="toggleSort('customers','lastContact','Customers.render()')">Last Contact ${sortArrow('customers','lastContact')}</th></tr></thead><tbody>
           ${pg.pageItems.map(x=>`<tr>
             <td class="col-actions"><div class="row-action-btns">
               <a class="icon-btn" style="color:#3B82C4;" title="Call" href="tel:${Util.escapeHtml(x.phone)}">&#128222;</a>
@@ -3948,14 +4052,13 @@ const Customers = {
               <button class="icon-btn" title="Edit" onclick="Customers.openForm('${x.id}')">&#9998;</button>
               <button class="icon-btn" title="Delete" onclick="Customers.remove('${x.id}')">&#128465;</button>
             </div></td>
-            <td class="cell-main" onclick="Customers.openDetail('${x.id}')">${Util.escapeHtml(x.name)}</td>
+            <td class="cell-main" onclick="Customers.openDetail('${x.id}')">${Util.escapeHtml(x.name)}${att.has(x.id) ? '<div class="cust-flags">'+att.get(x.id).map(t=>'<span class="badge badge-amber">'+Util.escapeHtml(t)+'</span>').join(' ')+'</div>' : ''}</td>
             <td class="mono cell-mute">${Util.escapeHtml(x.phone)}</td>
-            <td class="cell-mute">${Util.escapeHtml(x.district||'—')}</td>
-            <td class="cell-mute">${Util.escapeHtml(x.panchayath||'—')}</td>
+            <td class="cell-mute">${Util.escapeHtml([x.district, x.panchayath].filter(Boolean).join(' \u00b7 ') || '—')}</td>
             <td class="cell-mute">${Util.escapeHtml(x.assignedTo||'—')}</td>
             <td>${statusBadge(x.status)}</td>
             <td class="cell-mute" style="white-space:normal;max-width:${/^Project:/.test(x.notes||'')?'340px':'220px'};${/^Project:/.test(x.notes||'')?'white-space:pre-line;':''}">${x.notes? (/^Project:/.test(x.notes) ? Util.escapeHtml(x.notes.split('\n').filter(l=>/^(Project: |Impl Code:)/.test(l)).join('\n')) : Util.escapeHtml(x.notes.length>80? x.notes.slice(0,80)+'…' : x.notes)) : '—'}</td>
-            <td class="cell-mute">${Util.fmtDate(x.lastContact)}</td>
+            <td class="cell-mute">${Util.fmtDate(x.lastContact)}${x.lastContact ? '<div class="hint">'+Util.relAgo(x.lastContact)+'</div>' : ''}</td>
           </tr>`).join('')}
           </tbody></table>
           ${Paginate.controlsHTML('customers', pg, "Customers.render()")}` : `<div class="empty-state"><div class="ic">&#128101;</div><div class="t">No records found</div><div class="d">Try clearing filters, or add a new lead / customer to get started.</div>
@@ -4474,6 +4577,7 @@ const Followups = {
       <div class="fu-pill-row">
         ${tabDefs.map(t=>`<div class="fu-pill ${this.centreTab===t.id?'active':''}" onclick="Followups.setCentreTab('${t.id}')">${t.ic} ${t.label} <span class="n">${groups[t.id].length}</span></div>`).join('')}
         <div class="toolbar-spacer"></div>
+        <button class="btn btn-outline btn-sm" title="Save your follow-ups, tasks and bid deadlines to your phone or Google calendar" onclick="Followups.exportCalendar()">&#128197;<span class="lbl"> Add to calendar</span></button>
         <button class="btn btn-primary btn-sm" onclick="Followups.openForm(null,null)">&#65291; Schedule Follow-up</button>
       </div>
 
@@ -4493,10 +4597,11 @@ const Followups = {
       <div class="info">
         <div class="nm">${Util.escapeHtml(f.customerName)} ${overdue?fuEscBadge(f):''}${isToday&&f.status!=='Done'?'<span class="badge badge-amber" style="margin-left:6px;">Today</span>':''}${f.status==='Done'?'<span class="badge badge-green" style="margin-left:6px;">Done</span>':''}</div>
         <div class="pp">${Util.escapeHtml(f.purpose||'Follow-up call')}</div>
-        <div class="dt">&#128197; ${Util.fmtDate(f.date)} &middot; <span class="mono">${Util.escapeHtml(f.phone||'')}</span></div>
+        <div class="dt">&#128197; ${Util.fmtDate(f.date)}${overdue?' <span style="color:var(--red,#dc2626);font-weight:600;">('+Util.relDue(f.date)+')</span>':''}${(f.phone||(cust&&cust.phone)) ? ' &middot; <span class="mono">'+Util.escapeHtml(f.phone||cust.phone)+'</span>' : ''}</div>
+        ${f.status==='Done' && f.outcome ? '<div class="hint">Outcome: '+Util.escapeHtml(f.outcome)+(f.outcomeNote?' \u2014 '+Util.escapeHtml(f.outcomeNote):'')+'</div>' : ''}
       </div>
       <div class="fu-actions">
-        <a class="call" title="Call" href="tel:${Util.escapeHtml(f.phone||'')}">&#128222;</a>
+        <a class="call" title="Call" href="tel:${Util.escapeHtml(f.phone||(cust&&cust.phone)||'')}">&#128222;</a>
         <button class="wa" title="WhatsApp" onclick="Followups.quickWhatsApp('${f.id}')">&#128172;</button>
         <a class="em" title="Email" href="${Util.mailLink(email,'Follow-up from Jays Trading','Hi '+f.customerName+', following up regarding: '+(f.purpose||''))}">&#9993;</a>
         ${f.status!=='Done' ? `<button class="done-btn" title="Mark done" onclick="Followups.markDone('${f.id}')">&#10003;</button>` : ''}
@@ -4511,15 +4616,81 @@ const Followups = {
     if(!f) return;
     WaQuick.followup(id);
   },
-  async markDone(id){
-    const f = Store.data.followups.find(x=>x.id===id);
-    if(!f) return;
-    f.status='Done';
-    await Store.save('followups');
-    if(f.customerId) await Customers.logTimeline(f.customerId, 'Follow-up', 'Follow-up completed: '+(f.purpose||''), {silent:true});
-    await Activity.log('Follow-up completed', f.customerName);
-    UI.toast('Marked as done');
+  OUTCOMES: ['Interested - continue','Call back later','Quotation needed','Payment promised','No answer','Not interested','Other'],
+  /* Marking a follow-up done asks what happened and when the next contact is, so no customer is left without a next step. */
+  markDone(id){
+    const f = Store.data.followups.find(x=>x.id===id); if(!f) return;
+    const E = Util.escapeHtml, nd = Util.isoLocal(new Date(Date.now()+3*864e5));
+    UI.openModal('Follow-up done \u2014 '+(f.customerName||''), `
+      <div class="field"><label>What happened?</label><select id="fo_outcome" onchange="Followups.outcomeChanged()">${this.OUTCOMES.map(o=>'<option>'+E(o)+'</option>').join('')}</select></div>
+      <div class="field"><label>Note (optional)</label><textarea id="fo_note" rows="2" placeholder="What was discussed, what they asked for"></textarea></div>
+      <div class="form-row">
+        <div class="field"><label>Next follow-up</label><input type="date" id="fo_next" value="${nd}"></div>
+        <div class="field"><label>Next purpose</label><input id="fo_purpose" value="${E(f.purpose||'')}"></div>
+      </div>
+      <label class="hint" style="display:flex;gap:8px;align-items:center;"><input type="checkbox" id="fo_none" onchange="Followups.outcomeChanged(true)"> No further follow-up needed</label>
+      <label class="hint" id="fo_lostWrap" style="display:none;gap:8px;align-items:center;margin-top:6px;"><input type="checkbox" id="fo_lost" checked> Also mark the customer as \u201cNot Interested\u201d</label>`,
+      `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="Followups.saveDone('${id}')">Save</button>`);
+  },
+  outcomeChanged(fromBox){
+    const o = document.getElementById('fo_outcome').value, next = document.getElementById('fo_next'), none = document.getElementById('fo_none');
+    const lost = /^Not interested/.test(o);
+    document.getElementById('fo_lostWrap').style.display = lost ? 'flex' : 'none';
+    if(!fromBox){
+      if(lost) none.checked = true;
+      else { none.checked = false; const d = /^No answer/.test(o) ? 1 : /^Call back/.test(o) ? 2 : /^Payment/.test(o) ? 7 : 3; next.value = Util.isoLocal(new Date(Date.now()+d*864e5)); }
+    }
+    next.disabled = none.checked;
+  },
+  async saveDone(id){
+    const f = Store.data.followups.find(x=>x.id===id); if(!f){ UI.closeModal(); return; }
+    const val = k=>{ const e = document.getElementById(k); return e ? e.value : ''; };
+    const outcome = val('fo_outcome') || 'Other', note = (val('fo_note')||'').trim(), purpose = (val('fo_purpose')||'').trim();
+    const none = !!(document.getElementById('fo_none') && document.getElementById('fo_none').checked), next = val('fo_next');
+    const markLost = /^Not interested/.test(outcome) && !!(document.getElementById('fo_lost') && document.getElementById('fo_lost').checked);
+    if(!none && !next){ UI.toast('Pick the next follow-up date, or tick \u201cNo further follow-up needed\u201d'); return; }
+    if(!none && next < Util.todayISO()){ UI.toast('The next follow-up date is in the past'); return; }
+    const by = (Auth.session && (Auth.session.name||Auth.session.username)) || '';
+    const before = { status:f.status, outcome:f.outcome, outcomeNote:f.outcomeNote, doneOn:f.doneOn, doneBy:f.doneBy };
+    Object.assign(f, { status:'Done', outcome, outcomeNote:note, doneOn:Util.todayISO(), doneBy:by });
+    let nf = null;
+    if(!none){
+      nf = { id:Util.uid('F', Store.data.followups), customerId:f.customerId||'', customerName:f.customerName||'', phone:f.phone||'', date:next, purpose:purpose||f.purpose||'', status:'Pending', notes:'', previousId:f.id };
+      if(f.assignedTo) nf.assignedTo = f.assignedTo;
+      Store.data.followups.unshift(nf);
+    }
+    let ok = false; try{ ok = (await Store.save('followups')) !== false; }catch(e){ ok = false; }
+    if(!ok){ Object.assign(f, before); if(nf) Store.data.followups = Store.data.followups.filter(x=>x!==nf); UI.toast('Could not save \u2014 try again'); return; }
+    UI.closeModal();
+    try{
+      const cust = f.customerId ? Store.data.customers.find(c=>c.id===f.customerId) : null;
+      if(cust && markLost) cust.status = 'Not Interested';
+      if(f.customerId) await Customers.logTimeline(f.customerId, 'Follow-up', 'Follow-up done \u2014 '+outcome+(note?': '+note:'')+(nf?' \u00b7 next on '+Util.fmtDate(nf.date).replace(/<[^>]+>/g,''):''), {silent:true});
+      await Activity.log('Follow-up completed', (f.customerName||'')+' \u2014 '+outcome);
+    }catch(e){ console.warn('follow-up log', e); }
+    UI.toast(nf ? 'Done \u2014 next follow-up on '+Util.fmtDate(nf.date).replace(/<[^>]+>/g,'') : 'Follow-up marked done');
     Router.render(UI.currentView);
+  },
+  /* Calendar file (.ics) with my open follow-ups, tasks and bid deadlines for the next 60 days - opens in Google Calendar, Outlook or a phone calendar. */
+  exportCalendar(){
+    const me = (Auth.session && (Auth.session.name||Auth.session.username)) || '', admin = Auth.isAdmin && Auth.isAdmin();
+    const today = Util.todayISO(), until = Util.isoLocal(new Date(Date.now()+60*864e5)), D = Store.data, ev = [];
+    const ownerOfFu = f=>{ if(f.assignedTo) return f.assignedTo; const c = (D.customers||[]).find(x=>x.id===f.customerId); return c ? (c.assignedTo||'') : ''; };
+    (D.followups||[]).filter(f=>f.status!=='Done' && f.date && f.date<=until).forEach(f=>{ const o = ownerOfFu(f); if(admin || !o || o===me) ev.push({ d:f.date<today?today:f.date, t:'Follow-up: '+(f.customerName||''), x:(f.purpose||'')+(f.phone?' \u00b7 '+f.phone:'')+(f.date<today?' (was due '+f.date+')':''), id:'fu-'+f.id }); });
+    (D.tasks||[]).filter(t=>t.status!=='Completed' && t.date && t.date<=until && (admin || !t.assignedTo || t.assignedTo===me)).forEach(t=>ev.push({ d:t.date<today?today:t.date, t:'Task: '+(t.todo||''), x:(t.priority?t.priority+' priority':''), id:'task-'+t.id }));
+    if(typeof hasMenuAccess!=='function' || hasMenuAccess('bidsearch')) (D.bids||[]).filter(b=>b.endDate && String(b.endDate).slice(0,10)>=today && String(b.endDate).slice(0,10)<=until && !/Won|Lost|Cancelled|Submitted/.test(b.status||'')).forEach(b=>ev.push({ d:String(b.endDate).slice(0,10), t:'Bid closes: '+(b.title||b.bidNumber||b.bidNo||''), x:(b.bidNumber||b.bidNo||''), id:'bid-'+b.id }));
+    if(!ev.length){ UI.toast('Nothing scheduled in the next 60 days'); return; }
+    const esc = v=>String(v||'').replace(/\\/g,'\\\\').replace(/[,;]/g,m=>'\\'+m).replace(/\r?\n/g,'\\n');
+    const dt = d=>d.replace(/-/g,''), nextDay = d=>{ const x = new Date(d+'T00:00:00'); x.setDate(x.getDate()+1); return Util.isoLocal(x).replace(/-/g,''); };
+    const stamp = new Date().toISOString().replace(/[-:]/g,'').replace(/\.\d+/,'');
+    const lines = ['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Jays CRM//EN','CALSCALE:GREGORIAN','X-WR-CALNAME:Jays CRM'];
+    ev.forEach(e=>{ lines.push('BEGIN:VEVENT','UID:'+e.id+'@jayscrm','DTSTAMP:'+stamp,'DTSTART;VALUE=DATE:'+dt(e.d),'DTEND;VALUE=DATE:'+nextDay(e.d),'SUMMARY:'+esc(e.t),'DESCRIPTION:'+esc(e.x),'END:VEVENT'); });
+    lines.push('END:VCALENDAR');
+    const blob = new Blob([lines.join('\r\n')], { type:'text/calendar' }), a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'jays-crm-calendar-'+today+'.ics'; document.body.appendChild(a); a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    UI.toast(ev.length+' item(s) saved to a calendar file \u2014 open it to add them to your calendar');
+    return lines.join('\r\n');
   },
   openForm(id, customerId){
     const rec = id ? Store.data.followups.find(x=>x.id===id) : null;
@@ -4558,7 +4729,7 @@ const Followups = {
       status: document.getElementById('f_status').value,
       notes: document.getElementById('f_notes').value.trim()
     };
-    if(id){ const idx = Store.data.followups.findIndex(x=>x.id===id); Store.data.followups[idx]=rec; }
+    if(id){ const idx = Store.data.followups.findIndex(x=>x.id===id); Store.data.followups[idx] = Object.assign({}, Store.data.followups[idx]||{}, rec); }
     else Store.data.followups.unshift(rec);
     await Store.save('followups');
     await Customers.logTimeline(cust.id, 'Follow-up', 'Scheduled for '+Util.fmtDate(date).replace(/<[^>]+>/g,'')+(rec.purpose?': '+rec.purpose:''), {silent:true});
@@ -4689,10 +4860,40 @@ Views.products = ()=>Products.render();
 ===================================================================== */
 const Quotations = {
   draftItems: [],
+  f: { q:'', status:'', range:'' },
+  setF(k, v){ this.f[k] = v; Paginate.get('quotations').page = 1; this.render(); },
+  clearF(){ this.f = { q:'', status:'', range:'' }; Paginate.get('quotations').page = 1; this.render(); },
+  /* which quotations match the search box and the filters */
+  filtered(){
+    const f = this.f, q = (f.q||'').trim().toLowerCase(), today = Util.todayISO();
+    let from = '';
+    if(f.range==='month') from = today.slice(0,8)+'01';
+    else if(f.range==='30' || f.range==='90') from = Util.isoLocal(new Date(Date.now()-Number(f.range)*864e5));
+    else if(f.range==='fy'){ const d = new Date(); const y = d.getMonth()>=3 ? d.getFullYear() : d.getFullYear()-1; from = y+'-04-01'; }
+    return Store.data.quotations.filter(x=>{
+      if(f.status && x.status!==f.status) return false;
+      if(from && (x.date||'') < from) return false;
+      if(q){ const hay = [x.id, x.customerName, x.phone, (x.items||[]).map(i=>i.name).join(' ')].join(' ').toLowerCase(); if(!hay.includes(q)) return false; }
+      return true;
+    }).sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  },
   render(){
-    const list = Store.data.quotations.slice().sort((a,b)=>(b.date||'').localeCompare(a.date||''));
-    const s = {total:list.length, draft:0, sent:0, accepted:0, rejected:0};
-    list.forEach(q=>{ if(q.status==='Draft')s.draft++; else if(q.status==='Sent')s.sent++; else if(q.status==='Accepted')s.accepted++; else if(q.status==='Rejected')s.rejected++; });
+    const E = Util.escapeHtml, f = this.f;
+    const searchEl = document.getElementById('quoSearch'), hadFocus = searchEl && document.activeElement===searchEl, caret = hadFocus ? searchEl.selectionStart : null;
+    const all = Store.data.quotations, list = this.filtered();
+    const s = {total:all.length, draft:0, sent:0, accepted:0, rejected:0};
+    all.forEach(q=>{ if(q.status==='Draft')s.draft++; else if(q.status==='Sent')s.sent++; else if(q.status==='Accepted')s.accepted++; else if(q.status==='Rejected')s.rejected++; });
+    const statuses = Array.from(new Set(['Draft','Sent','Accepted','Rejected'].concat(all.map(q=>q.status).filter(Boolean))));
+    const orderOf = q=>q.orderId ? (Store.data.orders||[]).find(o=>o.id===q.orderId) : null;
+    const info = q=>{
+      const bits = [];
+      if(q.status==='Sent' && q.date){ const n = -(Util.daysFrom(q.date)||0); bits.push(n<=0 ? 'sent today' : 'sent '+n+' day'+(n===1?'':'s')+' ago'); }
+      if(q.chases) bits.push('chased '+q.chases+'\u00d7'+(q.lastChase?' \u00b7 last '+Util.relAgo(q.lastChase):''));
+      const o = orderOf(q); if(o) bits.push('\u2192 order '+o.id);
+      return bits.length ? '<div class="hint">'+E(bits.join(' \u00b7 '))+'</div>' : '';
+    };
+    const filtersOn = !!(f.q||f.status||f.range);
+    const pg = Paginate.slice('quotations', list);
     document.getElementById('content').innerHTML = `
       ${dashboardCardsHTML('Quotations Dashboard', [
         {label:'Total Quotations', value:s.total},
@@ -4701,30 +4902,99 @@ const Quotations = {
         {label:'Accepted', value:s.accepted, color:'var(--green,#16a34a)'},
         {label:'Rejected', value:s.rejected, color:'var(--red,#dc2626)'}
       ])}
-      <div class="toolbar"><div class="toolbar-spacer"></div>
+      <div class="toolbar" style="flex-wrap:wrap;">
+        <div class="search"><span class="ic">&#128269;</span><input id="quoSearch" placeholder="Search quote #, customer, phone, item..." value="${E(f.q)}" oninput="Quotations.setF('q', this.value)"></div>
+        <select id="quoStatus" aria-label="Status" onchange="Quotations.setF('status', this.value)"><option value="">All statuses</option>${statuses.map(x=>`<option ${x===f.status?'selected':''}>${E(x)}</option>`).join('')}</select>
+        <select id="quoRange" aria-label="Date" onchange="Quotations.setF('range', this.value)">
+          ${[['','Any date'],['month','This month'],['30','Last 30 days'],['90','Last 90 days'],['fy','This financial year']].map(o=>`<option value="${o[0]}" ${o[0]===f.range?'selected':''}>${o[1]}</option>`).join('')}
+        </select>
+        ${filtersOn ? `<button class="btn btn-outline btn-sm" onclick="Quotations.clearF()">Clear</button><span class="hint">${list.length} of ${all.length} \u00b7 ${Util.fmtMoney(list.reduce((t,q)=>t+(Number(q.total)||0),0))}</span>` : ''}
+        <div class="toolbar-spacer"></div>
         <button class="btn btn-primary btn-sm" onclick="Quotations.openForm(null)">&#65291; New Quotation</button>
       </div>
       <div class="card"><div class="table-wrap">
-      ${list.length ? `<table><thead><tr><th class="col-actions">Actions</th><th>Quote #</th><th>Date</th><th>Customer</th><th>Total</th><th>Status</th></tr></thead><tbody>
-        ${Paginate.slice('quotations', list).pageItems.map(q=>`<tr>
+      ${list.length ? `<table><thead><tr><th class="col-actions">Actions</th><th>Quote #</th><th>Date</th><th class="col-title">Customer</th><th>Total</th><th>Status</th></tr></thead><tbody>
+        ${pg.pageItems.map(q=>{ const o = orderOf(q); return `<tr>
           <td class="col-actions"><div class="row-action-btns">
             <button class="icon-btn" title="Print" onclick="Quotations.print('${q.id}')">&#128424;</button>
             <button class="icon-btn" style="color:#25D366;" title="WhatsApp" onclick="WaQuick.quotation('${q.id}')">&#128172;</button>
             <button class="icon-btn" title="Edit" onclick="Quotations.openForm('${q.id}')">&#9998;</button>
+            ${(q.status==='Accepted' && !o) ? `<button class="icon-btn" style="color:var(--green,#16a34a);" title="Convert to order" onclick="Quotations.convertToOrder('${q.id}')">&#128230;</button>` : ''}
             <button class="icon-btn" title="Duplicate" onclick="Quotations.duplicate('${q.id}')">&#128203;</button>
             <button class="icon-btn" title="Delete" onclick="Quotations.remove('${q.id}')">&#128465;</button>
           </div></td>
-          <td class="mono cell-main">${q.id}</td>
+          <td class="mono cell-main">${E(q.id)}</td>
           <td class="cell-mute">${Util.fmtDate(q.date)}</td>
-          <td class="cell-main" onclick="Customers.openDetail('${q.customerId}')">${Util.escapeHtml(q.customerName)}</td>
+          <td class="cell-main" onclick="Customers.openDetail('${q.customerId}')">${E(q.customerName)}</td>
           <td class="mono">${Util.fmtMoney(q.total)}</td>
-          <td>${statusBadge(q.status)}</td>
-        </tr>`).join('')}
+          <td>${statusBadge(q.status)}${info(q)}${(q.status==='Accepted' && !o) ? `<div><button class="btn btn-outline btn-sm" style="margin-top:4px;" onclick="Quotations.convertToOrder('${q.id}')">&#8594; Make order</button></div>` : ''}</td>
+        </tr>`; }).join('')}
       </tbody></table>
-      ${Paginate.controlsHTML('quotations', Paginate.slice('quotations', list), "Quotations.render()")}` : `<div class="empty-state"><div class="ic">&#128196;</div><div class="t">No quotations yet</div><div class="d">Create a quotation for a customer, print it, or send it straight to WhatsApp.</div>
-      <button class="btn btn-primary btn-sm" onclick="Quotations.openForm(null)">&#65291; New Quotation</button></div>`}
+      ${Paginate.controlsHTML('quotations', pg, "Quotations.render()")}` : (filtersOn ? `<div class="empty-state"><div class="ic">&#128269;</div><div class="t">No matching quotations</div><div class="d">Try another search or clear the filters.</div><button class="btn btn-outline btn-sm" onclick="Quotations.clearF()">Clear filters</button></div>` : `<div class="empty-state"><div class="ic">&#128196;</div><div class="t">No quotations yet</div><div class="d">Create a quotation for a customer, print it, or send it straight to WhatsApp.</div>
+      <button class="btn btn-primary btn-sm" onclick="Quotations.openForm(null)">&#65291; New Quotation</button></div>`)}
       </div></div>
     `;
+    if(hadFocus){ const el = document.getElementById('quoSearch'); if(el){ el.focus(); try{ el.setSelectionRange(caret, caret); }catch(e){} } }
+  },
+  /* Accepted quotation -> order in one click; the order remembers the quotation (for the proforma) and the quotation shows its order. */
+  /* next free quotation number: skips numbers already used, so a counter that fell behind can never create a duplicate number */
+  nextId(){
+    const pre = Store.data.settings.quoPrefix||'Q-'; let n = Store.data.counters.quoNext||1;
+    while(Store.data.quotations.some(q=>q.id===pre+String(n).padStart(4,'0'))) n++;
+    Store.data.counters.quoNext = n; return pre+String(n).padStart(4,'0');
+  },
+  async convertToOrder(id){
+    const q = Store.data.quotations.find(x=>x.id===id); if(!q) return;
+    const existing = q.orderId ? (Store.data.orders||[]).find(o=>o.id===q.orderId) : null;
+    if(existing){ UI.toast('Already converted to order '+existing.id); go('orders'); return; }
+    if(!confirm('Create an order from quotation '+q.id+' ('+(q.customerName||'')+')?')) return;
+    const cust = Store.data.customers.find(c=>c.id===q.customerId);
+    const rec = {
+      id: (()=>{ const pre = Store.data.settings.ordPrefix||'ORD-'; let n = Store.data.counters.ordNext||1; while(Store.data.orders.some(o=>o.id===pre+String(n).padStart(4,'0'))) n++; Store.data.counters.ordNext = n; return pre+String(n).padStart(4,'0'); })(),
+      customerId: q.customerId||'', orderDate: Util.todayISO(), gemcNumber:'', orderFrom:'Quotation '+q.id, quotationId:q.id,
+      productName: (q.items||[]).map(i=>i.name).filter(Boolean).join(', ') || ('See quotation '+q.id),
+      party: q.customerName||'', phone: q.phone || (cust&&cust.phone) || '',
+      assignedTo: (cust&&cust.assignedTo) || (Auth.session && (Auth.session.name||Auth.session.username)) || '',
+      status:'In Progress', value: Number(q.total)||0
+    };
+    Store.data.orders.unshift(rec);
+    Store.data.counters.ordNext = (Store.data.counters.ordNext||1) + 1;
+    let ok = false; try{ ok = (await Store.save('orders')) !== false; }catch(e){ ok = false; }
+    if(!ok){ Store.data.orders = Store.data.orders.filter(o=>o!==rec); Store.data.counters.ordNext--; UI.toast('Could not create the order \u2014 try again'); return; }
+    try{ await Store.save('counters'); }catch(e){}
+    try{ await DbSync.upsertOrder(rec); }catch(e){ console.warn('order sync', e); }
+    q.orderId = rec.id; if(q.status!=='Accepted') q.status = 'Accepted';
+    await FieldSync.createAndSave('quotations', q);
+    if(navigator.onLine){ try{ await DbSync.upsertQuotation(q); }catch(e){} }
+    try{
+      if(q.customerId) await Customers.logTimeline(q.customerId, 'Order', 'Order '+rec.id+' created from quotation '+q.id, {silent:true});
+      await Activity.log('Quotation converted to Order', q.id+' \u2192 '+rec.id);
+    }catch(e){}
+    UI.toast('Order '+rec.id+' created');
+    go('orders');
+  },
+  /* last rates quoted for an item: to this customer, and to anyone */
+  rateHistory(name, custId, skipId){
+    const n = String(name||'').trim().toLowerCase(); if(!n) return null;
+    const hits = [];
+    Store.data.quotations.forEach(q=>{ if(q.id===skipId) return; (q.items||[]).forEach(it=>{ if(String(it.name||'').trim().toLowerCase()===n && Number(it.rate)>0) hits.push({ rate:Number(it.rate), date:q.date||'', cust:q.customerName||'', custId:q.customerId, status:q.status||'' }); }); });
+    if(!hits.length) return null;
+    hits.sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+    const mine = custId ? hits.find(h=>h.custId===custId) : null;
+    const won = hits.find(h=>h.status==='Accepted');
+    const rates = hits.map(h=>h.rate);
+    return { mine, last:hits[0], won, min:Math.min(...rates), max:Math.max(...rates), n:hits.length };
+  },
+  rateHint(it){
+    const custSel = document.getElementById('q_cust'), h = this.rateHistory(it.name, custSel?custSel.value:'', this._editId);
+    if(!h) return '';
+    const m = v=>Util.fmtMoney(v), d = v=>Util.fmtDate(v).replace(/<[^>]+>/g,'');
+    const parts = [];
+    if(h.mine) parts.push('this customer: '+m(h.mine.rate)+' ('+d(h.mine.date)+')');
+    if(!h.mine || h.last!==h.mine) parts.push('last: '+m(h.last.rate)+' to '+h.last.cust+' ('+d(h.last.date)+')');
+    if(h.won && h.won!==h.last && h.won!==h.mine) parts.push('accepted at '+m(h.won.rate));
+    if(h.n>1 && h.min!==h.max) parts.push('range '+m(h.min)+'\u2013'+m(h.max)+' in '+h.n+' quotes');
+    return '<div class="quo-hist hint">&#128181; Earlier rates \u2014 '+Util.escapeHtml(parts.join(' \u00b7 '))+'</div>';
   },
   waSummary(q){
     let lines = [`Quotation ${q.id} from Jays Trading and Business Solution`, `Date: ${q.date}`, ''];
@@ -4734,6 +5004,7 @@ const Quotations = {
   },
   openForm(id, presetCustomerId){
     const rec = id ? Store.data.quotations.find(x=>x.id===id) : null;
+    this._editId = id || '';
     this.draftItems = rec ? JSON.parse(JSON.stringify(rec.items)) : [{name:'',qty:1,rate:0}];
     const custOptions = Store.data.customers.map(c=>`<option value="${c.id}" ${(rec&&rec.customerId===c.id)||(!rec&&presetCustomerId===c.id)?'selected':''}>${Util.escapeHtml(c.name)} — ${Util.escapeHtml(c.phone)}</option>`).join('');
     const gst = rec ? rec.gst : (Store.data.settings.gstPercent||0);
@@ -4757,6 +5028,7 @@ const Quotations = {
     `, true);
     this.renderLines();
     document.getElementById('q_gst').addEventListener('input', ()=>Quotations.renderLines());
+    const qc = document.getElementById('q_cust'); if(qc) qc.addEventListener('change', ()=>Quotations.renderLines());
   },
   addLine(){ this.draftItems.push({name:'',qty:1,rate:0}); this.renderLines(); },
   removeLine(i){ this.draftItems.splice(i,1); this.renderLines(); },
@@ -4778,7 +5050,7 @@ const Quotations = {
         <input type="number" placeholder="Rate" value="${it.rate}" onchange="Quotations.updateLine(${i},'rate',this.value)">
         <div class="mono cell-mute" style="text-align:right;padding-right:4px;">${Util.fmtMoney(it.qty*it.rate)}</div>
         <button class="icon-btn" onclick="Quotations.removeLine(${i})">&times;</button>
-      </div>
+      </div>${this.rateHint(it)}
     `).join('');
     const subtotal = this.draftItems.reduce((s,it)=>s+(it.qty*it.rate),0);
     const gst = Number(document.getElementById('q_gst')?.value||0);
@@ -4798,13 +5070,15 @@ const Quotations = {
     const prev = id ? Store.data.quotations.find(x=>x.id===id) : null;
     const newStatus = document.getElementById('q_status').value;
     const rec = {
-      id: id || (Store.data.settings.quoPrefix||'Q-') + String(Store.data.counters.quoNext||1).padStart(4,'0'),
+      id: id || this.nextId(),
       customerId: custId, customerName: cust.name, phone: cust.phone,
       date: document.getElementById('q_date').value,
       status: newStatus,
       requirementId: (prev&&prev.requirementId) || this._fromRequirementId || '',
       items, gst, subtotal, total
     };
+    if(prev){ ['orderId','chases','lastChase','createdBy'].forEach(k=>{ if(prev[k]!==undefined) rec[k] = prev[k]; }); }
+    else rec.createdBy = (Auth.session && (Auth.session.name||Auth.session.username)) || '';
     if(id){ const i=Store.data.quotations.findIndex(x=>x.id===id); Store.data.quotations[i]=rec; }
     else { Store.data.quotations.unshift(rec); Store.data.counters.quoNext = (Store.data.counters.quoNext||1)+1; await Store.save('counters'); }
     /* Routed through FieldSync (not a bare Store.save) so a quotation
@@ -4834,9 +5108,11 @@ const Quotations = {
     const src = Store.data.quotations.find(x=>x.id===id);
     if(!src) return;
     const copy = JSON.parse(JSON.stringify(src));
-    copy.id = (Store.data.settings.quoPrefix||'Q-') + String(Store.data.counters.quoNext||1).padStart(4,'0');
+    copy.id = this.nextId();
     copy.date = Util.todayISO();
     copy.status = 'Draft';
+    delete copy.orderId; delete copy.chases; delete copy.lastChase;
+    copy.createdBy = (Auth.session && (Auth.session.name||Auth.session.username)) || '';
     Store.data.quotations.unshift(copy);
     Store.data.counters.quoNext = (Store.data.counters.quoNext||1) + 1;
     const ok1 = await FieldSync.createAndSave('quotations', copy);
@@ -4848,27 +5124,30 @@ const Quotations = {
     UI.toast('Duplicated as '+copy.id);
     Router.render('quotations');
   },
-  print(id){
-    const q = Store.data.quotations.find(x=>x.id===id);
+  print(id, opts){
+    const q = (opts && opts.q) || Store.data.quotations.find(x=>x.id===id);
+    if(!q){ UI.toast('Quotation not found'); return; }
+    const o = Object.assign({ title:'QUOTATION', ref:q.id, date:q.date, noRates:false, footer:'quotation', to:q.customerName, phone:q.phone, extra:'' }, opts||{});
     const s = Store.data.settings;
-    const rowsHtml = q.items.map(it=>`<tr><td style="padding:8px;border-bottom:1px solid #eee;">${Util.escapeHtml(it.name)}</td><td style="padding:8px;border-bottom:1px solid #eee;text-align:center;">${it.qty}</td><td style="padding:8px;border-bottom:1px solid #eee;text-align:right;">${Util.fmtMoney(it.rate)}</td><td style="padding:8px;border-bottom:1px solid #eee;text-align:right;">${Util.fmtMoney(it.qty*it.rate)}</td></tr>`).join('');
+    const rowsHtml = o.noRates ? (q.items||[]).map(it=>`<tr><td style="padding:8px;border-bottom:1px solid #eee;">${Util.escapeHtml(it.name)}</td><td style="padding:8px;border-bottom:1px solid #eee;text-align:center;">${Util.escapeHtml(String(it.qty===undefined||it.qty===''?'':it.qty))}</td><td style="padding:8px;border-bottom:1px solid #eee;"></td></tr>`).join('') : q.items.map(it=>`<tr><td style="padding:8px;border-bottom:1px solid #eee;">${Util.escapeHtml(it.name)}</td><td style="padding:8px;border-bottom:1px solid #eee;text-align:center;">${it.qty}</td><td style="padding:8px;border-bottom:1px solid #eee;text-align:right;">${Util.fmtMoney(it.rate)}</td><td style="padding:8px;border-bottom:1px solid #eee;text-align:right;">${Util.fmtMoney(it.qty*it.rate)}</td></tr>`).join('');
     document.getElementById('printArea').innerHTML = `
       <div style="font-family:Inter,sans-serif;max-width:700px;margin:0 auto;">
         <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:3px solid #EB5A28;padding-bottom:16px;margin-bottom:20px;">
           <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAA0sAAAEqCAYAAADEc8ugAACduklEQVR4nO39f2gcV573i7/l6Xmm6vlqv3SDB9yggHqZQNpEMNLG8EizXh51ri+PJRSItF6wlMyDLScXR05gIsVfxpa9bCJ7eBIpw43VNk9ixRCnbRivlMv4un1ZX0uX1Z3Wcp2VBmTcgYSnBTHfFoyg+/t9xLfq7ijW94/qalV3V1Wf+n2q6ryCY1ndXX3qnFOnzqvOOZ/TIgjCLhjus+N1AvyNCNHrJFgj7OXvwPkLOv/Sh7f0TY7jRF2pP2bEwWMTYex6rnm3U9dSBOBIvt8Lgt5+WD2/ZvXZi/yz8xqzA7N5ELHwWaeJAPEDcXCc1pXLkBF3RAoaMpupv8Z2NH5vghYmSx5Ca4PjE5gw+RzHhUn9N9oYkSaXhQmwP7+0jmdHp44orSLUdYTsumbC5HUCLGJX+s3WV9fyTwQiFHbejZ6/VkeUFpgoERNIUQKYLAUa2hocn8GEyef4WpiMHtsm7MwzvWNZvcEQC5OMcXFyT5jktNWmx7PWJyjthtUOu1vfaxhFzaBRlGRI8kEvz2mph0yUiAmsKAHqsmRTm8FkiQZoaXB8ChMmn+OKMGn/Vp0QjTJZ7TBZPbbq9Us+nlP9jZPXUY0wqafAtVYoaO2FkyOcRr7PMio1gGZRkrGa/17XRyZKxARalAAmS6HA6wbH5zBh8jlUChNALk0+X8dEejyjNx7idDa7fglFxWNh0sOWFirs7YRVmCipo8wXM51Lr+olEyViAi9KAJOl0MBuhJZgwuRzbD5/AQK0ZceJUaaQCJOM7U+eSa9f9Y5R9fqnWJj0aPrpsLcPVmFT75zFTP4q2xAT7Q8TJTJCIUqAen1ishRg2E3RNEyYfI4jwgSoC48To0w+FyYzxyS5GdkuTEr2OkuBFaawtwtWcDXvKA3m4BZWR6gNfJ6JEhmhESWAyVIoYTdH0zBh8jmuCpP0DnJCIkxmj2vLYnCbhCMowhT29sAKbucdbeHBvaBZnlsN685EiZhQiRLgqCzts+cwDNthja5ptDsxPiHsZW/z+fNVwRGgLjJGgzk0kyGjEfUs4lR9iSj+kLKj+KN2PCKsXb/VTzt5He3oPZSxKf2V72GYhImSN2jlA2lbovceJkrEhE6UHIbJEs2wxtc0TJh8jmPCBGgLk53SFBBhUh7fTHCHenFiwmTo+AyTMFHylkjdz0bzR+39TJSIYaJkP2wanh9gN01L+HpaXtjL3pEoeUrJcXotU0Cm5Nn5XREjnw3flDxX9o4KMkyUgkHdQxYmSmSEWpTYNLyQwxpjS/h6lCnsZe/A+bs7yhSwEab67zI74kSMjVPanMLGEaaGo4T9+jcKEyX/oxyNrrQvTJTICLUoOQwbWfIT7CmjJXw9wgSEu/wdOvfmo0zSu4xhx2iVRbyqK27uY2P0007nie4IU0NqCH9bIczXPilMlPyPypRdJkpkhF6U1PZYUvu9SZgs+Q1207QEEyYf4ythUjuWi8JEQz2xPQ1BEqZaiNolGsqURrzIFyZK9qKxrpGJEhmhFyWAyRJDBXbTtAQTJp/jK2kKuTDJ2JYWvwtTY/oNnRFNZUoDTJT8jU7wFyZKZDBRquCkLO0wWfIv7KZpCSZMPsfB83demkIqTDKW0xQcYTJ1JjSWqRcwUfI3TJQsw0RJgZos2SRKAJMlf8NumpZgwuRzfCdM9cdySZporyem0ueDjV+bCJOlM6C9TJ2GiZK/0Xnqz0SJDCZKdTghS4p2hsmS3wn7TdMiTJh8jsPn77w0MWGqwXA6zV2/RJ+yI89UhMm2NscvZWo3XomS1jQfhm0wUSKDiZIKdstS3fXNZCkIsEbbEkyYfI6rwgTYL01MmGqwlE79a9nylW4mbQphsr2t8UuZOoUL0ylr/nbjO0MKEyUymChpYKcsqVzjTJaCAmvALcGEyee4cP5ko0zSO6nFL/XE1nSKiv9bwEqanJzC5ZcydQo7z1+tnAxtoswwAxMlMpgo6WCXLGlc60yWggRr0C3BhMnnuHT+zk3Ncwk/1BOb02gxBp1tU/Icww9l6iRmz5+tQ/IcJkpkMFFqgh2ypNOOMFkKGmG/aVqECZPPcfH8fStNfqkjNqWz+RXd5B1Oj1w4hdHOgl/qhRYk6WdyRBVMlMhgokSAVVlq0n7sM5gcBu2wm4ElzGwoSRVhL38Xz58nimzHQ3/Kngf4pY7YkE6qRMmJ4+lhNP/8Ui+0qE9/ROUPgxqYKJHBRMkERttZgvezkaWg4venhB7DRph8jsvn78v1TH6pIybTSZ0oKaG94+6XumEHOvv9MJyBiRIZTJQMoBaEheR6Jmzr2MhSUGGNviXYCJPPcfn8+cp/EgJ8MdLklzriSDo97oHQLiN+qRtm2Kn7I2PHObMRrKYwUSKDiZILGGiH2chS0KH9pkw5bITJ53h0/r4aafJLHTGRTsuBxB3OG66uY01da+OXuqEFafqtCI7WZ/2edw7ARIkMJkomMDqyZPD6ZLIUBlijbQkmTD7Hw/P3jTT5oY44Nh3P5LttyrN6YarH89bHrb2MnPqeZsc1I0phCpxhE0yUyGCiZBIjsmTimmSyFBZYg20JJkw+hxphAqiVJtrriIX0Wbt6RdvD0DYQge7EX89bH6dDcztd97SOT5o+q1PraL+2HIaJEhlMlCxAKksmr0UmS2Ei5A22VZgwBQAmTfr4qY4YTKv5q1ds/n12LCT2izD5VRzqv1fvPJxYd+Sna8suIkB8PxMlEpgoWYRElixcg0yWwkYYG2wbYcIUEJg0qeP3+tEk/Y4KUzMiBJ+nXZiaQXv90epEuRWUgfb8sRMmSsQwUbKBZrJk8dpjshRGwtRgOwATpoDgcT5QK01BqR8a5+GpMJEQqY/FKer8ywOCUD+8jFgXhPxrBhMlYpgo2YSeLNlwzTFZCithaLAdhAlTgGDS1Ijf6wfNI0wkNAiTaiosYPEIfq0ftIT1NpN/Nj4ldxQmSsQwUbIRLVmy6VphshRmaG5wfQATpoDBpKkWP9YPA2lmwhQyYaJFlGRI8s/G0MeuwESJGCZKNuPwwwQmS2GHxgbXRzBhChgU5AdV0kRBfhBj+z5MBJ9kwuQPaBMlGbX882tYciZKxDBRcgCHZWkftY0Iwx1Y+VtCvyvjA1j51xKB53nCV/7bQ4C2FOmJlA0EvH6Yv3orn3Q6f3b0H8dYb30sHsEP9YPmNEbqfjaaVlrOjYkSMUyU/EmL8OfKyBJNTygY7sPK3xJshCmgUJIvzTe3ZSNMAFzauFblk74eYbKh7aK1ftAiE07jZf4zUSKGiZKDOLy59Z4sOfglDJ/Ayt8STJgCCkX5oj9FjwmT+xvXKj7lO2Gyub2irX4QiJIyP33eenuT/0yUiGGi5DA2BnNQo1aW4OyXMXwAK39LMGEKMBTljbY0OShMFJ2/Ll4KEwmW9mqyS5gcbqe8risaotSsS+/z1tvdfGeiRAwTJf/TKEuA9w0dw1tY+VuCCVPAoSh/1KWJCRP1wqRH041rrQpTOETJbBfet603EyUqYaIUDNRlCfC+wWN4Cyt/SzBhCgGU5VGjODkEZeetiSVhEmG8u+3i2h8NYQq7KHERQCo3I+fZmJO+ab/Z1DuqYaIUHLRlCfC84WN4DCt/S/jmhqsFK38yKMsnV6SJsnPWxLIwaaHVUbRwzRtNa50wMVECmq9CIu/gU91+Nx19JHiPGZgoEcNEKVjoyxLgeQPI8BhW/pag+oZLAit/cijLK8elibLz1cSGdDp+HZtNY0WYmCgBdgRSr4eq9tvMJrZ2lgsTJWKYKAWP5rIEeN4QMjyGlb8lqLrhmoGVvzGoyy8HtYm6c9XAwXRavr6tpi3icdiCgIqSBAWtN8kokpXPk8BEiRgmSsGETJYAzxtEhsew8rcEBbdca7DyNwZ1+SUo/m8j1J2nDi6nleiatytNXuwnREHZc01F0SjqZeZ5612f10bL20JZcREgxkSJCCZKwYVclgAqGkeGh7DytwQTphBCVZ4JOv8yAVXnRgBtsmR3emwWpvqucc3ZUFD29ogSNcHWm7MDa2Vsosy4CIfY/hgTJQKYKAUbY7IEUNFIMjyElb8lmDCFFGryTV2RDIsTNedjEBfS7bokKYkAdm9d2/BpCsrevCjZcP4mkFPreetvoOyYKJHDRCn47DP8CS+G+xn0wMrfEvodGR/Ayt8cEVCSd7zmb9VfUYGCzrJpHC4DT0WpcnxzUfz8g7URJWvnb+TTnOKPPd9uA4T1n4kSOUyUwoHxkSUZP98wGdZh5W8JNsIUcjzPv+ZjSbrv8Dz9FnEg/Z6LkhJbR5i4yicUn/Go/O1bo2T/CJORlHne+uuUHxMlcpgohQfzsgT4/4bJsAYrf0swYQo5nucf+eQ71Xd6nn6L2Jh+V4M5kNJUmMhRPT+Xz8f+qHfWhclKajxv/VWCRnBgokQKE6VwYU2WAP/fMBnWYOVvCSZMIcfz/GMjTFYxdA37UJh0z8+l83EuPLjR9lc37IXj324HNdv2KoJGMFEih4lS+LAuS4D/b5gMa7DytwQTppDjef5p6xDR2JPn6XcIovMycfX6RJiIz8zo+RjcONXZfZQA/V4vyffSL0zNJmQyUSKHiVI4sUeWgODeMBlksPK3BBOmkON5/jVqkaEIeZ6n32V2AGWPKWjCZLg9ciistfOiJCOfr7+i7DWDZLtiDmwfJVKYKIUX+2QJCN8Nk1ELK39LMGEKOZ7nn6DykwE8T79L7FCwcamZvCYM+uBZK1R3Tu6Jkl3QIUxGxsI4ALEDcQc29w0eTJTCjb2yBITnhslQh5W/JZgwhRzP80+wtlmt5+l3GA1RkvH86m2W/02EyfP2p5J+/4mSjHfCRDKKVP9+JkpkMFFiGN9nqRlU7CXC8AxW/pZg+zCFHI/zz5IoAZ6n31GaiBJAQfe+Wf7r7MPkuSgBksz5VpQAN/dxkt9fv5dTPSKYKFmBiRIDcGJkSSboTxgZ+rDytwQVHRcrsPK3hsv5Z3E8qZGglT+BKCnx/Oo1OMJES3tT7bz7vv44N8JkNeQEEyVymCgxZJyTJSAADR7DEnbuY5LP7f3jm7WG14XtElAo2PeFiQT41tjev9uSQKvi5pJIguNijZ+zEVo6MKZh1781XMo/20VJJijlb1CUZDy/egmFiZZ2pqHz7vv6Y68w2RGXj4kSOUyUGEqclSUgAA0ewxJNyr8qQVtFYGsTACCsr1Z+tyH9nna4KNCeBFp58Imk9LsXOqW/LUoVLR0Z07Dr3xoO559joiTj9/KvSb/xa9Hzq5dAmGhAs/Pu9/rjQg0g/QYmSuQwUWLU47wsyfi+0WOYZrsEsZCvCpGwvuofEbKL9qQkVT+Ngz8QB/YfAPbHwSV7mn6UCVPIcSj/HBclGT+Xv+G0N16rnl+9lAtT0867n+sPACc2vjVzRCZKZDBRYqjhniwBAWj0GLrIUrRRALYKEAoFYCMPiGWvU0Y3++NAe1IalWpLShIlj1BVYMLkcxzah8YsromSjJ/L35a0eyxRlAoTcefdz/UHANkEOf3Pm60vXKSy4SwTpaYwUWJo4a4sAQFo9Bgy4kYeKDyB8M0aUMhLYsSwj/Yk8FxSGol6oRP4aVwSK78S9mtfPn+zHVOb8s91UZLxa/nblm6yXphjfTWiNUzaWE5X/T5KRjdB9Wv9qaLMQdJzF1V+IoeJEjlMlBh6uC9LQAAavRAijxp9syZNo2MjRt4gj0IlO4EXeoBEwusUGSPs177y/M1Ik8X880yUZPxa/kEQJpJzcEmYDImSX+uMabRz2Uj+M1Eih4kSoxneyBIQwgbQZ2yXIObXIHy9yEaNaEYOLpHsAv9iJ5Ds8jpFzQn7tV9//kalyWT+eS5KMn4tf7eFyat8cliYVDvvfq0TtkGeqyTvZKJEDhMlBgneyRLAGkjKEDfywPoqhEeLwDcrXieHYZYXuqXQ5y/0AMlOoJX3OkWNhP3a1zp/UnEykH/USJISv5Y/EyYA5vuWxPsoEWyu63/M99B191FiokQMEyUGKd7KEhCQRs+nKEeP1teALRv3KXKa/XFgf/vev+v3RZJDdwPAX8TAtdUGTLCEWJmSKKPY96ka9hygRzjbkkBHJ/i/HqJr2l7Yr3298yeRJoP5R500+bX8wyJMADidemg4IpvdnXe/1p8q9m9cy0SJHCZKDCN4L0tAABo9H7FVhLiyCCG/Any96HVqtKmE2uY7uipTzRLgfprwbYCDmk11N/KAKEIo5IFtwV2p4qLAoRT4l1J0jDqF/dr34Ak7ddIk46e6QPsaJrvSZ9MIk2Oddz/VGVXsESYOAJgoEcNEiWEUOmQJCECjRzHbJYiPFiHcv0XX2qPK6BCfSACtMWk0yO5RIJ8gbhWAPxX3RMqtvaheSknBIjpTwAGPRDTs1z7p+WuJk4X8o1acAPrrBa3CZHe+WRQmxzvvtNeTppie1Lj3eSZKxDBRYpiBHlkCAtDo0YW4NA/h0ZL3I0hcFHixa28foXgcXLuKELHyV0Us5AGxJEUi3C4BTu1f5eV0vbCXvZHzV5Mmv0fJI4HGOkKbMDmVRyaFybXOO411wxDEY3SNv4qAiRIhTJQYZqFLloAANHreIj5alNYgrSx6F9q7PQkkkuBf6ASX7DE2YsHKnxhRLElrzZ7m7Q/nvj8O/ugwcHjQval6YS97o+dfL01hEKZ6aKgzLgmTZ6IkY1CYXO+801AXLKGpnNofYaJEDBMlhhXokyUgAI2ey2zkIS5lpSh2XgRpeKFbmkr3Yg+4ZKc0pc4KrPxNIxbywMYTCE/zVZGyRFsS/MXr7q5tYuVvTpxsyDdfCpMSL+qOrd+p3pvzXJRkNITJc1GS8X3bUbMKSR8mSsQwUWJYhU5ZAgLQ6DmPuDQPYSnrfoAAeUrdC53gOnqc+R5W/pYQlXeGvDTqJOTXpNEno+ugDg+CPz1pbwKbwcpfwoN8YMLk9XeKOv9y+rsJiNSslmnA8857GNoOJkrEMFFi2AG9sgSEo9EzynYJ4v1bkiS5NYr0Ugr8oV4gcVB9rZFTsPK3hKh1h9gWgPwahI28JFIEss3fWm36Htth5b+Hy3nhuTDJ52t0w976z7uJA8JEnSjJaJQLNZ13r/PFye9nokQMEyWGXdAtSwDrMMls5FG6nwGWFpz/rv0JaaH/Sylwh1LOf58erPwtoSlMSmR5upPWnLbniSwBrPzVcClPqBEmJUbkycfCRHTd2vh9plGUB3WddxenJrr5/bEDTJRIYKLEsBP6ZQnw/obgIa5NtWtPgj+UAg6l3B09IiHE5W8HxB0vAMLHE6rREz2TJYCVvxZhkCaSc3QgOqAlLH63kevVju+zTIRCUZJxIm88FHYmSmQwUWLYjdlJDu5i0+Jl3+DWVLv2JPjDg+C6U3Rv9hq28rcZDhxxB4w/PChFU6w5QNT+RBmBlb86ytbbwfzhwXsnTCTTmmirGxbqq2FRsvh9dsCRBCPwCqt5Y7WHZGPZMFEig4kSwwn8IUuA5zcEV5Al6W7GubDf+xPgD3WDGxilW5DqCUP5OwixMLWq3IxpGGlk5a+Pw+LkqTAB/it/U+kVwcFkP8+j/OEigJRiijvxRvLGiR6RDcLG1iiRwUSJ4RT+kSXAfzdMUpyWpP0J8IdS4Hr76Oj4miWo5e8SRkaYanB7g1otWPmTEQGwIwCwN9y7p8Lkx3I3VF/3rkszm796AVcj6CJAc2derSzc7P2YbbuYKBHDRInhFCL8JktA4DpM4t2MtLDeCUl6KQW+d9D7IA12ErDydxtTwsRZ3DfLTlj5kxHhK8IkY484eSJMgS9v8utRd+TJ6LVh5u5fOb4kSnWp8YMwef39BsuHiRIZTJQYTiFXK6+bD3MEoMMkLs1DuPO5/WuS9ifA9/aB6x301zQ7IwSg/L3EqDDxL3Y6mBoTsPInhAeqYmOfOLkqTH4v5yZ1Vb4OjXSHmwqTk9RsSqsS3nxHZJ17JWbrLxMlYpgoMZxCWa38KUuAbztMjklSEEeR9PBp+dOCpjBtqmxY+1MKpZuVf3MiAHaUYlQrTtJEPXPi5IowBaV8Vetq7dXnl74ep/g/FKJXcy5hFyar9ZaJEjFMlBhOUV+t/CtLgK86TOKjRQg3ZuyVJC4KfmAk2KNIevio/GlETZiErc3GN9Jat1j5N6cmj2rFSRp32hMeo+LkqDAFrVxrykFdMminVpTkn5kwGa6rehEemSgRw0SJ4RRq1crfsgTQ32HaKqL0yaS9+yTtT4A/OiwFbGilaD2JF9Be/pTTdEreC93uJcYMrPybo5pHfPX/QnWkybg4OSZMLoVFd5UIpHU9CvwiTI2ipHwlZMJkVo60fr+z928mSmQwUWI4hVa18r8sAXR2mEQR4t05KXiDXexPgD92ElzvkH3HDAI0lr+PqBGm7/O1L7baG1HNEVj5N0cnj5RiZEacHJ+SR9ums1aIcL4TJm1RUr4joMJkMoKdmfczUSKDiRLDKfSqVTBkCaCqw2T7lLsXuqXpdmFZj2QGisrfj1SFabuu0/ucT0LNs/JvDkEemRUn16Pk+Vmg/CBMDVHvmhEQYbIQkMEKTJTIYKLEAPaqgJ1XTLNqFRxZArzvMNk95e6FbvDHxsB1dNlzvKDjdfn7HA4chI3akSXeT/tysfJvjoE8MipOVGxcC/ijDrgtTCbyhFyUqp+A1hn4SphIsLHnxESJDCZKDMCZKkByzGDJEuBNh8nuKXdMkszDOsymEcVS435ftAZ30IKVf3NM5FEzcZLf47kwAb6uA44Jk8E8MS5K1U8CEKvnUXME2vdhAlzfvJaJEhlMlBiAd6IEBFGWAFdvlrZOudufAH9inE23s4qPO0ueUsg3/i6RcD8dVmHl3xwLeVQ/oqQlT4wmRDjVMpBEw4FuAWGZW++8K1c51Z2HX4TJBZgokcFEiQF4K0pAUGUJcL7DJIoQb6ch3J+zfiwWuMF+WIfZOFt1eyz5bVRJCSt/11AbdfIcv5S/Rjo5G8aYVD/dJF+4CGfzdEaV8/CDMDkMEyUymCgxAO9FCQiyLAHO3TDzqyhduWB9NEneJ+nYmD3pYtTilw4TLdTvsbS/3ZNk2AYrf30cyB+tUSdP8Ev5a6bTmjCpfppUlHTTZUNKQixMTJTIYKLEAOgQJSDosgTYfsMU76RtWZvEHxsDNzAKcKzRdBS/dJgoQKibhsd3dDXfh4l2WPnr43D+eL6GyS/l74YwGRGlpumylJJKesInTEyUyGCixADoESUgDLIE2NPgb+RRujoJbKis6zDCC92InZwA/BRlzO/4pcPkNfXT8NqkOsqEKeAwYaIDp4VJ427PQUOUmqbLdEr2CJEwMVEig4kSAyCrAg1BZGw4phbhkCXAUoMv3s9AuHHJ2vdzUSl4A1uX5A1+6TB5Sf2DAEVwByZMAcfB/KFiHZNfyt/NKXmQ10ZpfacThFOYmCiRwUSJAdA1oiQTHlkCjN8wbdo3iT86Cu74GJty5zV+6TB5gFi//o6LgttfGwmPCVPAcSB/qBAlGb+Uv0vCVB1R8jBP9qYIBmwfJgVMlMhgosQA6BQlIGyyBBDfHMSleSkkeP2+M0ZoTyL21hSbckcTfukwuc2f6qbgadRZJkwBx8b8oUqUZHxf/vYIU83UOw/yRO0MArdxLZgokcJEiQHQK0pAGGUJaHpzEG/MWAsJzkXBHx8Dd3TE/DEYzuH7DpMDbDQGd9CCCVPAsSF/qBQlPxGBND2tBk7xtwVhUuu8y2VO2iOwVD+0W5AgCRMTJTKYKDEAukUJCKssAeodAlFE6fKYtWl3L3Qj9s6Uv/eoCQOsw1yDoBHcQQsmTAHGL6JkpHOv/IxfiHB1wmT9itPtvBvJS8vXz14L0pCiAKxhYqJEBhMlBkC/KAFhliWgtsHfyKN0cdTStDv+2BjbM8lPsA7zHoW6NUsEss+EKYBYyA/XR5O0yk/rrubHslYIk6OiZAZbhAlQPTMfCxMTJTKYKDEA61VA7YGLE9Uq4vsOj1UigPhgHsK1C+aPwdYm+RfWYZbY2qj5J5cgq8u+bz9Y+Uv4ZTSpHlmMlOkPWnlGOKljaQHHOu+2XD8a0wp9KExMlMhgosQA/DGiJBMBAtDhsYB4ZRLC0oLpz7PRpADAOsy1eyy90G3oo75vP1j5W4SC9Ulqo0kBKlMuwjU5H53rz+nOOxMmAEyUSGGixAD8JUqA4hbj+w6PUTaLKH14xvwms/sTiL39AZDUXgjP8BEh7jCLBe39lUjxffsR4vIHYOH8JVHiQYUy1RK0MtU9Hw3ZcKvzHnJhYqJEBhMlBuA/UQKAfcp/cI1LLYPJ+ipK7w6ZFiW+dxCxj+eZKAWNsK7gqwvuwJucTur79iOs5S9j+Pxr9Yi3LSE2ESRRktEto7rrz+3Ou5PXj8VpiE7CRIkMJkoMwJ+iBKg0b75/QtwE8UEWwrUJ05/nT5xnIcGDTNCeRpPwtO6hQdtB04fyffsRxvJXQnz+6uNI1IwwhbYMK6MzXnXebQj6oNn1oXCEiYkSGUyUGIC/q8A+tV/6/gmxBuLdjHlR4qKIfTjPRCkMVB4hZG5nbD3s6voq0p+lUdou2XpcqwibtSNLpMEdtAhq+xEamo4Q6OsQdSNMQYJERLzuvFseYdJJP0UjTEyUyGCixAD8XwVUZQkIXodHvDIJ4cYlcx9+oRuxTxdZtLswEQEK3xeav88A5e0yJs9N4mDHX2Hqwyl6pOlP5oM7aOHb9iO0IxJ1WOzwei5MQZxSSSRKjqeCjIALExMlMpgoMYBgVIEmM6B9PqUGALZFiDemTEe8Y9HutCk8LaBYKKJcLqPwtIDOFzvBRWPo6rBHKjO3MyjU7/+jQyKRwMhx+0b+5PNKtBkPeKCHuF3CzEczSF/7HGOnT2LsrTHEWmO2fochFGv3+A771uH5rv1golSL5pQqssl2nk/JC9KUSj+JkkxAp+QxUSKDiRIDCE4VaNq8+q7Do2RbROniiLlADlwU/NtT4LpTwbnh2kT6WhqZ2xnk19XzNd4WR+pwCuPnxi2Jxq2bt5BbyRG/v6e7x1ZZyj/Oo/B90XZZkqFBmkSxVLsRc5u9o6e+aT/YNa4OEybv8aMoyQRMmJgokcFEiQEEqwpoTsNT4sspNVZEqT2J2OU5SZQAem9ELpO9m8XBjoOYPDepKUoAUHxaROZ2Bl0dXZg4O+liCu2nuFFwvPxlafJkel592PCOTtu/gvr2w++daafRrP9kk+3YlDwLNKubEdB/fgGZksdEiQwmSgwgeFWASJYAH3R4lGwUUHozZV6U3s80rk+i/YbkMFOXpzDyyxEUnxabv1nB3Gdp9PxND0plStbnGCC3ksPa+pr0DwfKP94Wr/m3J9KkDBvengTHOTOyRWX7sQMmSqQwYXIXkrrpp3PyuTAxUSKDiRIDCGYVIJYlgNIOTz0bBZTOjdROLSKkun9Sq8Z5+unmZCPpa2nMfDRT87t4Wxzj743j3u/v4b8V/htKpRIe/nMOs1dnG6bC5dfz6H+l35Iw9XT3oFQqNfwZf2/c9DH1WF1bBSBNxatic/k/WXuC2U9m0dPdU/N7V6Vpa3Pv56T9o0pKqGo/mCQZhwmTO/h52p0ePhUmJkpkMFFiAMGtAoZkCaCsw1OHuJRF6d1+c6J0bAzc21PN3+jHm5QFsnezmDxXO5Vu6vIUnqw/weS5SfQc7kEsKo1GdHUkMXJ8BLNXZ/Hwn3M1Iyf59TwunLvgatqtsPIvKwCk0aUaybO5/EeOj+De7+9h/vfznkiTsL5a/Zl/oUfnnfZARfvBRMk8TJicJaiiJOMzYWKiRAYTJQYQ7CpgWJYASjo89WwUIFwxt4cSf3oa3HEDEe/8fLMyyMS52jzNfJHB2OnmedXVkcQflv+ApCIyXuZ2Brll8oANXqLcY+nW7Vu1LzpQ/qnulDfSpHyw4MB6JTU8bz9CdP06AhMmZwi6KMn4RJiYKJHBRIkBBL8KmJIlgIIOjxJ56p1RuChiH8+DO9Jn/LNBuGk1IXM7U7NGaeryFPoGyPMqFo0hcysDThHh7dJvTO515SKLy7maABaqm9M6VP6uS5O8rs/B9UpqeN5+hOD6dRS2D5O9GBElPwR1aAblwsREiQwmSgwgHFXAtCwBFHR4APNrlPYnELusEsjBCH6/YTXh1s29EZV4W5xoRKmeRFsCY6dPVv+dW8mh8NTezV7tZqZO6PLreWTvZhvf6FH5i9sl3Lp9CyvLK9aOowzu8Jz7Gy573n4E/Pp1HNX8I9cgJkwVjIpS/e/8CqXCxESJDCZKDCA8VcCSLAFSh8ezTo9ZUWpPSoEc2m3YP8fvNywNSuVSzR5Hw8eHTR9r5Je1o36q4kEJ6Wtp1b2dRt86ox6gwubyz9zOoCfVg6FXhlTT0dPdg8wXGTxZe4K+oyZGRJX8aU9a+RfdmYJXDxMmn8OEyXnURKn+Nb9CmTAxUSKDiRIDCFcVsK2pdX3zSSui9H5GO+KdGYKw8WEd9fsodXV0mT5Woi0BrjUGsTJtrFSiM4x45mamIZiFjLhdQv8r/bj3+3vVgBZVLJZ/qTJSlL6a1gzNPnhsBGOnT1oqhwa+Wdv7OWnjcQ3i+ca1Abx+XUU1/8i3ow39xrV6368nSiSf9wOUbFzLRIkMJkoMIHxVwPLIkhLXnhLTJEoyQZhHrkOy09o0rS5FoIeV/9Pa9DEnSF9L48w7Z2p+l/kiUzN6I4dAl8OK12Ci7AtPC5g4N4GDHX+FyXOTDaLEtcYw+sYoVtdWMXd11l5RAiDIa572x8Htt2GU1QJshMnnsBEm+7+fRJT0Pu8nvBxhigBxJkpEMFFiAOGsArY3sY4/JaZRlJT4/SmfBok2a53paDRqT0JsJnM7g0uXLzWIyvh74+gb6EP34W70v9JfHWnLr+fxcupljL83jpHhESSUUzkNln1Xp7r8xNviGHtrDMPHhxFrdTDoQqEyDS/Z7dx3GICNMPkcNsJk3/cbESW1z/sRL0aYIkA8GiMefQozTJQYgF+qgJxK+65rW0eWZBx7Sky7KMk49JQvt5zTnKYFAMWnxYbpc/Wvk4bujifiNf+2GvJ7bX1vylf3X3vbOc8t5zB1eQoHOw7izFtnGvJ06vJUdTpeLBrDvd/fqwmBDgAzH82gq7MLI8MjSF9L7402WSj7ZEcSs5/M4snaE4y9MeasKAHA1gYA79YrqcFGmHwOG2Gy/v1mREn5eT/j5ggTEyVimCgxAL9UASdSKTrXtNr+lNikKPG9g+BOTLonSjI2PuXLr+cxNDxU7dSPnh7D9OXaDXTPvHWmGuI62ZHEvey9ms628vV4WxwP7z+s2TS2nvqRpMXlRfQcNrdpaalcqhGSWMydENWr66vI3s2iXBaRf7yG0nZJVyaBytS7uvDosWgMuX/OYWR4BNn7tcEpsvez1d9xrTF0dSQRjUaRfFGSq8mz6muglPR092D81+NIdaeMnJ515Gh4Sec3ozUCG2HyOWyEyfr3W/28n+uvGyNMTJSIYaLEAPxSBZwRJcDh51C2dXo2i+ZF6e2p5m90CptuWlO/maqRjblraYweH6mOdmRuZ2r2Asqv53Hh7AXMXp0FII2kKF8vPi1i4uwEMrdU9g9S0HO4pzqiZGWdUb1gdP+1O1LQ1dFVXedT2Cig+H0Ri8uLyD/OY3F5pRpwQsnUR1NIdiRrp9dBCv6wqBGqO94WR9/RPnR2dCLenkBnR1IKAtGk7AePjWDy3LjlKY5mEPOVkcL2JLj92tLsFUyYfI7F/AutMNl1R/Z7/XVUmKRgDkyUmsNEiQH4pQo4J0qAC4P2ljs92yJKH54xPvXuxW5vRUnGhpuW2r5EyjDWhcKm7mfWHq81vF7eLjf93r6jfVVZyq3kkFvOGR5dKpVLuHR5b9+inu6emmAPbpFoTyDRnqhJf/ZutiFUeH49j57DL+Ne9h+rojV1eQozH83UHI9rjWHs9En0He3TXHtUvbo0yn+uIrOesC1dk/whl0ezDMCEyec05J8xBQqdMNl9N/Z7/XVEmDhJlBhNYaLEAPxSBZwVJcClGc6mOz3bIkoXR4AN/alTDbQnETubNv59TmGx0e96sath+lgisTcakTrcjZmPaj/T/R/2OsEplZGcJME6lbHTYzXhrIeGX0Nu5aGhkZAL5y6orgkiofC9s5vX9g30oW9AEsJTb52qplPcLuG14dfwh+U/IHs/2yBKo2+M4vy5840hxLWgsdPytFKfKJYlgAmTr1HNNx8Jk59FSXlcP9dfW4WpIkqVvBZ3RBYBTwMmSgzAL1VAL5UizAV5aDyma8tBzXR6xBtT5kTJzWAOpFho9D/48AOUyiVk72cRb4vj/LnzNeuNeg73YPy9SaSvpSFulzByfARj75ysvp7sSGL26iwmzl6ovn7+3DjRd09fnq5uKitul9DT/TLuZe81HR0qlUs489aZhil4uZWc6marXtJzuAd/WP4DLpy7UJ2uWHxaRP8r/Q2jdrOfzGLk9RG1w+hD2cJrYbMIcFFwbe6P8hmFCZMP0c0vyoXJ7bJ2um3we/21RZhQI0oyTJgaYaLEAPxSBZwfUZJxtQtnpNMjXpmEsLRg7AtoFSUZk41+rDXWdH3R5LlxTOoI0MjxEYwcN97JL9Wt6xG3S3j5b3owcnwEJ0+PNUhT4WkBueWcajhumolFY/jg8gdYfbxaEyZcyezVWVN5uAdF9fJPRepHlZQwYfIRTfPJuPq4JkxBEyXl9/i5/lpJf0Rq37XymgnTHkyUGIBfqoB7ogR48LybpNMj3s0ET5RkfHTTytzO4MxbZzRfk0dherqldUCr63nVoAlylDgraE0bzD/eExqreznJYcIPdvxVw3n0He2zKEqU8c0K+KMerpkygdR2AJ415T66dj2BKG/MK4/jwhRUUVJ+n5/rr5n0NxElGSZMTJQYEv6oAkZSSToVT/+YnkwO0hMmcSkL4cYl1de0Dxj1hyjJ+OCmpSZKI8dHMH832yASetPqkh1JZG5lHIv4pty/SQ7XbYVYNFYZpdsL+c21xqqRBQOBKJUf10HP/kok7LUYOpGunKZJ0I7QQpwf1pTHMWEKuigpv9fPdddI+iuixEXIRqXDLExMlBiAX6qAuyNKMo5sSkuC6uaT66sQrkwYPFAUscs+EiUZytawKFETpdmrs5i9Oosn+X/F6OmxpseIt8Uxe3UWuX/OOSZK9fs3pQ7bM61s7PQYOMUeVUMDfeTBHHyAWMgDL3QDnH/OqbEpY5vXUoPhzre1rWdt37g2LKJEy/dbhST9ClECyDe7Fus3rg0BTJQYgF+qgDeiBHjcbNaMMG0WUfqN+pQv7QNURKnd/X1qbIHCp3xaoiRPQYu1xjB9eQrnz40jv5bH2uM1FApFFJ8WkHwxiVgshr6BPlf2DqpPZ9LGkORDA33VaYbjZ8mCYRjGq/LfKlIdMrwe7abMwxEmgMrr13VMnz8lI0xhEyUZv9ddvfTXiZIM6brHMI0wMVFiAH6pAt6JEkBB0y03YKWrk8b2UvK7KMlQdNNqJkpKYq0x9BzuMbzvkl1MXZ6qibTX091j6+hP31FJlrjWWMMGtbbiRflvbQKHB13+UnM0Wd3oUip0oOj6dR3L5y2PEZnTHsvCFFZRkvF73VVLv4YoyTBh2oOJEgPwSxWwmkq1dUvGjunZNDwl4lIWeLxC/oGgiJIMBTdRI6JU2i5VN6t1k8LTArJ3s+j5m56avY+41hg++C8f2PpdfQN9AKQ9rBzH5fIXNovg9sebv9FDRPhAlGQouH5dx9ZOtvmJdbyZT+/AE1Hi7Z9AaB2/191I7c96oiTDpuRVzm0H/i9/hiX8UcO9HVGSoeJSEZbmDb0/9uvZ4IiSjIdP+YyKUn9fP/r+05DhUaWpy1MNG7zawfSHH6Cro8v248bb4u6NnLlY/jzBhsReQvDc14VUGMTvT+mN4Mh5ujQtz4syUogSDx6Cd9vsquP3ulvpxZCIkkyYR5iqoiTj9/JnGIbCO6gGdIgSQIksGRlV4t+eBhzoGFOBB42WGVHKr+fR95/cSqE2XGsMc1dnq6NAdpN4LoFON8XCjfIXS1QHdvClKMmEodNh8PwECMjn81j7eg35fAHFpwUUnhZRLpUhiCJEsQTsABzHged4RH8aRXx/HAfaEki0J5BMtqOrswvx/dGm39VUmDwWJRkmTPZjRJRkwihMDaIk4/PyDzvijojVtVXkH+eRz+eR/y6P4mYJ4n8vo7RdgrgtSm1sK49oaxTxeByJdqmN7TzUic5DneCp6xfQI0oABbIkrpNP5+KPjYHrdaZjTA0uNlpmRclrkh1J9PyHFM6fG3c0Sl33X7swBa8eh8tfXMoaftiQfZDFyLD7e0ytrq0iXhMoxJ7GM3Mzg4l3DUbdBJDL5ZB4vsmItkb5lbaK6Orugbht7Bxi0Rj+sPIH2+v54tKi4TIdPDaI9Mfppu8TdgQsLq9g4c48FpeyROcsiiJEUUSpXELh2wKA2vtCvC2O1OEUunu70debAs+pd141hcnCNfXa8Gu62yPQwtTlKQy/Plz99+KDRZw6ecqR7+JaOfBcDNEYh0RFbBPJJLpf6kQi4e6sDz1RmrsxhzPvGAwcBantSfxs7zzsFqbs/SyGBodsO14NEQ6xVh5ca1Qqn/YEkj9LIpFIIPliEgc7usCp9fxsvPeYvWcUi0XdfDZy3Fg0hof/9NDW+jhxdgJzN+YMfWby4iTG37Y/SFRJLCF7N4vsg0UsPlhS3eNSSbWN3SqhsFGobdMiHLo6uzD4ah8GXx1EzPNp+nSJEkCBLBmBGxj1Ognu4IIw0SBK935/z/Bn3A4o4UkACyfLXyyDa7MvaqB72Nd4pq8Zu9kpPzf98VTzN6qUX2x/HBPvTmDqfYLPKyiVS5j5cAZTl419Tg9hR8Dk3082f6MCrjVWs/eY1nFv3b6F9CdpFDeLuu81SvFpsboRNsdx0ibRJ0bQ09k48tsgTOyJue2I2yLE7SJKW6jI7R6x/XH0He3D8LFBWyOUqtFsRCl9rbncq37ukzSmP5mu+Z1vRph2RJTKIlAuofgUyK/nkcVeMKRYNIbe3l6kjqTQNzCEmHLblQCNMJXKJQz95xE8zN5DrJW2URPzFDeLSH+axq2bt1Aq6wsSMTsiVh/lsPooh8mLk+g70ofx98Zx0JNZXHTOHvE+wMNfEFbiF7v9t5eSFRzUWBpECUA1mp6RP24Si3nYwDpU/tyrzffIog/7Gs/FB4sofGuuLs/fyaC0RXhzUim/k2+cbD4ypcLcjTk8yT8x/DktPv/s84YObjMm3h1HXOdpY24lh18cfhmT5yZtF6V6RFHEwlcLGHplCP2Df4vcylrDe6oT3wLS8fMTpa0iMjfn0P9KP/pf+VusLBsI3mSAZqKUfZBFPm/uWs/czqh2RIMQ9KFULmHhqwWceesMDiYPYuLdidp88tUjdH0K+TxOvXWG0u63MUrbJUycm8DBzi6kr6TtE6V6dqSRz5dTL2NkeAiFgpuziegtKc9liWsnfPL0nffTv1zHgUbLiCgB0hQUGqbeeUHfUY+nfAbopmUeexvPuc/MjSoBUif91he3TH+ej/CYvjTd/I0qXDh/wfT3KiltFTFNMJVOSeL5JE6eGNZ8ffL9KQz93RCKT40JmB2sPlrFqTdPQVCTIiZKnpNfX8XIL0fw2i9fw2Zx07bjkqxRMjuqBEjX+ueffa7+WgCESUbcLmHuxhx6enow+uaZvU3eA3TvWbyfxbSNI/NeMP/VPP7q0C+k+5eL9W/xwSJ6elJIfzzjwvfSfV15LksAABJhMrIHU5CwsdHKr+cNidKZt854EiKcFhzdX4mUAN20zGDnWHIhX8Di0qKlY8zdmCNr0zU66j2He0wFJMmt5HDvrvFpq/VcujzTdG57PdOXpsBHGsNeCzsCRt8aw9xn5juldjB8fBh83XWiKk8Mz8gt55D6H/ux+MDa9QeQiVI+n7f8XXOfzmlex0ESJpmFOxl0HerCzG9nIAYsrPjMb2cwf9dY1GUaEHdEnHn3DE69eQqlLWdH7DXZETH1G+mBWKnsVBrov56okCW+g3B61Yb7Ty6pwKZGK9XXX/PvZqKUuZ2p/ptrjSHe5vWiv5ASoJuWGewSprQNnfriZrH5TbdJR33qwhQ4jQAFelx4/wIE0XwUtdW11ZprmoS+gT7N6a8Xzl1A9u6C6fTYxcjre22YsMNEiVbE7RJOvXkKC1+ZrzOkUe9mLIwqyRQ3i5i/o32tB1GYRFHE1PtTGPm7IRS3ioG695x56wxW11e9TgYxxa0i+l/pR+amsTbbKXLLObx8pN+BaXn+uI6okCXuBbLwzOJKtvmbgorFRitzO1PzRHn8vUlDorSYved6lCOGggDdtMxgVZhKWyXdjo8R0tfUp+cAIJr6FX8ujrG3ja8dKz4tIv2J+U6g0al8HMdh6kJl+kpd/cvcyRgWLydIHUkh8dwBAEyS/MLEuxPI3jd+LycVpeJWEfM21c2Za1d1Xw+iMAFStMyXD78srWUKyL1HFEW8NvyaJIGUI4nSEFYf0SV3xY0Chl6xc8q1f64fKmQJhCNLwiPrQ/i+xkKjdenyperPyY4kJs+ph7LUEiV7ohpRuIO9i1geIQnITcssVvJv7otbEEV7Gub8+qr69FQDnfWxd8YQNzHNM30tjeL3xm/2mTvzWF0zduMd+9UE4s8pRpMr9a+0XcKl9y+pf8hlRk9IEVKZKPmLiXcnUCiQd7iM7KP0+Y3P7bvW1zSudQVBFabiptRhz39bCMy9p7hZxGsnT1FdZqXtEl4bfs10ICKnKW4WMfJLO7YkoLcM1KDiEuBao1K0u2ab027kgW0xXFHx6jER2rO0XdpbuAlg8j31EMDOilIjZtdDcdEYuhwOSUstAQrtagYOJppYEfjcQmAHNdKfzdVOTzNYJnyEx/T7Uxj5pbG9SERRxOQHk9J6CkLMyE2iPYGxN082vhAB0lcdjMRkgER7At2Hu5ko+RBRFPHe+Hv4x4V/bPpeI6Ik7oiGrg0S0lfSTSOx+iasuEFKW0UMvdKPew8eItEWD8S9Z3Ulh4mzE5j9eNbrpKhy6s1Thh9suUlsfxyz//NHFo/iL1ECKJElAOA7uiA0kyUA4qNFRHsHiXbeDiwGO8z5tdonFN296putFuqGVrs6k47uk9H/Sn/zN+nQ092D4deHNacTBhYmTIau/vmv5m1fHLt4P4vCtwVLU1NTR1JIHUkZXoievZtFbjlHHEo//XHa8PlPvT8FnlMP6rBw2/yak57uHqT+Ywrtz7cjfiAurd3aATbLZZTKRWw+3cTqo1Wsra01DUE+8svRUF8Hfmd1bRXZ+1ndqKNGRAmQpofaHbo+ez+LwneFmk1q1QiqMBU3izjz5inM/35eOr8AXHOZmxkkOzoxdoKuvTvnbszZEgTFKRLtCcz/bh5xS0sy/Nl3p0aWuBe6IYBgPv7jHNA7CA4cEyaTjZbWBm1f3vqyZk+l3HIOZ946g9mrdD6Bya3kkFvJIX0tjXu/v4dYNDgbzzXFRWFKHU5h9f8y96RLBCBsl/By6mVb02REmOwI7KDG3GdzljeLnfqHKfQspQyHZZ38+0ks/tNi0xa88G0BaYOjarLEqbG2smZqzn/i+QRm07PoSqpvcnhQ+Y83pL8K3xcw/9U8Fv6XbMOUFI7jMHx80HA6zDD9P09D2N4LrKEWGVCN3Nc5TLw7Yfj7Hi4+JPyO2mAf0Z/aE4Dn4eJD7Xq1A4jbZRS3Slhbz2Pxf89a2loifSWtKUtGRUk6ns56Qgukr6Yx/XHzsP9OC9Pq+iq4ugnJ4o4I/LnyM0SUtkoob5VReFpEbmURK8srlkeCcys5TH84LW1MHZCHdZPnJpD8WQKpw+ptndvkC3lMXjS2WbgaHMeh53APUodT6HypE7H9cRz4aRQ8x0uzjL4vIv84j8WlRWQfZCFuk917kh1dmP/dl4jp7LfXHP/22emRpY4egIs2DREurK8hKn+GCRNRo1UvEVpPpWOtMczfmkdX9y+qwSAytzM40JbQXONEA/n1PPpf6WfC5BAcx1kaQSltR+1LjAISYcot5xzbJyxzO4Pxs+OW6lwikcDY6VGkrxgTunw+j7mbc9U1O1pMfjBpTMQiHKb+QVsAc2uNG8A2IxaNSU8jDd5kE88lMPHOBCbemcDq+irS19LI3pUCAwy9OoRYawzCjvnogKQc+OkB4KfSz6SiBAAFk9FbE88lqqN6Apw/v4bvTySa9gySkKR6/J0xrKysYOLsRM1Ub1Ly+Tzy+TySydoZDGZEaXF5EXmHop1lbmYwdXEKXLR5mpwUpmR7sqZsxB2x8R7w/N6PY6dHIe4A976ax8xvZ0xv0gsAMx/NYOjYEJLPJ4MhTDvAqZOn8PCfHlIRvGrq76csrbXjOA6jb4xi7J0xxKLqbW0sGkcsGsfBji4MHR+BIJZw6/YCZj6c0Z190HM4hS+/uA5e40E7Gf7uq9MR4EHmRYJpJVsFiBt7F3z9U5bQQaC7yY4kOEUlnzg/gZLGXivxtjgWs/dq3j/z0ZQtka8mz42jVCpZ/vPwn3OYujxVk8b8eh6vDb9mOY2+g5rHHd7Q7OpPX7N3/YISURRx67b5TWplxt8dR/yA8ad1Mx/O6D4xXnywaHhKx9jbY7odh/zjJ4aOBwCDx4cNi1I9XR1dmLs6h4eLDzH46iBOnpDWUxmRF6u4+V3V76Q9KE4E6O7uxr2790wFLAHQEBnPjCgBMPzAwQiiKEp7rJG+34UAAqqipAIXAYaODSFXuW/CgshNfaAYXQvAvadULmHkP4+gJHq7BlOekmqWrs4u5B6tYvLilKYoqcFzMYyeGMW/PvoDRl5Xf/DW9+og5n+XCbUoAZTJEt9BGEJ8vTYwABOm5m8ZO70Xqji/nkd/X7+mMCU7kpirm3p35q0zhqIXOUlXRxJjp8eQW3lYs6Yqt5IL5ya6AbhpWUHr6i98W8DiA2M3oMFXjU3t0tu4khSe4/HB+x8Y/lypXKqJcqlE2BEMT+mIH4hj/C39kOblctnQMQEgEbdvf7aDzx9E+pM0Dib3Ju65ITFeiFL1u30gTNFoFLME09TUyD/ee/hpVpTy3+UNdzYHjxm71tNX04audSeFiVSUaohI/YB7v583PRqevbtQu1dRAO49+XweZ94842l3/tJH5qOLDr46iHvZe6YeuMnwrTFMfzyN2U+v18j06IlRzH2atiTYQRAlgDJZ4rrJ5o6qhRBnwqT/8uS58RqxaCZMfQN9DWuVzEyzcJJEWwKz6bmaEaa0DZsR+pIA3LSsoHb1zxlcq9N3tA+TvzYmGESb1BLQP9CPHhNz5zM3M3iy3jja8/lnnxueBvbB+x+Ab9XvmJuZJuJGZCcnZcZLUaqmwQfC1NnZia5D6mvS9FhbXwMi5kUJqIiMAfoG+jB10dh6w+JmEfNfGbvWnRAmU6KkoKe7B19+8aXpDvCtG3Wj6QG492TvZzFtcf2pWYqbRdNBHXoO90h136Zpn0OvDmH+dxlwHIfx9yYx9eE0rG3aEQxRAmiTpf0JoJ0g+trjFYhbjR0BJkz6L9+rCwPeTJhGjo9g9LTxzTPdpKsjiZHjw9V/r60bX1MRGAJw07KC8uoXyoLhqaMjJ0YRT8SR6jUmLbqb1Bpg+pK5KTIX/r52s9niZpFoMbqSnsM96B9oHp0yamLbhoWvFjB307npkDJOSA0NoiTjB2Hq/etewx8rbZUQazUvSuXtMjI3jV3roydGkWhPaAYy0eLqlauG+xl2CpNVUZLpOdxjWg4W7i40nlMA7j0zv52x5cGXURbumosuGj8Qx/XPr9smSjI9h1NYfbSKibNW16kHR5QAymQJAPhesqFxcUXdxJkwab8Ua40ZFqZUN1l4Yi8ZHNiLplR8WqRiDxjPCMBNywry1f/5TWMbU8bbEkj1SnV92GA42fz6KnIr1qd/Jp5PYPQN46Fscyu5mpv81OUp4ghHAIAI8MElsmmA0WjUYOokJs9Nov+VfmTuZDTbGjuwU25oEiUZ2oUpbnLKpZWF7XOfzRn6vFKSmgVIqWd1bRWLK4ueCZOd4jVyYhSJ541vDVLaKiG3pNLeBeDec+atM7XTDF1g4StzsjR+7ryh9UlGiFmY0icRLFECKJQl4ql4S9oVjAmT9ktGhCm/nsfoW2ecSqVt1O8F5VT0M98QgJuWJXZgeGPK0ZN7e3X1H0kZnv9tdMqfFuffHTcVmvXSxUsQRAGra6tYuGPs5jt6YhQHnz/Y/I0ADnaQvU+N1bVVTLw7gYMdBzH0d0OY/mQauUc52yPa2SE5nopSk+uXamEy2fYIork6IO6ISH9qbAre6MnRah+h72if4WvdbCAJN4I+GIGLAOffMzd6sKj1cMjn9x5RFPHaL18ztT2C2e8zM0053pbAyLEhB1JkB3TVc7ugT5ZIp+Jt5Gui4jUchwmTJiTClF/PI9XXXw0hTjOhChdOis9vWlaYvztvbGPKCIdhxVRORIDh14e1369C9n7WlgAofCuPDy6eN/y54mYRMx/P4ML5C83frCC2P45xA9Mtul9S39DaEDvSaNjMRzMYGhzCXz5/EP2v9GPy/Uncu38PxbINHRULssNH+FBfP1Yo/6ls6nNm2/D5r+aNraWNcDXXNhfhDI8uZe9mUdgomOtjUBZuu3+gX9oY2iD5xzrT3X1+7RSfFvHayVOuyO1qftVUnRg+Pmj79Dt7CKYoARTKEmBgKp7O6BLAhMmsMBWfFjE6NlojSiPHR1T3ZlI9dizmyJ9QRrqzgs9vWmb53OAaosGBPsT2KzprO8DI8Ijh/LNrdGno2BC6Dhmf/pq+kjb8lPKDi+c1N6lWo6uzC4nnbd6TZEd6ujr32RxOvXkKXR1dSP2PKUy+P4nF5UVDI08CFFu1mqj/NaJE8fVD6+hS7mvjbTTHcabXK129dtXQ+wdf7WsIYz98cthwWc9UAkoY6WNU37sDaqSJ4zj0mJhqv7YW7Nkbqys5TJw1vqG0UZSRII1Ay0a6tQRXlABKZYl4Kp7GuqWaYzFh0kRLmA52HKyZytZ3tDEyHsMnUNzhI8PY9ZtbWTUsDDVPliudmPiBOPqO9Kl/QIPMbfvW43xEuIbICl2HujBkdCpHBBh7w/mgL/l8HnOfzWFkeAQHO/4KY2cnmq4La1QqYyNEqiNKFF8/tAnTZmETi2prWZqgDANvhNxKDquPDF7rKnU3cSCBvqMGr/UbcyhvlwGQ9TFo7of0/AfjslTaKlpaZ+YHMjczSBvYW8sMpmYjRDhTUSedJdh1AaBVlkin4m0VGvZcUj0exQ2VKxgUJiXJjiRmP2Wi5Gu87vBZ/n7y6zf9mbH1BIlkEl3dlRtP3dPeEYPTc0RRxK2b1jepBaS1QUanBxnlo0sfmfqckVFmOxC3S1i4ncHQ3w0h1ZfCvaXGh2TaY09kwqQ79c7r60cHaoRJBCb+XxOAialLnT8n21+xnhmDa4eSyaRmwCKjgVXqN6nV62PQ3v84ED9g6nNhCKQ0eW4Ci8vmwnqTYGbfuviBGGVT8IIvSgDFtwG+dxDCjeYbdYn/xwK4juY3bg4cxJAUqioRaA79y8LU39dfM6KU7EjiXvaeoWk69UxdnkLni+ZuhgDQ/0rzcMYMAnTK3x9waNYoF54Wkb1rbGPKUXnXcpW8SR3uQaI9YWi/orlP56SRFxta1vGz41j4asGRTsnI66PmgzVEgNlPZjH06pDhvZyskl/P49QvR5A62ofZD6cRi8Z0REmBTv0nWqNE8fXDg4dAlguOsPn9JibGm4/8aWE0fDcAFJ4WkDUYcllPiFK9KcPXevpqGmOnx6pTCNX6GLSLEoDaKcgGKJfKljZCdYt4W8L8SNgOcOrkKTz8p4dIJGyefgygVDZ+3UZj9ud55uYcikXytX8TZ+X9CMPTp6ZWlrjuFJEsCSuLiL5NeEwmTMTCxLXGMJeesyRKAND5YqerT6EZOlDc4SNDX5jSV41NmeA4Tlooq5MnI78cwdT75PuRFDeLmL8/j6EB65GKYtEYzl88j4l37Z07H4vGcP6ctT004gfimP9qHkN/N4LCt+6vX1i8n8XL62v48osvkdCN5KfojKjUf0PBHCi+flwTph1A3BZR/FMR+cd5ZJcWpQcUJhfDx6Ixw1PgAOOb0HIch5HjI9qvg8Pom6OYPEe+KXXxqbQh9cire8dV9jH8IEoAEG2NmvqcsO2doBshkUhg+vIURn6pXf56lMoljPznEdzL3rM5ZYAolg1/JmZy+wY9bt28ZWj6uiRL4epLUzkND6hMxXuJoBEVyxBXyJ8m+6UBcwzCKXmLOlPzGD6G2scjpKhfv6VtAZnbxqbADb06BJ7Tn8Y0fHzY8JQHowEm9Bg5PoKuTnvnp58/d96WCJLx/XHcy86jb4AsII/dFJ8W8bd/97cofPtE4x0qnTlF/TcV9Y7i68euKXl/mfhL/OVzGn8Sf4mDHQfxcuplnHnnDLJfLZgWJQA4eeKk4eAO5e0y5m4YvNaPjzSVguHXhw1Hhrt6pTHABFf5zy/Ia6+MwrdSMgWUgL6jfYYeetWTz+dxxoFtVDguavgzZgTLfsIlSgDFsgQAsV6yJ06l+8Z27/ZTQ+YITYQp9885JkpBhuIOHxmN1++tm7cMh7k/eeJk0/fEorGaTY9JWF1bNbzwXA/SDWNJSHZ06T5hJ6YywhLjYpi7mkbmi4ypDS6tUtoqSWF+G8pe56l3xGJ4cIqvH2rWMBEQi8ZMRRzL3MwYvtbHCNb/xaNx9BkcEV59ZM+G1F5S2jI3zTcai9qbEIcZOz2GkdfNt33Z+1lkDO5h14xY1Pj1Goa1YjRCtSxx3X3AfoJ5oo9XIG4ZmzvPhMnrBDA8xfflv3f9ijtA2uAmtF2dXcRrdswEWjAaaEKPrk6bBAfA9KUP7Cn7umOkelPILS4i80UGfQN9pvZuMUtxo4BLl+Up2zXBw1WxZR8liq8fvwjTRx9/ZHgKmAixGrablK5DXejsJFs3O/ZG8wco9RgNNEEbm8VNU5/z4/6G0x9OmwqVLmP3vpNmpkAWCgVLo7kMc1Dc5EvwR/og3G7eGIm30+DenjZ0bLaGCdTOwWe4gO/LX1rDdO/+PRSfGntY0vs/9BKHbY3tjyHeljD0Hdm7WRS/LyL+nD2Lcc9fPI/s3ayl0OSDx0bsDTmrUn9SvSmkelMoiSXklnJYWlrC4tKisU2CTZC5PY/xd8cR3R/VfR9vYbPaBnx//XjHyOuj0gMAg/mXvZtF0WBQkb6jfchXP6N/v4/FY4i3Jwx9R/buAgobBSTa7Q8A4Aa5fzE+MhbbH3f1gYhdcBEO17+4jv4j/a4Hp1HDVNCIHWn2gpm9+BjmoV6WuN5BIlkSVhbBnSiDM2jqTJjAbvhhxubyFyG6PGrL4aqJNUIzH81g5qMZB9KzR/qztKV58kpi0RjGz40bWoCuhGuNYerieVvSUoNG/YlxMfQf7Uf/USma5ZPCE6z8yxpWV3JYebRmWG6bsiNi4XcLOPmW9siAraIkQ2n7SfPo0uCrg5i9WnmwaTD/0iZGcaben7LtOtQifTWN6Q+NPaylAVEUTU0j7Oz07zT9eDSOzK0M+vv6PZ/Slvy5uXzM3s96Kkth7DdTPQ0PkAI98L0EC4jFMsSleXPfwabkMcKMTeUvN55uNqLS+iA61wxkbmcg2DhtY/T1USST5m6uk2fHTYcIbgpB/TmYOIjR4yNIf5LG6koOq2urmL06i5HXRxBvs+eJfO5r7XrgiCjJsPaTmNETo5j7Yq42qANh/uXWctSuD5q7OUccKEGECJGSaVT37t4zFVI7aWE7EBpIPp/E9c+ve3rtigC6kl2m0nDrtrXAKpaJhK/fTL0sAQD3H8miLQl3zW8IGbaCb4Dd8MONxfKvFyQ7hIkkSlb6Gr3rBcRtEZ/ftHFBcASmFihzrTEMnxi2Lx1qGKw/8f1xDA0MYfryNFZXcni4+BDj740j3mZ+2uLamnoIc0dFSYa1n7rEojFc//w6Zq/Oql/XBPlnZlTJLcTt2k1qNd8HURpJo2A0UtwBLpkcXdfa3NdPpA6nPBsNrN4dOc5UtNPSVhGZm8YCm9lOyITJH7LU0UMW6GGrgPKS+c5JmApeFXbDDzcmy19LjKojTdvmxKnZnPjiZhELBjemdJu5z9O2doyMhlkGAJ7jqBeGg88fxMQ7E/jDyh8wdXnK1LHUptS4ct4yrP1UZez0GJ6sP2kepEQn/wqbBSx8Rfe1nr461/wh0Q6oGVXK3JgztUdabH8MPb3+lyVAGq0fPT3m6nfWl/7gq+a2Xrh0+RJKW86uBW1KiITJF7IEAPwA2ZNRweRUPJmwFLwm7IYfbnTKX60j0KxzIEJEuVQ2lQ6+SVjV9Kf2iogTFJ8Wce++/ZsZUovF9oMHj9HXRzH5nom1WTtizZQiV0VJhrWfDfQc7mkaeKOKRv7NXZ3zwbVeQPYr7T0fxR0RIiXnkFvOYcLk+sfBgUFTD21oZer9SaSOpFz5LrW75aDJfepK5RJOnTzlfWS8kAiTb5p2rndICvTQbEOuxysQN/Lg2s0vQAzj4rUaPFi0XHxaxNraGlbXtZ903bp9C4vLK02PJb1v0c7k2cLm09oQrVOXp0wv2HcUjfKfeGcCnZ2d1VDapNfI6h+N7zkU3x/XbYBLYgm3bpqfdusmV69dRf9Av9fJsJ35r+axubmJkydO1m7ua0P7MfjqIKZ+Y3xRvtyJ80SUZCgN+uAVZ96ZQOpwypgwKfKvLJbx+Q37Nnp2kpkradWRAttEaQeWe225lRxe++VrpjvZw687OKXXgx4pBw7XP72O/r5+5PPGR9pI0crt2IE4UkdSWHxgvM+SW8lh5OQorn86B97L6IQRgNsJdr/ZP7LUGgX/6ghZGPG7c4bDiDd8HxMmx2/4pe0SLl2eQYZwQ9HMbbI5uqTv85p6eaKKuvKfuTKDzO0MMncyiB+II3WU/Elc9q7201YtEs/rT7tduL3geSQjUuRNam0N200B6Stp5PN5zH2ewQcXz9cKodX248fGP8K1xvY2nPUa39xZG3m4+LCSh437VWVuLxheJ1jaKmLsnTFkbplrlzM3M/651h/lkHuUQ48iUlmtKNnQpzArTDtA+rM5TF6cNC1KfQODptbYGMKDhw2x1hgytzJ4+Ui/I1PbmuX2+HvnTckSACzez+JvX+nHbHrWk43BqwRcmHwzDQ8AuKNkm0MKSwuGN6lV/b4QDC3q4uANP7+ex8HkX2HuWtr2jd78wvjZca+ToE+l/Ofvzu+F3t0BRk6OYv4O2XTXJ2tPkH1gXJb0oi2JEJE2uDGl19i5SS0NLC4tVp/CFp8WcOrNU0ilUpj7bA6lrcr1bKH9MLM+pasjSYco0YLJ/E8kEjiQOIADiUTDn/Gz46YiMi58tYCFOwbKVJF2moO4qKEMRGG7KEERJIL0/TvSKHDP3/Rg8tyEpWlbkxcmTH/WEB48bEi0JfDlF9cBD6YYdnV2IXWkz/TnV9dW0fM3KUy9P2lQ9kTklhdRLNokiAGekuer519caxR87yAEgiAOZjapVf1ONsJk+1Oe/Hoeqb5+VUlKdiTt3xmcgikxhe8LKD7da5DG3xv3xSaGq2urOPPWmdpf7og489YZrCyv4PzF85ohqQvfFvDayddM5b9etKXFB4tUbChoBLs3qfWauc8aI3/l83lMXpzE5PtT6DuawuDAIHoO9yDWSn49CxCwcHsBU5eNt92dL/k7nLEf4CPA3H+dQ0+qx/B1febdM+ju7UZ8P+E1EJGum8K3/rrWF75aQOFpAfEDcdtFqWYj7Uhjt1SEiNJWCeVyGYWnReSWF7GyvGLLyNz4e+NIujly4cEIU8+hHsxencWZN0+5+8UApv5hEqnlRVOh3AEAOyLSV9JIX5tDqrcHfUf6kHwxiUQiUe1TlbZLKH5fRP67AlaWV7C4lK3pl9hCQEeYfCVLAMAdHyOSJWFpAdzxMXAkUfSafScTJlsbraHhoRpRSnYkMfneJPoGzD9ZoZ2DHQerP3OtMYy95W4EHjMUnxbxt8OvaTbemdsZzN+dx9CrQ+g90otEZb+czaebWFxaxNzNjLmnmBEO3Ye7NV/225NmGTs3qfWSJ98+weKSzpSRHRHZu9nq9MtkRxJdL3YhkUyive2AtB6tVYrQJ4iC1LHbLCK/tobs/SyKm+Zu3majSjHI4AFw0Rg6D8Ux/t4kZgyuKSttlTDxzoSh6XgzFIcL1yP9SRqT1Wvdvr5DT483Uei6unswcdalUSUlHgjTyKtDKHybd3zT8noSzyelh01W1zHviFh8sGh6Wp8tBFCY/CdLlU1q3RxdAvaGFoNU+Iawqaakr6VrnmSMHB/B7NVZew5OKVOXp2rOefLcuP2jZzZT2i5haHio6ZC+uC0iczNj654PfUf7NEcjVtdXkVs2vjHl6v+1injC4qiO4qY9eW6SaF8VJZnbCzh/9jz4Vn9PFfv8mrHF9vn1PPI6gVvsoKuzCweTB5u/kWEKHjy4KFcNoDF5dhzZ/2Xe8IL4ha8WkLmzgJFjzcV2bW0NOROBep6sP7F11P7Mu2dUR1L1mLt5C+Nnx31/rQNA/EAc1z+97l0EPA+EaeLsBPLfFZB1OVz96BujkujoPYzyCwETJl+tWZLhjpM9lbdr7VLNdwd0PqZbZO/vrV+Jt8XxwYcfeJga5ymVS0grOpfxtjjGXN7XwTA7wKmTZxzv4Gox9ob22sS0wY46AKR6U9ZFCah5YDB8gmz9pBJxu4Rbt/0RwU+L0lYJ819Z257BCc5fOO91EgJLvSgB0h5oc3Nzph6ivffOGaLRQzOb0KaOpGyf3jz2hvH2Wtz2T7ROPWL745j//T0kLGwWbQsuP9bnwGHuk7TzwSxUvvn659eR7PAwUIOdBGgNkz9lqTK6RIJIED3P8PcHpPC9YHVtrwM+9tYY0XqG4tMipi7PYOLcpOqoQrPXveTCuQs1Uw6vX73uYWrImDg3gUUTQRnsINWbQo/GeqXiVhELJjrqoybERpPKTfvg8wnNdOqR/pT+/WL0mPtizvyceocYPDZiqiwYzVETJZnOzk6M/8p4kJpSuYQz75zRfU9xs4gMYRAZJWbEphnJZBI9h8N3rccPxHHv9/NINolM6hpuCxPH4ctbXyLusijyrTHM/27eF2uaiQiIMPlSlgBvR5eAYBS+JUw0XMWnxRpx6NSJeKb8TFf3LzDz0RTmrqXR/0p/jRCVtksNr9eHqs4t5xCLxTz5owxj3tPdY+qm6yaFjQLmbngTep3jOEz/F+1ps3OfzhleAxVvi9u/4WCl7g+fML7fSPFpAfce+HOTWkEU8PkNup6WJzu6MB3w0Wmv0BMlmclzk6ai42XvZnW3eEh/+rm5a93AlgZNiaB6rZ88cdLwx4tPC77dkDrVm8LD5YemyjZIxPfH8eUXX4JzeQ+j2P445u/eQ7IjINtNBECY/CtL+xPAS2QBAZwYXQL8X/iWMShMNZF8ACJxmPuicQ8m5VSm7N1sw+u0hmmmfvodgER7Atc/9WYN2ewns0gk1J+miTuiqY0pR18fdeaJZAQYOjqEGGlkLwVXTUwlpIGFrxYc2YPELMmOJOZvfVm7IS7DFkhECahMx/uvxtbzyLz37nuq0/FEUcTnJtrw0ZOj9t2T69qMoVfDca1zHIfJi5PI/G6ePGphwOnq6JIe1LlM/EAc97L30EdR4JpYNIbrn5qcHeNzYfKtLAFA7E2yKQBOjS4B/i58WzDQEa3vCNM2Zc5p/BLFbWhgCPO/m3c1CMXU5Sn0v9qv+XrmtomNKSMchocd3G2eA4aPG7+RrT7KYXVt1YEEOUuqN4W+ATpu3KkjKdxbmNcMW8+wBokoyXQesjAdr35bAlSu9S3j17qZ0R/1YzX+m4twOGliJHn1UQ6rj/xxrQ8eG8Tqo1WM/2ocnO9CfzlL39E+TyKZ8hyHuU/nMP3xtLdBoSLAyOsj+MOjP2Do2JCl4/i1z+zrS8JIZLzSpzOIn3PmiTkLLQ6iudnxtji41lh1JGjt8VrT0aXRXw4jXbdx7fDxvZtW30AfuLOxmtfr560nO5O493tvpkOkr6WrQS1yKznklnN0T8XbkQLd9vSm8HDpISbenXA0Mg/XGsPsJx+hf0ASJRFiQ2MqQkTaYDQqoBJV74CzN5jRk6OmFqKnr81h7lN/TbGIH4hj7tM0Vh+NYuZaGov33V/XxrXGMPX+eYwcH3H9u8NCLBozHPls8uIksv9b1nB0vOz9LDI3Mxh5fa88zVxPgwN99oyEaPWIItK1biacdPqzOcwdovNa51pjGDk2iNE3RkM/5a4ZY6fHkP82b2vkV1JGXh9F39E+TF68hIU7Ln5/hMPgQB8mfj1p39o1n0bJ87UsAQB3YhLCyiIglvXf+HUW4noOXIczHVUmTCASpq7OZHVEKX01jeHXh3WDPMTb4lhd+QPmvriF8nYJg0f7amQj1hrTfV1+j1eCEk/Esbi8UpW5ifMTyP0zpSNqO7U7gsTbEsj8bh737s5j5rcztkfH6xuQntbVL6CVriMOcmpySzkUDHbCAGD0hPMdanlNlNE9LbL3F1DcnET8gP+munQd6kLm0BwKhQLm78zj1lcLKDq8STDXGsPoGycx9taooU1uGSYw0SvgOA6z/3UWL//Ny4Y/+96770kRK9viyD5YNCxcgBRy2TJNzjvRlkDf0b6aiK4kZO8uoPh00vVAAVrEojF0H+5F35EU+l4dQqzVn0/6vWD6w2kUNgqezIqJ7Y8jfXUWE78aQ/raHObvZBwLthNvT2D42CBGT446c4/yoTD5ehoeAHCtUfCvknWKSjcuOZsWnw4v2gbBTVY5KlR8WsSFsxeafibeFsfkuXFMX55SlZ5mr3tJoi2BsdN700Py63ndhc2eoSO6/QNDWFzMYf538xg8NgLOQmeVa41h5PURPFx8iLnP53Q6EHuNqJnpi4nnE67VBVPR9nbgyTx4O0kkEpg4O4HVlRweLj7E5K8nkepNWaofNUQ49BxOYfaTWTxZ/1dMnp1gokQxPYd6zE3H2y7hVGU6XvqK8ZGbxPNJpA5bDOxAKIimpMztaz3CIRaNId4WRzKZROpICmOnxzD9yTQe/tNDPPn2vyHzxRxGXh9homQQLiKF9vYyUl3i+SSmP57G6voqpj+clgIYWd0DKyI9BBv/1bhUR9ZWMXnO4Yd5PpuS17L7591drxNhFXG7jNKbqeajSwD4E+cRHbAxlLBaenxky0bo79uLRDf+60lMnlO/Mcb+Yq9Dc+/39xo6rfUR7ZIdScyl54Kzt0AdpXIJvzj8i+rGtFxrDE/W/5WejWnrREm/9oqAKG0Ou/Iva3iSX8XGxgaK3xdR2hYhiiVgR3rSHIvGEI/H0d7ejoMvHERndyd6DvUEYDxbBx+HCrYLYQcofPsE+W/yKHxbQGGjgM3NTRS3iij/qQxBFCDuiNV6wrfy4FqjSMTjONCewMH2BDo7O9F5qDN8wRu8qD8RINoa9fd1aSXfSM67cny53u61kf6413Pg/F2+JLh07dBY4oJYwtrKGta+yaOQzyP/XR6lP5VQ3i5D2BYgiqLU1nI8oj89gERbvCrTyRc70dmZ9OZBlHxdUZmrtQRClgCgvLQA4cpE8zdyUcQ+XQTXGnU0PX4ofKMoZSneFteMXFYvQvVSUCgUquJQDzUjQzY3vIXva895/L1xTJ6btPdLzKBxnk2FiaFOmGXJtnMXpL8iIRMlGTfrUBBEScZMvpkQJRm/3eOZMFnHHyVem0pqy73hIS3duRsYWQKA4psvAwRR7/iBUURPOL/jO+2FbxSlLDGswbXGkFt5iESbhxvPNbmxMGEyCBMl+6Dx5u4mbtSlIImSjJF8C5EoyVDbcbYTh64df5S4P0VJhubryvdrlpTE3ibbnFC4O+dYKHElfpqPyXAXcbuEmcvG5+fbBsENpckOKzYlJCAwUbIPGm/ubuN0HgRRlIwQQlECKmkPelvlQJ32R4n7W5QAuvvMNGalabiOHuDFbuDxStP3lj6ZRPx95xfahyFKXs/hHiRf7ERUaw2Ojxvn/OPVmuhHyY4k+v4T2WbI1GKgPPZi0hl/NRT4uG7bAhMl5yCMMGrmuIEVpWZ5RnrOARQlGREiuB1KO9J2YeO1I5d4i/x3i/r7dhU/uD9dy/+iJENrn5nG7LRE7J0plN4kCF/6eMXRUOJKaC18q/Qc7sH1q9cRbyeImOLTTmX/K7UbpWZuZbydOmcVE+XAhEkDn9Zp22Ci5Dx2C1OQRUlGK8+YKFVhwkTG/4296Vd7krQLtOzJk5Ld3V1gH7C72wJgt/J39VNQ/5RVgiNKMjT2mQM1DQ+obFR7fKz5GwGUrjQPW20XNA8vkiCWxZr1Sj2He3Ave49MlAA6L94m5JZzNec8cnwkdKIkw6bk1cFEyV582D64hl15EwZRkqk/RyZKDbApefr8G6QO8r6WXexr2UULdtHS8gwtLbtowTOg7s8ungEtu5Bk6lnlzw/V11uwq3j/bt0fswRPlGRo6zMHTpYAgDs6Cuwn6NRuFVC+697+B7QVvhHmFLtWc60xXL963fhBaLyIdTj11qnqz1xrDB98SLYmjkpsuCn6t/baTNA7GM1gouQ+EVjLpzCJkkyk7m9CwiBKMkyY1PkzgH2oCFJFclrwDNit/KlIzm5FknaV4rT7DNj9AditfKYiTLvYE6faP3oSpSdVwRUlGZr6zDRmrWW41ihib3+A0t+/1vS9wu00uN4hx0OJy9A4vEhCbnmx+nNXZ5J8RKmOqQ9nfNE4bz6tDfU9dnrMvxti2pjf2pPuQjwdLyw4tH6GYQAzU4vCKEoyRs55J1yiJMOm5NWyg120ABVJqixAatmt6hEg/1p/RGhXsXhJeq80NU+ifjpei8rfuyrvk3/3bzW//Ql+gt0f7VZfbnFkup8JbHlIS0efObCXB9fRA7zUB3yd1X+jWIZ4Ywrc29PuJAz0FL4Rytvl6s/df21+t/SZ30zZkBp3ibfFMfbOSa+TYQ4HOrihFyanFt7TDBMlejBS/8IsSkZQFaXwwIRJEpofoJCkyu9k6anKUcve+zUOpHhdKT27jW+q0qLxs9rvfqj5/I/xYzzb96zyrpaatNZIU82PLsiUrQ9pve8zB3IankzsnSmAizZ9n7C0AHHd3f2DaBpeZOiTSCT8OarkYIdeu/aGpF4HuVNRDxMl+iDJPyZKZKiI0h4hac8Q7il58oQ6eSqc9O9nVVnaVcrTrvSnOvBU+Vn+vfL9qPlbb1qd8nfPVP5+BkmSdmo+tw/78KzlGZ7tSn9+2P2h+vPu7m7152fY+53y9/LP9WlvNmrWFEfqkbfXYqCbUa41Cv74GIQbl5q+t3TlAmIfz7s2HQ+gw5bNkP/jqunP9hx2PvqgHRQKe9Pw5EAPfkk7AFduetSMMMnn6nZrFoYRJq3zizR5XQ/l+pug55+T6NU/JkpkaIiS/+7K9hDGEaY9UdqtjP80CpL8dwtaVEXCvFxofU5NtmqR06KcGqiWPnm0SW9kSe3f8nH2YZ+xIH4OtelSr8K72Sstu3/edT8kvMsU3+0HNvJN38cPjCJ64rwLKarFD8J05s0zyNyWgjzE2+J4kn9i38Ep7DAVnxbR1f0LiNslANL+Srl/dnf00TQu56d27XWpXivP14ubPIX11xaahV+2KkpWjsPYoz7/mCiRYUiU6L9H2wm1wQLsZKdWlBpGkBTSYXmkxWUaptk1mYJX/V2L+nsiiJDNQ3OhLRcV/3eTUMiSuJFH6d3+5m8EEPuHL13Ze6ke2oUpezeLkeGR6r/Hfz2JyXPj9n0BhR2mqcszmPlob43V7NVZjBwf0fkEBbjRWN2dg3B7pvGFCAf+k3tAVBn8Q7teC2dHgKd1DzF+ngL/7rT+jXoHEH7ZpfoS/+kfgFZ+7xePchB+e0bnYAoiHMBxwP448FwC/AvdwKFU7fF00tSUtUUIv50gS0t9ehJJ8C+lAJ22SfhqDvgq3fjCi93gz6r8XvnZkz3ATmNZ8R/ek74faCyTrSKEtRyQXwE2i8B2GdguSe/jYsD+A8BzCeBnneA7eoBorPEYWuUTjUt1SZnGczr1pQna9eWhlNZqehYhXDFQRmqopL3KDoD8KoTHK8C3q0C5LOXZjiiVdWsMOJCQyvvFTiDR1eRaECDk14DHa5rH4xNJoD0JrrMH3Aud1s5NZqsI8dEixD+uQCgW9r5XLvsDB8A/lwT3Qhe4QykgGiU/9na5cuwchEIe2CoCoigduzUGHGgHn+wC150C9zOy8ym+o/7AlD9xHtyRvTZd/y4svSoMa9Slf/gSeP6g5qeFr+aAOyrX4eFB8KcnIbzTL52rHfysE/z7UqRf1XYW0rnjyJDmIarCtF2C+GgFwuMc8H1deXAxoK0d/PNdwEspcM8niZJXOjvUWB4vpRB7d7ZJfRdR0sj/2Od/kOoHCZVpc8/+v/8f7D77M/D/+Avs/uhHmrLke3Z3gWc/AM+eVf/e/WFH+nlnB/hB+rO782fpPbsA9rVg379vBf4ihh/95N/jx/gx8CPlMSt/y8uxnkF7oMxmvBCmoD87AABw7UlpOt5t/Q4D4M10PID+KXl9A32It8WrU9NmfjOF2F9EMfb2qD1fQOGUprF3TiJ9LV0dXZo4ewF9A330rl9yI/92RAj3b2m/9uAW+GNKiTY4bP7HRQh30sR7pamnA+Zath0R2BalTv9GHsJyFrh5CejuA39sTOrsa+FE/a1Pz9IC0JYE/8Z5IKHdKXMEZX6WS5IsryxCtWx3AIhFoFwEvlsDlhYggANe6gH/6kl70y7Xl2MW6otbrNyDcOeqdodYLuvNgnReX0F68HB0GHzvIMDVSruwcg8gOJ6wWQBWslKZ7Y+DHziJ6NERSaaMUi6ifGMGwlIWzcpe+GYNwoNbADjw3Slwx8bA/UynM71dRvl2GsKDeUAsax97qwjh8QqEO2ngZ52IHR+ThMwizVupkASwqSBulyB89Tmw1KQ8ylJ54Ks0hJ91gj82Bq7TxAPnrxch3p4B97qND2E12G3Zxe6zXez+5CdAy08aRClwtLQAP4rUyM7eHruVtVLPdtGy+6wqVLvPfsDuDz8A/79t7PzfAn749/9PcPj3tcIE7ImSfFAXss+LKXmhkCUAiB4bh7Cy2Hw63lYB4p00OA+m49EuTNc/vY7+vr0RuslzE8gtL6JvoA+J9sq+VpQJj1VGXh/G3DVJssXtEtKffG7viJqduCCc4sqi1AnW4sE88OqYNCpilrtzQFs7cJhsNFgVs8JUjyhKnf2VRfBvTALdOp0yN4T/aR7Cb06B/9UskFR/wmor9dPmvi9A+OiMfh1QRQS+XgSe77Rf9OT60m2hvjiMcHMaeKDxkEGPclE6v95Be463VYRwJy3JkkHEjTxKF0+ZKnthJQv8rFNTlsS1HEq/fc/4sb9bQ+mDU+B7BxE9PWVOAGGkyxWSgA/rqxCuXAC2jZeH8JtTEA73IfaG8fIQ7s5Jo6CH+4x9rwGqQRqwC/zoR9htQcMUvFDRIgVKlyRoz4RqJuLt7gK7uxCfCeB2+dp7gkfZ5bYwhUaWACD2zjRK50bUn5IoEO7OgXup15PpeDQLU8/hHsxencWZt/amzWTvZ5G93yQ8e4BIX0tj9JfDiLeZ22fKcRzusAsPMvpv2C5LTyKPKDtjxhs04bNL4A8kdKe1NMXOfBDLEK5MgC+fB45qT11xRZhEEcJnF6Qpcm624KIgTZkz3FmuwHENnX67qNYXqyLmQH4KDzLmxEamd6hmVEm4b+14vJlRJVFE6X1rZR/VuG7EpQWUrkyqTgMlRVhagPB9AfH35wCDs0LcutvyAASXvssSy4sQPrNWHljOolQsInZulnxqXAXh2iRw4AC45+1/GKSMZves5RmwryV4U+6coKWlIlXSkpGf7PxE8ipFtlUDSbiIm8IUKlmqTsejNDqejFvClF/LY/H/zCG/vobVx6vIrzcPghF2xO0SLl2+hNmrs14nRRuHOuzit6vStKomCPdvgT8yhNqnsAYbtB0Rwm/fA//+l8B+g9Mea85f4zsjHPDzulEisQRsbgJbBc1DCzcvgT8QB/SmmRjNfy4KvFjXMRAFYGtTmpKlxlYRyOd01zDZjfDglvaUrwgHtCeljpEoAGWVtHf3ka3/MoOyvuhNlzSLWhlp8RfRvZ9FAbgzp/3e/QngwAEgwktrfp4Wah/mRThpCp7yeF/pHO+AdDw+wkPYLgEbjceLHh0mOw8F5btz2tcFJ5U93xqDsCNI11Bd2fOHB1UlRlzPNReltqS0bk6s5I9iz78avltD+cMJRN+/TnZStNHZC5TKjb/fKQF/XFH/zM9T6qP4cZMP8/KrzUXJQHmUPplA7Oycwc2BRQgfvQdc/hLcfvsfSlZDOezuAi2V0N8I4YiSBf4N/4Yf//BjYB/QsitJlJyPbm+I65YwhUqWACA6MArh0SLwWKPxkfFwOh7grDCJZRETZyeq0e0YxsjczmDs9BiSHWSLWT3BAWES7hI+zd4sAGs5oLN+yprBBq1chPDxGfAXrzes12hKs/NvjYF/V2OD5EJBWg/xx0XVl4XPLoH/+B/102Qk/6Mx8O9oBClYWYRwTT3ggPC0IAVOcItH6vmBn6fAv3m+NlACB2BbkAImLC0A362B/x8cDo6irC8Rm6VMr4z0yK+oz2SIcODfnlaX7sITCP+SBZaykqApOozCusbxOA6x92Zr1u5EK3+L3+UhLi1AeDAPvrOn5nikCMvqswf4l1KIvjtdFSH5O7FdhriyiNKDDPDNGrgBlbIXRWnqnUbHnO/uA/f6OLi2xN4vd0SIS1mUbkypdtKFPy6Cu5tR/z7K4U9oBBbZLEL4o/oUU/6t84ZHbjQRBQjXLmiL0kt94IfHGstj+R6EmzPq0vTHFYgPMuCMTvssFyF8OAHu/TnTUyvrqQrSbqMgMVEyzp/xZ0SeRbDbslsVJGXIcTelyQ1hCp0sAdJmtaV3hqiejgc4I0xiWUSqLxXqUaTR02MYPGptTnQ0FrUnMU5iozCJWwV1eXihG/im8cGDcD+DWGdKpfYabNA28pKcvK0hNnqYbd0SCfDvTkO4PQ2oBbMoF4GlBaBZB8CO/O9OAV8l1EeY3Gy9dyBFvFOBPzrcKEqANIrU2w++tx8oFIBEQvXzmpjJP7m+nDZRXxxA0Mgz/KxTe3QycRB84iAwMCqtmVOiNbL3s07NIAfcz5LgfnYe0eNjksCaQeM8uFdPqk97a42COzKI+JFBiN/lwbU3Plgq381ong9/bAxRtYX+EQ7ckUHEOrpROvu3qtMCS7dnED8yVO1ki/V5yFBFeLCgXb8GRveC7ijXg0Y4cL1DQEcPhHOvqZaHcCctvceo9GysofTZJGJvm3hIoYFyvdIuKuLERMkw8p5TP+AH7Nvd1zQ0uRs4LUyhlCVuf8LQdLz4pw9dSJU6dguTmij1HO5B919bjybkGBY6nOXtUjVAAwBwrTGcPzdOb0Q7u7FJmIT7C+qhpY+NSVG76kdqH69AfJoH15a0LkwrWQhtCfCvmom8aPKpZATgj09IYZlVgsIIy1lp7QfBcSzn/7bGk/cDBuXDKhp3C+HBLfDPJSRh0spuo6Kk/E6j+SfXlwGbInVaQSvQycZaZfRV50FcawxorT+exnu/W4P4aFE/Klxr1PB6nmbfK/6vt8AlDuoeVyuog6C17uqFbkSP6wfR4Q7EEfvVRyj9/WuNL26XIa5kwfUOMlEywtKC+u9f6KyJNqm2cS23Pw6c/gDCb041fr4yysj1mnhAuZyF2JYEZ6rtr6W6VgnPmCjZhLRP1TNJmDQIyghTKGUJqEzHW18Dvm4SnGCrgPKNS55sVitjlzBNXZ6pEaVkRxJz6TkkOymeTiZjssM5dbl2P6DJMImSjNUOu1iSgjbUcyABLtkFlIek0LF1CPcz4N6YUmm6TNTlO2lprvwhF0d5IwB/dFR9GtxGXnpKT7IGx0z+7whAcVPam0UtIlU0DiRdHvFuSwDfqKxZ+3oRwh9zUqcq2SWNmjyfND51Ugsz+SfXFzMhjG2Eb0uoL+oXRSlYxv4E0NEp7Yvz/EFpzZHu8ZKaxyt9cAo4kADf2Q3uhS4g2QnOLqFuT6pOXRdWstK09hd7wHd0gnuhU1qY32QUQXxa0FyPF3t1lKhnwnX2SHVNZR2l+HVOWiMHBC5CqyNsFjXLgz/aWB6qwtTZA6E9qf5w6bFJWQKkkPdtCUvh4dWkiImSNeTRJVmYtDa7ld/nFk4JU2hlCahMx3szRzYd74VOcN3OhbNshh3ClL5SO8KymF0EF/VJKFQTHabSdglpxahSvC2OsdM+2I/FCSwIk7iUVb1G+CPSwnPuUApCa7RxzvpyFuLxMXCtcUXTZSHi1bVJ8PvnpI1O3aJDZ9PL7wtAkjD6ml5Lu1nQ3DRVHU7aUNLN1jsC4PCguiwB0qjj45U9aa4EfOA7eqSphG0Wy8zEuQrXJsFfsKm+kJbRkWHwryvkOtklCZBmoI4CsFSo7EWFigR3SuvAOrsbhDN6qAdCW0JaWK+VzvuFvb3QonHwHd3g/kNK6myaXP8ROzKEktY63x1R2hfqj4vSOchlfyglbRyrMgUPBY1p4BEOnIEHIvyhFAQVWRIKeWmQk4kSGTrlofXAQU2Y+EMpCGrbsxS0g+aQIFyZBN6fq10vZZDqmiXpHzbi0uZClKMln0ERJu2xsxDAtUYR+zVZVLPSlUlp3YaHcBb2eChuFKubqwLA9IcfEItSbjmHqcszmLo8A7HcWPnya3nd123DYIfpwtkLNed8/apPoyTZhanOtcYmtBFO6jzLP/eqhAXeEYEHyqkdhHVDrXMFSOG7fzshRQ1zi2hMeyqVVhQoJ2mNSuu3PBgx4Q/3k4f+3hGlPVe+SkM4OwThwwnNdS+Woam+qMC/PS1JEAnlIrCSBa5NQHi3vyZUf7Q1CkQ4xM7OGjqesLyA0kdnUHzzZSmqnQm43kFpbRoJctnfnkHpnX6U3z8ljSQpELXKRO96U0uXVrCKcpGJkhF0y0P7YyLE2nzef0D9jaQh59s1Hk6JZQgfTmjXm2bsKn+0W2zCK0q7Kv/J0xyV/8nvdRNO8X87CPXIEgBwHT3S+qXbaf03imWULp9B/ON77iRMA7MjTGvrtU/fRl4ni06TvZvFyPDee2/dnMPqympVtHLLuZqNatNX0ijkn1Rfz9zMoPD9puH06kJ4E1RG++s53IOew95OyaECgyNM4qOcesjgQylwiumMfO+gtKFgHcKDBXADoxANtDT8sTFpsbFaQImtAoSPNaJGGcXqxrWkn7Wz07YjQvhuFXyy074oWAbgT0xCaEsCX6WNyeIfF6V0/2qWfDSONE2vjkFYyqiHV7azvpjluQT4i9chfD7VPAqrku0ycHMGwnd5xN+brtY3rj2J+Mf/iPLVCxC+1ohQqEa5COGzS8A3eUR/NW247kdPT4FrT6KkFflMA+HrRQjfrCJ2UZqhoY9PZjpo4t4mmbSgNsJkFv7YqGNtP9tPyTmUU/LkEaT6vJZeh6vhH+wcYQq9LAFA9Ng4hPXV5jeyjbzn65cAc8K0WrdWiRTlNDYAKD4tYv7ufFW2lFP7AOmJ4dzNDMbelhZk3rp9C7nlnKG0OsH0Jfsi6vgeA8Ik3FcPL8//x9oRBu5AAoJaZLxyEeLyPaBXPfStFvxbH0C4qLGugWCvJ2KaCVO5pB1Kl4uSHd9ORBG4fwvCoxXw52Zrw0BrTbFqloYdaJ+jylN+/sgQcLhPCgu+tgQ8Xm06lRkAsF2G8Nsz4D+5Z996JkBaW/bWNISLrzlfX8yyPw7+bFoKC/71khTc4SlhRNKVLMpfJRFVLLLH/jiiF6+D+y4PUV43pDb9SQVheQFoT9QejxDu6AjivUMQl7MQv16EsJ4jE6ftysPGTx8CHAeuNaa+9qpclOoi4eiSqBW9zYm9tmQ4rjFKIaC4htQ7Z4LWdWhTaGxLaD14KZeIHipVhWlL48Eo6UhohEPsnQ9QOqfR9mtNAyaBeZKjqItoS92/3NYl+4SJyVKF2Nk0Sm+mfLF+CXBv41ozlP572eskNOCLUN9uQiBMYiGvGhYckEaMhAd10ZM0Ok3C/VtS+GgjtPLgz85CuDji/HQ3vc7Aus7NudlaGFJR0trwVBSAclm9U115yspfVsisVqerWf7pTW3R6kQpw4LvQFq/9d0qhG/WpDxTC0ohp2Vl0bA8N4VzuL6QbkrbbE2FHBb82JiU79/mpTU3+VXguzy0bujC/VuqciOFBU9KYba3yxDzqxC/WZMk5hvjxyOCk8J3c0cGEQUgbuSB/CrEx2vSPlBaU67KRYjLWXBHBqUAIGrsiBAf5cB1ky3mF7T2/nrOwaBFXAwQVc6xpt6pdM60rgkaAg4ltMsDazmiwDoiRJ3yMLDWqDUG/twshHMutP0M25En3bVU1nLVjy81/uQ8dggTk6UK8vol1VCkdZSuTCL2fBLcfpdD99ZhRJgSz+3NJTayx1Lf0cGakSGuNYahgb31KSOvjyB7P1vz+ujw3tz2zhebTbtwDmW6L12+hNmrZOvTQkMTYRL+N531Dc2iSCp5mgfWV4GOus5ms9bnQBz829MQPjqjv6O8WZTnryZMO9oja2hP6kfCMzKi1GzD02+fQPjoVOPT7Kf5mvDT/AGNyGubBUm8tEZzvtUQwv1x9TKq/10EUmjwREIaddoBsJaD8Nmk+sahG3nwsFmWKul1rL6Y3ZRWj9YY0NkjbRQLAOWStBnyskoI562ilJd6ob9bo+AOSYEcohgHykWUb840PtQgPR4hXHsSaE+COzoiydOjRZSuXFCVJnFDCrzAHUhoBr4o3Z1D/FCq+WjGWk5z1JD/ebfxEyHlwAH1/YS+y4M/pPMQ9Vv1+y6vtc7HTQ7ENctDuD8n1dFm7fX6quboJv9zY5HsuAMJ4FfTEH7jUNvPcBBpMh4Uo0je7LxUi1Vhiti5caXf8dv6JYBcmBLttWKXvZtF30Dz0bGxt0eRaI8jczODRHsCY2+N1QSG6BvoQ+ZWBtm7WUSjUYwcH0G8fW/IfepDFzaH1Ki/I8N7Ipe5ncHw8WG2bqkejetfLBelEQCbEO7fAl8vSyR0dIF/fZxoTzRT6AiTcDst7YejAn9Y59qxuz19/qAUBlst6tdGfq+z/XxSmr5U37nYESEsLWjuCyWohYUHpKhs9awtAuD0nzRHIL3+3RCgFlDAyc5Psgv88XEIN0nriwtToHYA4as0+CPD+tPDojGprqvJEiCFk0cU2BFRvp1GdGBYf3pTNI7oG1PqsqQ8HiHiShYA13TUhzuUAt+7IoW9V/1OCf7IIISbM43vebyC8u0Z9U1p5bRsFlG68p76i61RwEKY6aYke9Sngy1ngVdPKjZoVnTMvn2iPU3STLvoBL2DwG2V8vhmDcKd9N6mtGpsFSFcu6D+WmuUeKRQCdfRA9jY9rdUO+4tbO2SC8jCtPf/PbySJyvCJEXDY+NLVaLHxoEXCZ5KVdYv0QBJlLyewz01C/Inzk4QR67rG+hD5ncZTH04VSNCytdnP53F1IdT3uzZpFF/pz+sfRJ86SM6yos61PLvgfomtKb546L5aGhHhoAjhJG4zKA8/x0ATwtS9Lb7GiNr0bh2VDgnHjx9+0R7fYuyjCI88HMNibmTbpTfHUESQo21mvxLjUIo3E5D+O0ZCGdHgLsZ7TLdKgEaU3Ic30z3yBB51D43WLkH3J2DcLYfwrVJYD0njfSpIGhtDMpFgVap7RWXsxDupKXodr+dgPhoUX0NDYCy1sio4niklG7MoPSbUyi+04/yV3MNEe6qbBUhPNJYp6qYjREdGK1dc6dAuJNG+aMzjd+xI0JcWkDp3X5pdEwF/tUxcJxzU9v4lzQ6/uWiFICgZrodBxQKELTErj2pmQduwx8Z1Jbvu3NS+O76630HwPKiNGVOY/olf2zM9Los7uiIfW1/CxMld9mt/l/5p/ZV9zEbJS9S8xMbYQLgv/VLANkI09jbY5j5jTTSU3xaxNDwEK5fva4qQL5Dpf7G2+IYf28SMx9J55xbziFzO4OR42SRAENFzQiLWBOy2C6E+xnwJ8xFM+Jfn4DwfUFzDZVhtksQPp6s/Z1YAjY31aP/KdPyxnn1KW1m289yCcInKvmyA6lDqBMIoH4KDz9wUj1C2o4oba57JyGtq9kRKhvrltUP3F63oWsEkmzJ03Se5iHczktPoluj0hQe+WFMuQhsFKD+9I5z5ql/3fXPn5iEUCzaV1+0ykgDfuAkkJCi/lVD74sisJKFUBmhwYE4ED0g1SVRkMpZozz47r1paSV5xEaURgwlweKkco1Gwf9FDMJ/LwFPN7Q7sN3Np7kpEZeze2W/kYdw45L0xL81CrQlwFfKXtjSL3vusKLsOQ6xX32E0t+fUn0wIyxnISxngbYk+ANxCNv6eQQAeLEb3FGVbQw0EJYW9NclysSi4E9U2otEEvh5Sj1i2+MVCG/1Az9LStfDVlE38Ab/KkX7/nE8+NMfaE9jletuW0XwxJK031ez8jhi7X4bOzGBktW2X7EVUgtasNuyywI+OE5LZeVS7TjSbvVV7zAzwhRp+BcTJmn90uUMSudGmgoTLeuXgObCNPHWGLL/63x1zVJuOYeu7l9g9PVhJDuSDVP1PMHm+tdVF/nv0uVLTJa0qFz/4vI99Rvg/jhin9yD1lOZ6qazS/NSiOJ6lhekhe16a3100sa/Ow3h3GtNZYaIHdHYuqsK/Ovj6nscWam3YhkwEgJahlMRj8RBYGBUffobIOVds/zjKpveylTuEprrt7bL5BHnjgxKkuAE9cL0zhSEi6fsqS9Gy6i7TyoLzah3oiQfWpvVKuGi1SlpombUO1H6nqdQX7dWf7zj2lPc1CipTakDpLL/Zq35dwLgB0aktSjKpHT0IPb2FEq/nYRmx+VpHgJJ5MD2JPh3p2HoqfFGniyK4P44cGLv4Qp/8jyEc3n1oA07IlnUtsN9RIETXKWjC/wb5yFcuwS98iCK5NietGedX4RD7N1plGxo+1taWvY2pmW4gjK3aVi7JGNUmBqfLTFhAiAtWuXfmIRwpcnTRIrWLwH6wsRFOczfmkdX9y+qm7uJ26WG8OBBpvi0iKnLM5g8Z6yzEBoiUN+EFpDWXDTtiHDA4SHgtso+PKIILC0AAyZltZUHf3YawsVRslDVdsJVniwfrpMTz9rKitCoRNLij41B2C5JeW34sFHwp6eqoyLVO8RT/SfkRLyUAv+6w3seKe9frTHv6ksF4V+MC3kNXGXj9MpULfH/sOl4BoRVfFqwXPZ8dx+iJ9TbXK53ELHoAZR++x755qX1HO4D/8YUOAMb2lpifxz8ex9BMJvmn6fAv+HCel4zHO4HH41LfR+z0ei6+6oj8LbswxRVRMgzeS231ERiU98LiGEHakrUovp79wOJ12JEmPap/patYQIARHsH9Rc1ymzkUW4mVQ6zuLxY/ZNbzmn+KXxfwNyns4i3BWDqnUnS19Iomd0JPOCIWk/COQ5ck3Ug1W5KhAN61afCCPdvWROMtgT4t6dg6OmxFSIc0DsI/sN5ekRpfwL8r6aBbu2IcvyJSfBvfEC+vwkAvNgN/v25vZEz5X2gLQ7+8rz0NJxkfykl0Tj4E+elp8xu3FuU33EgIcmfR5ud8m9MASfOS1OXjH72pRTin8yDU4xkRn81jdjpD6RpkiaOF6s7HglcWwKxT+6B7x00VfaxNz5A9NezunsncZ09iF+9B35g1Nh3tCfB//o6Yqen3RMlmee7wF/+UhpFJK1frVHwr4+DP+vStWCWji7wH98Djg4bL4/3ZqU2WjFVWYRoub3kLLT9LWhBS8tegAeGc0ha1ALU/FG+qvUvbyBdw6R9ubIRJgCVDWu/LTSdsiMsLQDtSWnRqgsUNgq4dPkSVh+vGgoFzpBG0y6cvcBCiasgaAU16O4j2g9EfkbDHx2Wpm3Vz30vF6UF74cthI7ulKNWqkRuskKEk6a2RePSviAvdkuR5lpjqmHFXYHjpOha+w8AiST4F3uADoIwvoD0hLi7H1hbhPA4J4UuLpeltQYRSMc90A4kD4L/ee/eaBKgfvy2uCQebwBYz0n7AxUqU8m2S9LIYQRSfrUeAJ5Pgv95jxQ9zG1XUd6/OnuA42Pqkb6c/P7K33zvkPTwYLMo7X/0NA8U5LIQpGukNSZ1pA/EwXX2gjvUI60DUzkud3QE8aMjEDcLwKMcxI08hEIeKG8C243HQ+V49VPgjMC1JcD9ahrR0yLE9RzEb9aAQh7C0/qyj0vrppJd4H7eLYkZqcS0RhF94zyix8cgPlqE+MecdF6b8ka1kOpsWzv457uAl1LgtPYHcouoFK4exwrSmp78KrC5sVcOHCdFQEx0gn+xU3rAEbG+QaYrtPLSSPCrY5U2ZEW63rfqykPZhjx/UPNwdowwcYdSgIW2v6VFWkOzu7srBXzYZQEf7GQv4qA0EvMD1JWJNkhGmFp2m03gZMIEcbuM0sURoqkIsfdmHQ/4MHMtjcmz3o5kecnI8RHMfkooOqz+WsNk/okqP/kGrXOONHk9KET2ImzSuvE1MRSXVbQ1SvfoAiWIOxqjEjaXrbs13efXlQU4WJySZ5Jd7GJ3V/rzbPcZnuEZsMum4tmJMjz7PuxDC1qwUwny0NLSgpbdvelsNAqUqPh/Pc1lCaD6huMW4lYBpXeGms+X5aTgEJyJaRIkTJydCNUao3q41hhWV/5gLIIfq7/WCJMwhb2uKERJhgmT/TBRIsMtUQK8aKV8fl1ZwEtherb7rCpMskD5H+3NX908O3kKXv1/P8iyBKBldy+dtMkSoC1MZLIEUHnDcRtxPYfS37/W/I37E4h9PA/Oht3RlSzcXcDIcO3i+L6BPowcH0FnR6duNDu/dngyNzM489aZ6r/Hfz1pLjgDq7/WCIMwhb2OqIiSjF/bjyoUlS0TJTLcFKXqdzp3aGq+kRa8EKb60aXqv309ukS2CsuNM6xVJFRHlwDgWcveSibs0ilKMmrCRC5LAFU3HK8oLy00j5AHAO1JxN7P2CpMf5k8iKJik77MrQwGB8g3X/Rbh0csi+jq7kLxqRRtiGuN4Un+XxGLmtxwkNVf81jIO18IU9jrho4oyfit/WiAgjJmokSGF6JU/W7nv8Lzb6QFr4SpfnTJr9PxWrAPLbJ1ECT/mcOpUY4s7VP8W371WYtiVIny7K4XJvVoeFqwRl6KkEeyO/xGHuIN+0KDLi4v1ojS5K8nDYkS0LwzRBvTV9NVUQKA6Q8/MC9KAKu/ZrEaxUjlJ2rYARWdaE8hECXAf+1HA15e/xEmSqR4KUqAF62Uz68rC9gRJc8oLWjBvpZ9aGnZW1dD9TCHBi34Efa1qE160/4v0hClzpk/e2NdtREI9+1WpuF5HTOcgPooecZGlmTC3rkAULw4AjxuvqM0f3wM0WPW9/RRBnXgWmMoFf/fpo/lhyfExY1izX5QyY4kcrmcPQdn9Zccm/JK1PmXZ7B6QCxKSvzQfujidrlHgCgXZaJEgNeipISNMLmH2yNMqtPxfDTC1IIfI7IPjaNJBEn/sxMJqiCr0j7sKZPfA7aLALiI2erJwoojdjZNFCFPuJ0G9icQJRmN0iG/trcjeFenseARly5fwtRvKN0Aj5Dp/2LDTuAyrP6SYWMe1QblpCB0Lit/U6IE6G987QvcvP6ZKBFDkygBXrRSFLSLHmHLxrUGUI4mVUOJ+4Z/hx//CHs7uhpM+r8D8G/2J0pB475KfhUlQBIlLsIZnIanJOSNP9caRez9DNHmgMJnUxAt7oBeUEzBS/11SuedwSPZkUTPYWMbKTIs4NDUNE7nX64T9vbLpChVP+91+VnFpc1xmSiRQZsoybApee7h9pQ8OZz1vpZ90h/sq/Tqazv7LS0taKlM2yP6A8XftmvCT/CTH9V9h8GpeC1owU8cnYa3l3cyflLRGiqiBBhds6RyoDDfCLjWKGLnZpvvcC2WUTo3AnGroP8+Qgob9hzHLxQKmxDLNj5xY6MK2jicN0yYvIeLAHbkPRMm/WMzUSKDVlGS8Xkt9xWeCFNFOKTBJnmophLLrUZEfkSmIi11x2yxS5o4cBFzcqT2H+egMO3acr4eoxAlwOyaJTUoadi8QNzIo3RupPkeTBYi5Cmn0iU7kljNrRJ/trBRQOF7fwlWYaNQEzLc0Ea0eoS4njbFxbyhag1TiOqEXaKkxNdT8gD7y5+JEjGaoiRDybXJ1i+5i+trmBRrl57tPgN292HfPnn9krLjT9hd3pX/2lX8alf192Rwlba7LhlafxvAzpqmVKZ9ip8B+Euf6kQJsFOWAGoaNi9wWpjq91jK5XLo7Og0nlANaOzw9Pf1I7e8F9ThyfoTY5vRKglx3STC8wXUTJicxglRkqGx/TCEXeXPRImYpqIEUHVdMmFyF0+ECbvY3QX2tUBlHZMyRrd6OLd6CaoPGmFOmOpESZkEqPxtArtqmpYs+V2UAKvT8FS+JKxw7UnEfkUQRGEjj9LFEYjbZUPHrxej0f9pFOWysWPoQeOUmulLtUEdTr11ytyBKLrhUomHC6i1/uU6AW+7nBQl6cj0tR+GsKP8mSgRQyRKAFV5ydYvuYvrU/JaWvCjln340b7atUx765HQdP3SvrrX9mFf7VomtFTtgWRqHqclSjbjdE3zzZolDVEC7JalypeFFe5QH2JvE0Rt28ij9OGYoWMn2hMYOb43spRfz6OruweLy4tGk6kJbR2eZGey5pxzy7makSYimCjpQ9UCaiZMTuC0KFW/x+vys4qV8meiRAyxKMlQlKdMmNzFq32YqmuPGtYHya9rr1+S925SHkNLmvSEye2RNTtrWv1Z+WJkSUeUALun4SkJcSdVXFpA6cpE0/fxvYOIkshVhXK5jFRfCvn12sh68bYEOjuT6Hqxy3BatRBsO5I1NjcKyNzOVP8db4vjSf4J2YdDXAeJoCR/GqcAsCl5duGWKCkJ3ZQ8JkrEGBYlJRRdl2xKnru4LQ5aaHeWNV6pm4JX7W5Xfq+2t9MudvXPVzntblfl9xawUstIY+RRSRNRApyUJYCqxs1tyjcuQbg71/R9RoVpbX0No//TaIMwhYnZq7MYeX1E/00hrntNoTBvqFq/BHiXR/IN0obv90KUZEIjTEyUiLEkSjIUtV1MmNyFFmEySv06pao87dauY5J//+/w74Af6R7Q1vVK9ZipZcogDr6TJQJRApyWJYCqxs1tylcmICwtNH2fmRGmqctTSF9LW0meb+FaYyjkn4CLEnQEQ1z/VKE4P0TF/6nA7byq7whY+H6Sxt9pAi9MTJSIsUWUZChqw5gwuYtfhUlmF7UjS8rf7e7uIoJI88Uxz2oOWPu3TRitZWqytK/u91RCKEqAG7IEUNW4uQ2xMB0fQ/TYuLFjl8tYXV/FyvIKVh+v2hrwgXbGTo+hb6CP7M0hrn81UJ4PVHau3cgzvZu/ie+nQZRkqCxTI2jlPxMlYmwVJRmK2jImTO7id2GSUYoTgL3gD3rIolTfa3egF2+klsnJro+AR/WokgFRAtySJYCqxs1tiIXp7WlEewddSJFxAtvpCQuUnz/V9cvJvCO56Rv4fppESYbqsiWhPv+ZKBHjiCjJUNKmMVlyn6AIkyF+UPmdw713kprmy1Elg6IEOBENT4uwVWwF0benwRNIkHBlAmUCqfKCUEe68juUdCq0oLoz7bUoGXgfjaIEBKztYKJEjLgD6tseO2AR8tzHiyh5nrKDvbVKyj8Ow0F/DZLWWiWqMSFKgJsjSzJhquB1sBEmCghb/aP4fKmvSzSIkhKd9NAqSkqoL28CmCiRIYmSC+VNUfvGRpjcJxQjTBTU8T8rfpaFoQV7W/PWCxS1o0omRQnwQpYAKgrfK5gwUUBY6h/F50l9HfJ6rZIaGmnygyjJUF/uOjBRIsM1UZKhqJ1jwuQ+TJjc4Qc0DmapjTDVv0YNFkQJ8EqWACoK3yvKd+cg3LjU9H1MmBwkyPXPB+dGdf1xM/9Ib/IBECUZqsteAyZKZLguSjIUtXlMmNyHCZPzPNN5jWpJAiyLEuClLAGeF76XEG9cy4TJOYJY/3x0TlTWHy/yr9lNPkCiJENl2WvARIkMz0RJhqK2jwmT+zBhchd5Cp78N7XYIEqAmwEe1Ah6xdaB6x1EjGBvJRb0wUGCVv8oakhJoK7+eJV/et8bQFECKCx7DZgokeG5KAFUlRML+uA+oQj6QFEdp3ZdkhKbRAnwemRJJugVXAfiEaaBUURPnHchRcbx01NiVYJS/3x6HlTUHxryTu1GqJIuv4tSPVSUvwpMlMigQpSU0HAtV2AjTO7DRpgYAGwVJYAWWQJCXfjEwtQ7iCjBaJQX0NrhISYo9c+n5+Fp/aEpz5Q3+RCIkgxt7QcTJTKoEyUZSq5pJkvewIQp5NgsSgBNsgSEuvDFjTxK50YAsaz7PiZMDhKU+ufT82DCVCGCUImSDC3tBxMlMqgVJYCq65kJkzcwYQopDogSQJssAaEufCZMFBCU+ufT82DCpE7QRUnGy/LnAHBMlIigWpRkKLqemTB5AxOmkOGQKAFeB3hQI+gVWweuPYnYJ/NAe1L3fcLSAsoE0/a8wC8LtzUJSv3z6Xl4Wn8ozbOwiBLgXfkzUSLHF6IEUFWWLOCDN7CgDyHCQVECaBxZkgl6BddBFMvSCNNGXvd9fO8guBOT4Fqj7iTMAGyEiRJ8eh6e1R/a8ivi+8cPpnCz/JkokeMbUVJC0TXNRpi8IRQPnCiq567jsCgBNMsSEOrCF8UyxM+mIDQLG96eROz9DBMmJwhC/fPxOYRemCqd93Dqkjvlz0SJHF+Kkgwt1zSYMLkPBy4s1zdF9dw1XBAlgHZZAsJZ+ArKVybIhOmdaXBNpu95ARMmCvDxOYRWmOpu7kyY7IeJEjm+FiUZr69pBUyY3CJEoiRDUT13HJdECfCDLAHhKnwVyndmINxO67+JiyJ2OcOEyQmCUP98fA6hEyaNmzsTJvtgokROIERJhqJ2kAmT04RQlGQoqueO4aIoAX6RJSAcha9DeWkBwmdT+pHyuChib0+B6+5zLV2kMGGiAB+fQ2iEqcnNnQmTdZgokRMoUZKhpB1ksuQkIRYlGUrquSO4LEqAn2QJCHbhE0AcWvztaUR7B91JlAGYMFGAj88h8MJEeHNnwmQeJkrkBFKUAKraQCZMTsBEqQpFdd02PBAlwG+yBASz8A0gbpdRukgQKW9gFNET511KFTlMmCjAx+cQWGEyeHNnwmQcDhw4LgT7rthAYEVJhqI2kAmTnTBRaoCium4Zj0QJ8KMsAcEqfJOQBH6gdfNaJkwU4ONzCJwwmby5M2EihwMHrjWc+WWUwIuSDEVtIBMmO2CipAlFdd00HooS4FdZAoJR+BYp352DcOOS/pte7EbsbJqa0OKiyk++JAj1z8fn4IkwOZFfFm/uTJiaw0SJnNCIkgxFbSATJiswUWoKRXXdMB6LEuBnWQL8Xfg2Ia7nUPrNGf11TO1JxM7NgtufcC1dajQ2zT5vrP1e/3yeft8Lk003dyZM2jBRIid0oiRDUTvIhMkMTJSIoaiuE0OBKAF+lyXAn4VvM+JWAaXLZ/TXMXkYWly/OfZ5Y+33+ufz9HsmTBHFz2aISB15u9LPhKkRJkrkhFaUZChqB5kwkcOBrUE0DEV1vSmUiBIA7PM6AZZhFwq4/QnE3s8AL+mEDBfLKL3bj3KzDW5txr/NcEjw8fXj2dqliMbPBj4vy41dkuP7dYAm0co/JkrkhF6UAKraQfdrrT+vEyZKJvFLnlEkSkAQRpZk/GTLDkKyga1bgR+a3359foMOUp3z2bl4KwccGuouaf5F1Dv4bITJGsr8Y6JEDhOlOihpB9nokj5MlGyAkrquCmWiBARJlgC6C99FiNcxvZ9xLPADEyUf4pNzok6UZJrln4YoyTBhsoYIkYmSAZgoqUBRG8iESR0mSjZCUX2vQqEoAUGTJYDOwvcAcbuM0odjwOMV7Tc5tI6JiZKPofzcgipKMkyYrMFEiQwmSjpQ1AYyYaqFiZIDUFTfaRUlIIiyBNBV+B7TdFoeFwX/xiSivYO2fF+gRSks9YrS86RWlAD9PCMUJRkmTOZgokQGEyUCKGoDmTBJMFFyEBrqO8WiBARVlgA6Cp8SSKbl8QOjiJ44b+17bHgHtYStPlF2vu6JktxYi3W/a/L9WvllUJRkmDAZg4kSGUyUDEBRGxh2YWKi5AJe1nfKRQkIQjQ8LdiFVYXr6EHs00XdaHnC3TkUL45A3C4bPr4IkvDgLjS+2yLEGzP2H5eim2YYcV+U6n8m+H619sakKEnfzqLkkcJEiQwmSgahqA8R5gh5TJRcwqs89oEoAUEeWZJhHd0aynfnINy4pP2G/QlpA1vCdUzUjCZt5FG6lUbsnWnAzs5TmOsPBefujSjtfbshFPklbZJovR6yESZ9mCiRwUTJAhS0gzJhG2FiouQBbtZ3n4gSEAZZAqhq7GhA3MhLm9huFdTfQLiOiRZREpeyEJbmETubZqJkNxTkgbPCpFVfvBelvZQwYVKDiRIZTJRsgIJ2UCYswsREyUPcqO8+EiUgLLIEUNXY0YC4XUbpk0ng66z2m17qQ+ydKdXw4tSI0pVJCIW8tCkvEyVnoCAvnBEmJ0SpcoO3Oc+YMNXCRImQHUBkomQPFLSDMu6WqPv1h4kSBThZ330mSkCYZAmgqrGjBXEli9KVSe3gDyrT8qgQpW0RpYsjAMBEyQ0oyBN7hclBUVJ5zQ6YMEkwUSKEiZK9UNAGygR5dImJEkU4Ued9KEpAkAM8qMEuwAa47j794A9bBZTe7Uf57hwASkRpfRWlN1MAbBalHVB1Q6QKCq4d+zr5LogSYHuesaAPTJSIYaJkPxS0gTJBDfjARIky7C4Ln4oSELaRJRnWIValfHdO2pNJa5SpMi0PKtPyJJy/OYt3M1KAivak/aLEaA4F+WSts++SKGm81w7COsLERIkQJkrOQkEbKBOkESYmShRjR533sSgBYZUlgKoGjybErYK0lunxivobuChiv54FOnqUn3I+YdsiSp9MAF8vMlHyGgryy5ww2BDxTqaSB01FSfFeOwmbMDFRIoSJkjtQ0AbKBEGYmCj5ACt13ueiBIRZlgCqGjzaaBZinD82Bu74OFxpqjcKkiht5Jko0QAleWZMGDwSpbrP2ElYhImJEiFMlNyFknYQ8LcwMVHyEWbqfABECQi7LAFUNXi0IW7k9yRFjRe77Q/XXc/6Kkq/OQOIZfC9g+BOTLJgDjRASb6RCUNjfZF/Y1g4zIhS3WftJOjCxESJECZK3kBJOwj4U5iYKPkQI3U+IKIEMFmSoKjBowVlMyjenoFwJ63+Ri6K2NtTQHfK/jTI65MASZTenrL9OwCw8jcKZfmlLwzaokT2eQVWRKnuGHYSVGFiokQIEyVvoag99JMwMVHyMSR1PkCiBDBZ2oOiBs9rVJu/jTxKn09prmXiB0bBHRuzbdRHvDIJYWlBOraToiTDyp8MSvNJXRiai5L+5xXYIUp1x7KToAkTEyVCmCjRAUXtoh/2YGKiFAD06nzARAlgslQLRQ2eVzRr+kS9iHntScTemQbaE+YTIO+fVJn654ooybDy14fy/KkVhtqGmqTZ1hQOO0Wp7ph2EhRhYqJECBMleqCobaR9dImJUoBQq/cBFCWAyVIjFDV6XqDf7FVeVUamU4E/cR7cwIjxL98ooHT5DLBVkI7jpijJhLz8NaE8X8San4yL0t6n664AJ0Sp7th24mthigAcF7ybrCPsVMqa8usyVFBUFrQKExOlAKKs9wEVJYDJkjoUNXpe0NjsaTSEK4so3Zipyk0NBoM/iEtZCJ9NVUesPBElmZCXfwOU50f9eJL2+FKz47goSnXfYSe+FCYmSuQwUaIXisqENmFiohRgdhBoUQKYLGlDUaPnBaLKT6psixDvpCHcnWt8rbonU5f+d91O1wSQkMKSjxlKr+2EvPyrUJwP9TWTq3uNelFSfI/d+EqYmCiRw0SJfigqG1qEiYlSwIl4P33baZgs6UFRo+cFhjpcyr2Q6uAHRsGdGG/8zLYI8cZUNZADAPBvT4Pr7TOTXPsJc/lTfu56omT8WB7f4MMsTEyUyGGi5B8oKiOvhYmJUsCJcODk8qWo3tsNk6VmBLjwSTDa4RJvpyHczTQGgGhPInbi/N4oU71ccVHwb0zSI0oyYSx/ys/ZFVFyezpBGIWJiRI5TJT8B0Vl5ZUwMVEKOEpRkqGo3tsJkyUSAlr4pBjucKmMGFV5sVv6WxmCnIsidjljLYqek4Sp/Ck/10CKkkyYhImJEjlMlPwLRWXmtjBxABOleiprewKBmijJUFTv7YLJkhECWAFIMdXh2ijo7s0EQBpxOjsLHIibT5wbhKHsKT/HQIuSTBiEiYkSOUyU/A9FZeeWMGl2ohnBECY9UZKhqN7bAZMlowSsAhjBdIdrZRGlO+mG9Uz8sTFwA6O2bWTrOEEue8rPLRSiJBNkYWKiRA4TpWBAUfm5IUtMlAjwszCRiJIMRXXfKkyWzBCgCmAUSx2uzSLwp6L0c5MIedQSxLKn/JzsFCXpeI11mBpRkgmiMDFRIoeJUrCgqBydFCYmSgbwozAZESUZiuq+FZgsmSUgFcAsdnW6fEmQyp7ic1GrYXZ0tevrLnWiJBMkYWKiRA4TpWBCUXk6cfdmomQCPwmTGVGSoajum2Wf1wnwLX6p4A4R9Jj6ugSl7CluwJwSJek4e0eiVpQcxK5rl1i6mCiRw0QpuFB037D7amSiZJII/HGtWxElgKq6bxYmS1YIQAWwQuiFKeTl7xROilLNMWkXJQfrl2vCxESJHCZKwYeie4ZtD58oOidfQrswWRWl6nFsOIaHMFmyis8rgFVCLUyAv8ufwrS7IUoiRPpFScbPwsREiRwmSuGBonbX6tXJRMkmaBUmu0Spejwbj+UyTJbswMcVwA6YMHmdAAtQNELGREkDPwoTEyVydkK+BjSMUNLmAubbWCZKDkCTMNktStXjOnBMF2CyZBc+rQB2wYTJ6wRYxOP0M1Fqgp+EiYkSOUpRoqmjxHAeiu4ZRq9WJkoOIOcpDe2AU6JUPb6Dx3YIJkt24sMKYCdMmLxOgEU8TD+H2hs2EyUVfCFMTJSIYaLE8CFMlByEBmFyWpSq3+PCd9gICx3uBCG/8YV+Sonfy9/v6a8jEKKkxMHysXLtcuAAzqUbrd9hosSQoaj8m1397Np2CblOuJ3fbomSEorqvx5sZMkJQt6gsBEmrxNgEb+nX0HgRAmgcoSJiZIBmCgxlFB0zehd/ezadhEvRpi8ECWAqvqvBxtZcpKQ3whDPcIUhLL3+TkEUpRkXCgb0uuXiZIBmCgxtKCoPtRf+eza9gi3Rpi8EiUlFNV/NdjIkpN4Xfk8JpQjTDug/qInhrb6ayByX6BFCXClbEiuXyZKBmCixNCDomuoZv0oRekKHW6MMNEgSgBV9V8NNrLkBiG/MYZmhCmo5UzDeRm4aQRelJR4OMLERMkATJQYpNBUP9i1TQdOjTDRIkpKaKr/CpgsuQWlFcAtAi9MQS9fT6PzKH4mSQdtjb/TeCBMTJQMwESJYRQa6gm7tulBWR/sKhcaRUmGhvpfB5uG5xa0VkqXCPSUPAovbNtxK5RoROffTJTUcXlKHhMlAzBRYpjB62vL6+9n1GL0Ptj0eJS33xSmjY0suU3Ib5iBG2EKW3k6db7NGkcmSs1xqS5yHMfymgQmSgyreFFv2LVNL3aMMNEuSkooajfZyJLb+KWSOkSgRpgoupBdw4n6a8cxQ35dAXAhYhITJWKYKDH8CLu26cbqCJOfRAmgqj7+/wHgUrpELl6EegAAAABJRU5ErkJggg==" style="height:46px;">
-          <div style="text-align:right;"><div style="font-size:16px;font-weight:800;">QUOTATION</div><div style="font-size:12px;color:#666;">${q.id}</div><div style="font-size:12px;color:#666;">${Util.fmtDate(q.date)}</div></div>
+          <div style="text-align:right;"><div style="font-size:16px;font-weight:800;">${Util.escapeHtml(o.title)}</div><div style="font-size:12px;color:#666;">${Util.escapeHtml(o.ref)}</div><div style="font-size:12px;color:#666;">${Util.fmtDate(o.date)}</div></div>
         </div>
-        <div style="margin-bottom:16px;font-size:13px;"><b>To:</b> ${Util.escapeHtml(q.customerName)} &middot; ${Util.escapeHtml(q.phone)}</div>
+        <div style="margin-bottom:16px;font-size:13px;"><b>To:</b> ${Util.escapeHtml(o.to||'')}${o.phone?' &middot; '+Util.escapeHtml(o.phone):''}${o.extra?'<div style="margin-top:4px;color:#555;">'+o.extra+'</div>':''}</div>
         <table style="width:100%;border-collapse:collapse;font-size:13px;">
-          <thead><tr style="background:#F5F7FA;"><th style="padding:8px;text-align:left;">Item</th><th style="padding:8px;">Qty</th><th style="padding:8px;text-align:right;">Rate</th><th style="padding:8px;text-align:right;">Amount</th></tr></thead>
+          ${o.noRates ? '<thead><tr style="background:#F5F7FA;"><th style="padding:8px;text-align:left;">Item</th><th style="padding:8px;">Qty</th><th style="padding:8px;text-align:left;width:30%;">Remarks</th></tr></thead>' : `<thead><tr style="background:#F5F7FA;"><th style="padding:8px;text-align:left;">Item</th><th style="padding:8px;">Qty</th><th style="padding:8px;text-align:right;">Rate</th><th style="padding:8px;text-align:right;">Amount</th></tr></thead>`}
           <tbody>${rowsHtml}</tbody>
         </table>
+        ${o.noRates ? '<div style="display:flex;justify-content:space-between;margin-top:48px;font-size:12px;"><div>Received the above items in good condition</div><div>For '+Util.escapeHtml(s.companyName||'')+'</div></div><div style="display:flex;justify-content:space-between;margin-top:36px;font-size:12px;"><div>Receiver\u2019s signature &amp; seal</div><div>Authorised signatory</div></div>' : `
         <div style="display:flex;justify-content:flex-end;margin-top:14px;">
           <table style="font-size:13px;"><tr><td style="padding:4px 16px;">Subtotal</td><td style="padding:4px 0;text-align:right;">${Util.fmtMoney(q.subtotal)}</td></tr>
           <tr><td style="padding:4px 16px;">Tax (${q.gst}%)</td><td style="padding:4px 0;text-align:right;">${Util.fmtMoney(q.total-q.subtotal)}</td></tr>
           <tr style="font-weight:800;border-top:2px solid #152234;"><td style="padding:6px 16px;">Total</td><td style="padding:6px 0;text-align:right;">${Util.fmtMoney(q.total)}</td></tr></table>
-        </div>
-        <div style="margin-top:40px;font-size:11px;color:#888;">Thank you for your business. This is a computer-generated quotation from ${Util.escapeHtml(s.companyName)}.</div>
+        </div>`}
+        <div style="margin-top:40px;font-size:11px;color:#888;">Thank you for your business. This is a computer-generated ${Util.escapeHtml(o.footer)} from ${Util.escapeHtml(s.companyName)}.</div>
       </div>
     `;
     setTimeout(()=>window.print(), 100);
@@ -4956,8 +5235,8 @@ const Payments = {
           <td class="col-actions"><div class="row-action-btns">
             <button class="icon-btn" style="color:#25D366;" title="WhatsApp reminder" onclick="WaQuick.payment('${p.id}')">&#128172;</button>
             <button class="icon-btn" onclick="Payments.markPaid('${p.id}')" title="Mark paid">&#10003;</button>
-            <button class="icon-btn" onclick="Payments.openForm('${p.id}')">&#9998;</button>
-            <button class="icon-btn" onclick="Payments.remove('${p.id}')">&#128465;</button>
+            <button class="icon-btn" title="Edit" onclick="Payments.openForm('${p.id}')">&#9998;</button>
+            <button class="icon-btn" title="Delete" onclick="Payments.remove('${p.id}')">&#128465;</button>
           </div></td>
           <td class="cell-main" style="cursor:pointer;" onclick="Payments.filterByParty('${Util.escapeHtml(p.party).replace(/'/g,"\\'")}')" title="View all pending for this party">${Util.escapeHtml(p.party)}</td>
           <td>${p.companyName? `<span class="badge badge-blue">${Util.escapeHtml(p.companyName)}</span>` : '—'}</td>
@@ -4966,7 +5245,7 @@ const Payments = {
           <td class="cell-mute">${Util.fmtDate(p.invoiceDate)}</td>
           <td class="mono">${Util.fmtMoney(p.amount)}</td>
           <td class="mono" style="color:${pendingAmt>0?'var(--red)':'var(--text-mute)'};">${Util.fmtMoney(pendingAmt)}</td>
-          <td>${statusBadge(p.status)}</td>
+          <td>${statusBadge(p.status)}${p.reminders ? '<div class="hint">reminded '+p.reminders+'×'+(p.lastReminder?' · '+Util.relAgo(p.lastReminder):'')+'</div>' : ''}${p.orderId ? '<div class="hint">order '+Util.escapeHtml(p.orderId)+'</div>' : ''}</td>
           <td class="cell-mute">${Util.escapeHtml(p.contact||'—')}</td>
           <td class="cell-mute">${custArea(p.customerId)}</td>
           <td class="mono cell-mute">${Util.escapeHtml(p.phone||'')}</td>
@@ -4998,11 +5277,14 @@ const Payments = {
     const ov=document.getElementById('payOverdueFilter'); if(ov) ov.checked=false;
     this.render();
   },
-  openForm(id, presetCustomerId){
+  openForm(id, presetCustomerId, preset){
     const rec = id ? Store.data.payments.find(x=>x.id===id) : null;
     const presetCust = presetCustomerId ? Store.data.customers.find(c=>c.id===presetCustomerId) : null;
+    this._orderId = rec ? (rec.orderId||'') : ((preset && preset.orderId) || '');
     const v = rec || {companyName:'JAYS', product:'', invoiceNumber:'', invoiceDate:Util.todayISO(), party:presetCust?presetCust.name:'', taxableValue:'', cgst:'', sgst:'', igst:'', roundOff:0, amount:'', amountPaid:0, contact:presetCust?presetCust.name:'', phone:presetCust?presetCust.phone:'', followupDate:'', response:'', status:'Pending', customerId:presetCustomerId||''};
+    if(!rec && preset){ ['party','phone','product','amount'].forEach(k=>{ if(preset[k]!==undefined && preset[k]!=='') v[k] = preset[k]; }); if(preset.party && !v.contact) v.contact = preset.party; }
     UI.openModal(rec?'Edit Invoice':'Add Invoice / Payment', `
+      ${this._orderId ? '<div class="hint" style="margin-bottom:8px;">&#128230; For order <b>'+Util.escapeHtml(this._orderId)+'</b></div>' : ''}
       <div class="field"><label>Contact (from Customers)</label>${CustPicker.html('p', v.customerId, 'paymentsCustSelected')}</div>
       <div class="form-row">
         <div class="field"><label>Party Name *</label><input id="p_party" value="${Util.escapeHtml(v.party)}"></div>
@@ -5074,7 +5356,8 @@ const Payments = {
       response: document.getElementById('p_response').value.trim(),
       status
     };
-    if(id){ const i=Store.data.payments.findIndex(x=>x.id===id); Store.data.payments[i]=rec; }
+    if(this._orderId) rec.orderId = this._orderId;
+    if(id){ const i=Store.data.payments.findIndex(x=>x.id===id); Store.data.payments[i] = Object.assign({}, Store.data.payments[i]||{}, rec); }
     else { Store.data.payments.unshift(rec); Store.data.counters.payNext=(Store.data.counters.payNext||1)+1; await Store.save('counters'); }
     await Store.save('payments');
     await DbSync.upsertPayment(rec);
@@ -5676,12 +5959,15 @@ const OrdersMgmt = {
         ${Paginate.slice('orders', list).pageItems.map(o=>`<tr>
           <td class="col-actions"><div class="row-action-btns">
             ${o.phone? `<a class="icon-btn" style="color:#25D366;text-decoration:none;" title="WhatsApp" href="${Util.waLink(o.phone,'')}" target="_blank">&#128172;</a>` : ''}
-            <button class="icon-btn" onclick="OrdersMgmt.openForm('${o.id}')">&#9998;</button>
-            <button class="icon-btn" onclick="OrdersMgmt.remove('${o.id}')">&#128465;</button>
+            <button class="icon-btn" title="Edit" onclick="OrdersMgmt.openForm('${o.id}')">&#9998;</button>
+            <button class="icon-btn" title="${OrdersMgmt.invoicesOf(o).length?'Add another invoice':'Add invoice / payment'}" onclick="OrdersMgmt.addInvoice('${o.id}')">&#129534;</button>
+            ${OrdersMgmt.quoteOf(o) ? `<button class="icon-btn" title="Proforma invoice" onclick="OrdersMgmt.printDoc('${o.id}','proforma')">&#128196;</button>` : ''}
+            <button class="icon-btn" title="Delivery challan" onclick="OrdersMgmt.printDoc('${o.id}','challan')">&#128666;</button>
+            <button class="icon-btn" title="Delete" onclick="OrdersMgmt.remove('${o.id}')">&#128465;</button>
           </div></td>
           <td class="cell-mute">${Util.fmtDate(o.orderDate)}</td>
           <td class="mono cell-mute">${Util.escapeHtml(o.gemcNumber||'')}</td>
-          <td class="cell-mute">${Util.escapeHtml(o.orderFrom||'')}</td>
+          <td class="cell-mute">${Util.escapeHtml(o.orderFrom||'')}${OrdersMgmt.invoiceHint(o)}</td>
           <td class="cell-main">${Util.escapeHtml(o.productName||'')}</td>
           <td class="cell-mute">${Util.escapeHtml(o.party||'')}</td>
           <td class="cell-mute">${custArea(o.customerId)}</td>
@@ -5755,12 +6041,36 @@ const OrdersMgmt = {
       assignedTo: document.getElementById('o_assignedTo').value,
       status: document.getElementById('o_status').value
     };
-    if(id){ const i=Store.data.orders.findIndex(x=>x.id===id); Store.data.orders[i]=rec; }
+    if(id){ const i=Store.data.orders.findIndex(x=>x.id===id); Store.data.orders[i] = Object.assign({}, Store.data.orders[i]||{}, rec); }
     else { Store.data.orders.unshift(rec); Store.data.counters.ordNext=(Store.data.counters.ordNext||1)+1; await Store.save('counters'); }
     await Store.save('orders');
     await DbSync.upsertOrder(rec);
     await Activity.log(id?'Updated order':'Added order', rec.id+' — '+party);
     UI.closeModal(); UI.toast('Saved'); Router.render('orders');
+  },
+  quoteOf(o){ return o && o.quotationId ? Store.data.quotations.find(q=>q.id===o.quotationId) : null; },
+  invoicesOf(o){ return (Store.data.payments||[]).filter(p=>p.orderId===o.id); },
+  invoiceHint(o){
+    const inv = this.invoicesOf(o); if(!inv.length) return '';
+    const due = inv.reduce((t,p)=>t+(p.status==='Paid'?0:(p.dueAmount!==undefined?Math.max(Number(p.dueAmount)||0,0):Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0))),0);
+    return '<div class="hint">'+inv.length+' invoice'+(inv.length>1?'s':'')+' · '+(due>0 ? Util.fmtMoney(due)+' due' : 'paid')+'</div>';
+  },
+  addInvoice(id){
+    const o = Store.data.orders.find(x=>x.id===id); if(!o) return;
+    const qu = this.quoteOf(o);
+    go('payments');
+    setTimeout(()=>Payments.openForm(null, o.customerId||null, { orderId:o.id, party:o.party||'', phone:o.phone||'', product:(qu&&qu.items&&qu.items[0]&&qu.items[0].name)||'', amount:(qu&&qu.total)||o.value||'' }), 60);
+  },
+  printDoc(id, kind){
+    const o = Store.data.orders.find(x=>x.id===id); if(!o) return;
+    const qu = this.quoteOf(o);
+    if(kind==='proforma'){
+      if(!qu){ UI.toast('This order is not linked to a quotation, so there are no rates for a proforma'); return; }
+      Quotations.print(qu.id, { title:'PROFORMA INVOICE', ref:'PI/'+o.id, date:Util.todayISO(), footer:'proforma invoice (not a tax invoice)', to:o.party||qu.customerName, phone:o.phone||qu.phone, extra:'Against order '+Util.escapeHtml(o.id)+(o.gemcNumber?' · GeM '+Util.escapeHtml(o.gemcNumber):'')+' · Quotation '+Util.escapeHtml(qu.id) });
+      return;
+    }
+    const items = qu ? qu.items : String(o.productName||'').split(',').map(x=>x.trim()).filter(Boolean).map(n=>({ name:n, qty:'' }));
+    Quotations.print(null, { q:{ id:o.id, items:items.length?items:[{name:o.productName||'',qty:''}], customerName:o.party, phone:o.phone, date:Util.todayISO() }, title:'DELIVERY CHALLAN', ref:'DC/'+o.id, date:Util.todayISO(), noRates:true, footer:'delivery challan', to:o.party, phone:o.phone, extra:'Against order '+Util.escapeHtml(o.id)+(o.gemcNumber?' · GeM '+Util.escapeHtml(o.gemcNumber):'') });
   },
   async remove(id){
     if(!confirm('Delete this order?')) return;
@@ -13095,7 +13405,7 @@ Views.attendance = ()=>Attendance.render();
    re-uploads everything once - nothing is ever created twice.
 =========================================================================== */
 const FieldSync = {
-  COLLECTIONS: ['visits','requirements','travelLogs','dayPlans','quotations'],
+  COLLECTIONS: ['visits','requirements','travelLogs','dayPlans','quotations','fieldCollections','fieldClaims'],
   lsKey(c){ return 'jays_offline_'+c; },
   getPending(c){ try{ return JSON.parse(localStorage.getItem(this.lsKey(c))||'[]'); }catch(e){ return []; } },
   setPending(c, arr){ try{ localStorage.setItem(this.lsKey(c), JSON.stringify(arr)); }catch(e){} },
@@ -14328,7 +14638,7 @@ Field.Day = {
     const me = Field.me(); const today = Util.todayISO();
     return Store.data.dayPlans.find(d=>d.staff===me && d.date===today && !d.endAt) || null;
   },
-  async start(){
+  async start(opts){
     if(this.active()){ UI.toast('Your day is already started.'); return; }
     UI.toast('Getting your location…');
     const pos = await Field.getPosition();
@@ -14338,6 +14648,8 @@ Field.Day = {
       startAt: new Date().toISOString(), startLat: pos?pos.lat:'', startLng: pos?pos.lng:'',
       endAt: '', endLat: '', endLng: ''
     };
+    if(opts && opts.selfie) rec.startSelfie = opts.selfie;
+    FieldApp.pruneDayPhotos();
     Store.data.dayPlans.unshift(rec);
     await FieldSync.createAndSave('dayPlans', rec);
     await Activity.log('Day started', rec.staff+' — '+new Date(rec.startAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}));
@@ -15354,6 +15666,342 @@ Field.Plan = {
   }
 };
 Views.fieldhome = ()=>Field.Plan.render();
+
+/* =====================================================================
+   FIELD APP - field mode of the CRM for phones. Same login, same data.
+   One home screen (start/end day, visits, leads, requirements, trips,
+   follow-ups, collections, claims) + a bottom bar on phones.
+   Collections are recorded by field staff and VERIFIED by the office
+   before they touch an invoice; claims are approved by an Admin.
+     Store.data.fieldCollections (jays_fieldcollections)
+     Store.data.fieldClaims      (jays_fieldclaims)
+   Photos are kept small and removed 30 days after a decision (selfies
+   after 7 days) so the daily download stays small.
+===================================================================== */
+const FieldApp = {
+  KEY:'jays_fieldmode',
+  enabled(){
+    if(!Auth.session || !hasMenuAccess('fieldapp')) return false;
+    let v = null; try{ v = localStorage.getItem(this.KEY); }catch(e){}
+    if(v==='1') return true; if(v==='0') return false;
+    return Auth.session.role!=='Admin' && window.innerWidth<=820;            /* default: on for field staff on phones */
+  },
+  toggle(){
+    const on = !this.enabled(); try{ localStorage.setItem(this.KEY, on?'1':'0'); }catch(e){}
+    UI.toast(on ? 'Field mode on' : 'Field mode off \u2014 full CRM'); go(on ? 'fieldapp' : 'dashboard'); this.bar();
+  },
+  me(){ return Field.me(); },
+  isAdmin(){ return !!(Auth.isAdmin && Auth.isAdmin()); },
+  money(n){ return Util.fmtMoney(Number(n)||0); },
+  /* ---------- home screen ---------- */
+  myFollowups(){
+    const me = this.me(), today = Util.todayISO(), D = Store.data;
+    const owner = f=>{ if(f.assignedTo) return f.assignedTo; const c = (D.customers||[]).find(x=>x.id===f.customerId); return c ? (c.assignedTo||'') : ''; };
+    return (D.followups||[]).filter(f=>f.status!=='Done' && f.date && f.date<=today && (owner(f)===me || (!owner(f) && !this.isAdmin()))).sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+  },
+  render(){
+    const E = Util.escapeHtml, me = this.me(), day = Field.Day.active(), trip = Field.Travel.activeTrip ? Field.Travel.activeTrip() : null;
+    const h = new Date().getHours(), greet = h<12 ? 'Good morning' : h<17 ? 'Good afternoon' : 'Good evening';
+    const doneToday = (Store.data.dayPlans||[]).find(d=>d.staff===me && d.date===Util.todayISO() && d.endAt);
+    const fus = this.myFollowups(), today = Util.todayISO();
+    const myCol = (Store.data.fieldCollections||[]).filter(c=>c.staff===me), myClaims = (Store.data.fieldClaims||[]).filter(c=>c.staff===me);
+    const colToday = myCol.filter(c=>c.date===today).reduce((t,c)=>t+(Number(c.amount)||0),0);
+    const claimPend = myClaims.filter(c=>c.status==='Pending').reduce((t,c)=>t+(Number(c.amount)||0),0);
+    const can = v=>hasMenuAccess(v);
+    const tile = (ic, label, sub, click, cls)=>'<button type="button" class="fa-tile '+(cls||'')+'" onclick="'+E(click)+'"><span class="fa-ic">'+ic+'</span><span class="fa-l">'+label+'</span>'+(sub?'<span class="fa-s">'+E(sub)+'</span>':'')+'</button>';
+    const tiles = [
+      can('visits') ? tile('&#128205;','Start a visit','GPS + photos',"Field.Visits.openStartForm()") : '',
+      tile('&#128100;','New lead','On the spot',"Field.QuickLead.open()"),
+      can('requirements') ? tile('&#128221;','Send requirement','To the office',"Field.Requirements.openForm(null)") : '',
+      can('travel') ? (trip ? tile('&#127937;','End trip','Started '+new Date(trip.startAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}),"Field.Travel.openEndForm('"+trip.id+"')",'fa-on') : tile('&#128664;','Start trip','Log km',"Field.Travel.openStartForm()")) : '',
+      tile('&#128176;','Collect payment','Cash / cheque / UPI',"FieldApp.openCollect()"),
+      tile('&#129534;','Expense claim','Fuel, bus, food...',"FieldApp.openClaim()"),
+      can('fieldhome') ? tile('&#128506;','Today\u2019s plan','Route & nearby',"go('fieldhome')") : '',
+      can('officefinder') ? tile('&#127970;','Nearby offices','Panchayats near me',"go('officefinder')") : ''
+    ].filter(Boolean).join('');
+    const fuHtml = fus.length ? fus.slice(0,8).map(f=>{
+      const c = (Store.data.customers||[]).find(x=>x.id===f.customerId), ph = f.phone || (c&&c.phone) || '';
+      return '<div class="fa-fu"><div class="fa-fu-t"><b>'+E(f.customerName||'')+'</b><div class="hint">'+E(f.purpose||'Follow-up')+' \u00b7 <span style="'+(f.date<today?'color:var(--red,#dc2626);font-weight:600;':'')+'">'+E(Util.relDue(f.date))+'</span></div></div>' +
+        '<div class="fa-fu-b">'+(ph?'<a class="btn btn-outline btn-sm" href="tel:'+E(String(ph).replace(/[^0-9+]/g,''))+'" title="Call">&#128222;</a>':'')+'<button class="btn btn-wa btn-sm" title="WhatsApp" onclick="WaQuick.followup(\''+f.id+'\')">&#128172;</button><button class="btn btn-primary btn-sm" title="Done" onclick="Followups.markDone(\''+f.id+'\')">&#10003; Done</button></div></div>';
+    }).join('') + (fus.length>8 ? '<div class="hint" style="padding:6px 2px;">+'+(fus.length-8)+' more in Follow-ups</div>' : '')
+      : '<div class="hint" style="padding:6px 2px;">No follow-ups due today. &#127881;</div>';
+    let dayCard;
+    if(day) dayCard = '<div class="fa-day on"><div><b>Day started '+new Date(day.startAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})+'</b><div class="hint">'+(() => { const s = Field.Day.summaryFor(day); return s.visitsCompleted+' visit(s) done \u00b7 '+s.distanceKm.toFixed(1)+' km'; })()+'</div></div><button class="btn btn-outline" onclick="FieldApp.endDay()">End day</button></div>';
+    else if(doneToday) dayCard = '<div class="fa-day"><div><b>Day ended</b><div class="hint">'+new Date(doneToday.startAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})+' \u2013 '+new Date(doneToday.endAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})+'</div></div></div>';
+    else dayCard = '<div class="fa-day"><div><b>Not started yet</b><div class="hint">Starting records your time and location.</div></div><button class="btn btn-primary" onclick="FieldApp.startDayForm()">&#9654; Start day</button></div>';
+    document.getElementById('content').innerHTML =
+      '<div class="fa-wrap">' +
+      '<div class="fa-head"><div><div class="fa-hi">'+greet+', '+E(me.split(' ')[0]||'')+'</div><div class="hint">'+Util.fmtDate(today)+'</div></div>'+Field.syncBadgeHTML()+'</div>' +
+      dayCard +
+      '<div class="fa-grid">'+tiles+'</div>' +
+      '<div class="card fa-card"><div class="fa-card-h"><b>&#9200; My follow-ups due ('+fus.length+')</b><button class="btn btn-outline btn-sm" onclick="go(\'followupcentre\')">All</button></div>'+fuHtml+'</div>' +
+      '<div class="card fa-card" onclick="go(\'fieldmoney\')" style="cursor:pointer;"><div class="fa-card-h"><b>&#128176; Money</b><span class="hint">open &rsaquo;</span></div><div class="fa-money"><div><span class="hint">Collected today</span><b>'+this.money(colToday)+'</b></div><div><span class="hint">Claims waiting</span><b>'+this.money(claimPend)+'</b></div><div><span class="hint">To be verified</span><b>'+myCol.filter(c=>c.status==='Pending').length+'</b></div></div></div>' +
+      (this.isAdmin() ? this.teamTodayHTML() : '') +
+      '<div style="text-align:center;margin:14px 0 4px;"><button class="btn btn-outline btn-sm" onclick="FieldApp.toggle()">'+(this.enabled()?'Switch to full CRM':'Use field mode as my start page')+'</button></div>' +
+      '</div>';
+  },
+  teamTodayHTML(){
+    const E = Util.escapeHtml, today = Util.todayISO(), days = (Store.data.dayPlans||[]).filter(d=>d.date===today);
+    if(!days.length) return '<div class="card fa-card"><div class="fa-card-h"><b>&#128101; Team today</b></div><div class="hint" style="padding:4px 2px;">Nobody has started their day yet.</div></div>';
+    return '<div class="card fa-card"><div class="fa-card-h"><b>&#128101; Team today</b></div>' + days.map(d=>{ const s = Field.Day.summaryFor(d); const t = x=>x?new Date(x).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}):'';
+      return '<div class="fa-fu">'+(d.startSelfie?'<img class="fa-selfie" alt="" src="'+E(d.startSelfie)+'">':'')+'<div class="fa-fu-t"><b>'+E(d.staff||'')+'</b><div class="hint">'+t(d.startAt)+(d.endAt?' \u2013 '+t(d.endAt):' \u00b7 working')+' \u00b7 '+s.visitsCompleted+' visit(s) \u00b7 '+s.distanceKm.toFixed(1)+' km</div></div>'+(d.startLat?'<a class="btn btn-outline btn-sm" target="_blank" rel="noopener" href="https://www.google.com/maps?q='+encodeURIComponent(d.startLat+','+d.startLng)+'">&#128205;</a>':'')+'</div>'; }).join('') + '</div>';
+  },
+  /* ---------- day start / end ---------- */
+  _selfie:'',
+  startDayForm(){
+    this._selfie = '';
+    UI.openModal('Start your day', `
+      <div class="hint" style="margin-bottom:10px;">Your time and location are recorded. A selfie is optional.</div>
+      <label class="btn btn-outline" style="display:inline-flex;gap:8px;align-items:center;cursor:pointer;">&#128247; Take selfie<input type="file" accept="image/*" capture="user" style="display:none;" onchange="FieldApp.addSelfie(this.files[0])"></label>
+      <div id="fa_selfie" style="margin-top:10px;"></div>`,
+      `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="FieldApp.startDay()">&#9654; Start day</button>`);
+  },
+  async addSelfie(file){
+    if(!file) return;
+    try{ this._selfie = await Field.compressImage(file, 320, 0.5); const b = document.getElementById('fa_selfie'); if(b) b.innerHTML = '<img class="fa-selfie" style="width:72px;height:72px;" alt="" src="'+this._selfie+'">'; }
+    catch(e){ UI.toast('Could not use that photo'); }
+  },
+  async startDay(){ UI.closeModal(); await Field.Day.start({ selfie:this._selfie }); this._selfie = ''; },
+  async endDay(){ if(!confirm('End your day now?')) return; await Field.Day.end(); },
+  /* keep the day records small: selfies older than 7 days are removed (the times and locations stay) */
+  pruneDayPhotos(){
+    const cut = Util.isoLocal(new Date(Date.now()-7*864e5));
+    (Store.data.dayPlans||[]).forEach(d=>{ if(d.startSelfie && (d.date||'') < cut) delete d.startSelfie; });
+  },
+  prunePhotos(list){
+    const cut = Date.now()-30*864e5;
+    (list||[]).forEach(x=>{ if(x.photo && x.status!=='Pending' && x.decidedAt && Date.parse(x.decidedAt) < cut) delete x.photo; });
+  },
+  _photo:'',
+  async addPhoto(file){
+    if(!file) return;
+    try{ this._photo = await Field.compressImage(file, 800, 0.55); const b = document.getElementById('fa_photo'); if(b) b.innerHTML = '<img alt="" style="max-width:120px;border-radius:8px;border:1px solid var(--border);" src="'+this._photo+'"> <button class="btn btn-outline btn-sm" onclick="FieldApp._photo=\'\';document.getElementById(\'fa_photo\').innerHTML=\'\'">Remove</button>'; }
+    catch(e){ UI.toast('Could not use that photo'); }
+  },
+  /* ---------- collections ---------- */
+  MODES: ['Cash','Cheque','UPI','NEFT / RTGS','DD'],
+  pendingInvoices(custId, party){
+    if(typeof Access!=='undefined' && Access.level && Access.level('jays_payments')==='none') return [];
+    const due = p=>p.dueAmount!==undefined ? Math.max(Number(p.dueAmount)||0,0) : Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0);
+    return (Store.data.payments||[]).filter(p=>p.status!=='Paid' && due(p)>0 && ((custId && p.customerId===custId) || (!custId && party && (p.party||'').toLowerCase()===party.toLowerCase()))).map(p=>({ id:p.id, no:p.invoiceNumber||p.id, due:due(p), date:p.invoiceDate }));
+  },
+  openCollect(custId){
+    this._photo = '';
+    const E = Util.escapeHtml;
+    UI.openModal('Record a collection', `
+      <div class="field"><label>Customer *</label>${CustPicker.html('fc', custId||'', 'fieldCollectCustSelected')}</div>
+      <div class="field"><label>Against invoice</label><select id="fc_invoice" onchange="FieldApp.invoicePicked()"><option value="">\u2014 choose the customer first, or leave blank \u2014</option></select></div>
+      <div class="field" id="fc_invNoWrap"><label>Invoice no. (if not in the list)</label><input id="fc_invNo" placeholder="e.g. JT/245"></div>
+      <div class="form-row">
+        <div class="field"><label>Amount (\u20b9) *</label><input type="number" id="fc_amount" inputmode="decimal" min="0"></div>
+        <div class="field"><label>Mode *</label><select id="fc_mode" onchange="FieldApp.modeChanged()">${this.MODES.map(m=>'<option>'+m+'</option>').join('')}</select></div>
+      </div>
+      <div class="form-row" id="fc_refRow" style="display:none;">
+        <div class="field"><label id="fc_refLbl">Cheque no.</label><input id="fc_ref"></div>
+        <div class="field" id="fc_chqDateWrap"><label>Cheque date</label><input type="date" id="fc_chqDate"></div>
+      </div>
+      <div class="field"><label>Note</label><input id="fc_note" placeholder="Bank, who paid, anything the office should know"></div>
+      <label class="btn btn-outline btn-sm" style="display:inline-flex;gap:6px;align-items:center;cursor:pointer;">&#128247; Photo of cheque / receipt<input type="file" accept="image/*" capture="environment" style="display:none;" onchange="FieldApp.addPhoto(this.files[0])"></label>
+      <div id="fa_photo" style="margin-top:8px;"></div>
+      <div class="hint" style="margin-top:8px;">The office verifies this before it is applied to the invoice.</div>`,
+      `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="FieldApp.saveCollect()">Save</button>`);
+    if(custId){ const c = Store.data.customers.find(x=>x.id===custId); if(c) fieldCollectCustSelected(c); }
+  },
+  invoicesFor(c){
+    const sel = document.getElementById('fc_invoice'); if(!sel) return;
+    const inv = c ? this.pendingInvoices(c.id, c.name) : [];
+    sel.innerHTML = '<option value="">'+(c ? (inv.length ? '\u2014 not against a listed invoice \u2014' : 'No unpaid invoices found for this customer') : '\u2014 choose the customer first, or leave blank \u2014')+'</option>' + inv.map(i=>'<option value="'+Util.escapeHtml(i.id)+'" data-due="'+i.due+'">'+Util.escapeHtml(i.no)+' \u00b7 '+Util.fmtMoney(i.due)+' due</option>').join('');
+    this.invoicePicked();
+  },
+  invoicePicked(){
+    const sel = document.getElementById('fc_invoice'), w = document.getElementById('fc_invNoWrap'), amt = document.getElementById('fc_amount'); if(!sel) return;
+    if(w) w.style.display = sel.value ? 'none' : '';
+    const opt = sel.options[sel.selectedIndex]; if(sel.value && opt && amt && !amt.value) amt.value = opt.getAttribute('data-due')||'';
+  },
+  modeChanged(){
+    const m = document.getElementById('fc_mode').value, row = document.getElementById('fc_refRow');
+    row.style.display = m==='Cash' ? 'none' : '';
+    document.getElementById('fc_refLbl').textContent = m==='Cheque' ? 'Cheque no.' : m==='DD' ? 'DD no.' : 'UTR / reference no.';
+    document.getElementById('fc_chqDateWrap').style.display = (m==='Cheque'||m==='DD') ? '' : 'none';
+  },
+  async saveCollect(){
+    const v = id=>{ const e = document.getElementById(id); return e ? String(e.value||'').trim() : ''; };
+    const custId = v('fc_customerId'), cust = Store.data.customers.find(c=>c.id===custId);
+    const custText = v('fc_custSearch');
+    if(!cust && !custText){ UI.toast('Choose the customer'); return; }
+    const amount = Number(v('fc_amount')); if(!(amount>0)){ UI.toast('Enter the amount collected'); return; }
+    const mode = v('fc_mode'); if(mode!=='Cash' && !v('fc_ref')){ UI.toast('Enter the '+(mode==='Cheque'?'cheque':'reference')+' number'); return; }
+    const invId = v('fc_invoice'), inv = invId ? (Store.data.payments||[]).find(p=>p.id===invId) : null;
+    if(inv){ const due = inv.dueAmount!==undefined ? Number(inv.dueAmount)||0 : (Number(inv.amount)||0)-(Number(inv.amountPaid)||0); if(amount > due+1 && !confirm('This is more than the '+Util.fmtMoney(due)+' due on '+(inv.invoiceNumber||inv.id)+'. Save anyway?')) return; }
+    const pos = await Field.getPosition();
+    const list = Store.data.fieldCollections;
+    const rec = { id:Util.uid('COL', list), date:Util.todayISO(), createdAt:new Date().toISOString(), staff:this.me(),
+      customerId: cust?cust.id:'', customerName: cust?cust.name:custText, phone: cust?(cust.whatsapp||cust.phone||''):'',
+      invoiceId: inv?inv.id:'', invoiceNo: inv?(inv.invoiceNumber||inv.id):v('fc_invNo'),
+      amount, mode, ref:v('fc_ref'), chequeDate:v('fc_chqDate'), note:v('fc_note'), lat:pos?pos.lat:'', lng:pos?pos.lng:'', status:'Pending' };
+    if(this._photo) rec.photo = this._photo;
+    this.prunePhotos(list);
+    list.unshift(rec);
+    const ok = await FieldSync.createAndSave('fieldCollections', rec);
+    this._photo = '';
+    try{ await Activity.log('Collection recorded', rec.customerName+' \u2014 '+Util.fmtMoney(amount)+' '+mode); if(rec.customerId) await Customers.logTimeline(rec.customerId, 'Payment Status', 'Collected '+Util.fmtMoney(amount).replace('\u20b9','Rs.')+' by '+mode+(rec.ref?' ('+rec.ref+')':'')+(rec.invoiceNo?' against '+rec.invoiceNo:'')+' \u2014 awaiting office verification', {silent:true}); }catch(e){}
+    UI.closeModal();
+    if(ok) UI.toast('Collection saved \u2014 the office will verify it');
+    if(rec.phone && confirm('Send the customer a WhatsApp receipt?')) this.receipt(rec.id);
+    else Router.render(UI.currentView);
+  },
+  receipt(id){
+    const c = (Store.data.fieldCollections||[]).find(x=>x.id===id); if(!c) return;
+    const company = (Store.data.settings&&Store.data.settings.companyName)||'Jays Trading and Business Solution';
+    const text = 'Dear '+(c.customerName||'Sir/Madam')+',\nWe received '+Util.fmtMoney(c.amount).replace('\u20b9','Rs.')+' by '+c.mode+(c.ref?' ('+c.ref+')':'')+(c.invoiceNo?' towards invoice '+c.invoiceNo:'')+' on '+Util.fmtDate(c.date).replace(/<[^>]+>/g,'')+'.\nReceipt ref: '+c.id+'. '+(c.mode==='Cheque'?'Subject to realisation. ':'')+'Thank you.\n\u2014 '+c.staff+', '+company;
+    WaQuick.open({ kind:'payment', name:c.customerName, phone:c.phone, customerId:c.customerId, text, after:()=>{ if(UI.currentView==='fieldapp'||UI.currentView==='fieldmoney') Router.render(UI.currentView); } });
+  },
+  /* office: apply a verified collection to its invoice */
+  async verify(id){
+    const c = (Store.data.fieldCollections||[]).find(x=>x.id===id); if(!c || c.status!=='Pending') return;
+    const inv = c.invoiceId ? (Store.data.payments||[]).find(p=>p.id===c.invoiceId) : null;
+    if(!confirm('Verify '+Util.fmtMoney(c.amount)+' from '+c.customerName+(inv?' and add it to invoice '+(inv.invoiceNumber||inv.id):'')+'?')) return;
+    const by = this.me(), now = new Date().toISOString();
+    let invBefore = null;
+    if(inv){
+      invBefore = { amountPaid:inv.amountPaid, dueAmount:inv.dueAmount, status:inv.status };
+      inv.amountPaid = (Number(inv.amountPaid)||0) + Number(c.amount);
+      inv.dueAmount = Math.max((Number(inv.amount)||0) - inv.amountPaid, 0);
+      if(inv.dueAmount<=0) inv.status = 'Paid';
+      let ok = false; try{ ok = (await Store.save('payments')) !== false; }catch(e){}
+      if(!ok){ Object.assign(inv, invBefore); UI.toast('Could not update the invoice \u2014 nothing changed'); return; }
+      try{ await DbSync.upsertPayment(inv); }catch(e){}
+    }
+    Object.assign(c, { status:'Verified', decidedBy:by, decidedAt:now });
+    let ok2 = false; try{ ok2 = (await Store.save('fieldCollections')) !== false; }catch(e){}
+    if(!ok2){
+      c.status = 'Pending'; delete c.decidedBy; delete c.decidedAt;
+      if(inv && invBefore){ Object.assign(inv, invBefore); try{ await Store.save('payments'); }catch(e){} }
+      UI.toast('Could not save \u2014 try again'); return;
+    }
+    try{ await Activity.log('Collection verified', c.id+' \u2014 '+Util.fmtMoney(c.amount)+(inv?' \u2192 '+(inv.invoiceNumber||inv.id):'')); }catch(e){}
+    UI.toast(inv ? 'Verified and added to the invoice' : 'Verified'); Router.render(UI.currentView);
+  },
+  /* ---------- expense claims ---------- */
+  CLAIM_TYPES: ['Fuel','Bus / auto / taxi','Food','Lodging','Phone','Courier','Other'],
+  openClaim(){
+    this._photo = '';
+    UI.openModal('Expense claim', `
+      <div class="form-row">
+        <div class="field"><label>Date *</label><input type="date" id="fx_date" value="${Util.todayISO()}"></div>
+        <div class="field"><label>Type *</label><select id="fx_type">${this.CLAIM_TYPES.map(t=>'<option>'+t+'</option>').join('')}</select></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>Amount (\u20b9) *</label><input type="number" id="fx_amount" inputmode="decimal" min="0"></div>
+        <div class="field"><label>Km (for fuel)</label><input type="number" id="fx_km" inputmode="decimal" min="0"></div>
+      </div>
+      <div class="field"><label>What for *</label><input id="fx_note" placeholder="e.g. Malappuram \u2192 Tirur, visits to 3 panchayats"></div>
+      <label class="btn btn-outline btn-sm" style="display:inline-flex;gap:6px;align-items:center;cursor:pointer;">&#128247; Photo of bill<input type="file" accept="image/*" capture="environment" style="display:none;" onchange="FieldApp.addPhoto(this.files[0])"></label>
+      <div id="fa_photo" style="margin-top:8px;"></div>`,
+      `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="FieldApp.saveClaim()">Submit claim</button>`);
+  },
+  async saveClaim(){
+    const v = id=>{ const e = document.getElementById(id); return e ? String(e.value||'').trim() : ''; };
+    const amount = Number(v('fx_amount')), date = v('fx_date'), note = v('fx_note');
+    if(!date){ UI.toast('Pick the date'); return; }
+    if(date > Util.todayISO()){ UI.toast('The date cannot be in the future'); return; }
+    if(!(amount>0)){ UI.toast('Enter the amount'); return; }
+    if(!note){ UI.toast('Say what the expense was for'); return; }
+    const list = Store.data.fieldClaims;
+    const rec = { id:Util.uid('CLM', list), date, createdAt:new Date().toISOString(), staff:this.me(), type:v('fx_type'), amount, km:Number(v('fx_km'))||'', note, status:'Pending' };
+    if(this._photo) rec.photo = this._photo;
+    this.prunePhotos(list);
+    list.unshift(rec);
+    const ok = await FieldSync.createAndSave('fieldClaims', rec);
+    this._photo = '';
+    try{ await Activity.log('Expense claim submitted', rec.staff+' \u2014 '+rec.type+' '+Util.fmtMoney(amount)); }catch(e){}
+    UI.closeModal(); if(ok) UI.toast('Claim submitted for approval'); Router.render(UI.currentView);
+  },
+  async decide(kind, id, status){
+    const coll = kind==='claim' ? 'fieldClaims' : 'fieldCollections', x = (Store.data[coll]||[]).find(r=>r.id===id); if(!x) return;
+    let reason = '';
+    if(status==='Rejected'){ reason = prompt('Reason (the staff member will see this):', '') ; if(reason===null) return; }
+    const before = { status:x.status, decidedBy:x.decidedBy, decidedAt:x.decidedAt, reason:x.reason };
+    Object.assign(x, { status, decidedBy:this.me(), decidedAt:new Date().toISOString() }); if(reason) x.reason = reason;
+    let ok = false; try{ ok = (await Store.save(coll)) !== false; }catch(e){}
+    if(!ok){ Object.assign(x, before); UI.toast('Could not save \u2014 try again'); return; }
+    try{ await Activity.log((kind==='claim'?'Claim ':'Collection ')+status.toLowerCase(), x.id+' \u2014 '+(x.staff||'')+' '+Util.fmtMoney(x.amount)); }catch(e){}
+    UI.toast(status); Router.render(UI.currentView);
+  },
+  /* ---------- Collections & Claims page ---------- */
+  tab:'col', staffF:'', statusF:'',
+  renderMoney(){
+    const E = Util.escapeHtml, admin = this.isAdmin(), me = this.me();
+    const src = this.tab==='claim' ? (Store.data.fieldClaims||[]) : (Store.data.fieldCollections||[]);
+    let list = admin ? src.slice() : src.filter(x=>x.staff===me);
+    if(admin && this.staffF) list = list.filter(x=>x.staff===this.staffF);
+    if(this.statusF) list = list.filter(x=>x.status===this.statusF);
+    list.sort((a,b)=>(b.createdAt||b.date||'').localeCompare(a.createdAt||a.date||''));
+    const staff = Array.from(new Set(src.map(x=>x.staff).filter(Boolean))).sort();
+    const statuses = this.tab==='claim' ? ['Pending','Approved','Rejected','Paid'] : ['Pending','Verified','Rejected'];
+    const sum = st=>list.filter(x=>x.status===st).reduce((t,x)=>t+(Number(x.amount)||0),0);
+    const pc = st=>({ Pending:'badge-amber', Verified:'badge-green', Approved:'badge-blue', Paid:'badge-green', Rejected:'badge-red' }[st]||'badge-gray');
+    const rows = list.slice(0,200).map(x=>{
+      const main = this.tab==='claim' ? E(x.type||'')+' \u00b7 '+E(x.note||'') : E(x.customerName||'')+(x.invoiceNo?' \u00b7 '+E(x.invoiceNo):'');
+      const sub = Util.fmtDate(x.date)+(admin?' \u00b7 '+E(x.staff||''):'')+(this.tab==='claim' ? (x.km?' \u00b7 '+E(x.km)+' km':'') : ' \u00b7 '+E(x.mode||'')+(x.ref?' '+E(x.ref):'')+(x.chequeDate?' dated '+E(x.chequeDate):''))+(x.reason?' \u00b7 <span style="color:var(--red,#dc2626);">'+E(x.reason)+'</span>':'');
+      let acts = '';
+      if(x.photo) acts += '<button class="btn btn-outline btn-sm" onclick="FieldApp.showPhoto(\''+(this.tab==='claim'?'claim':'col')+'\',\''+x.id+'\')">&#128247;</button>';
+      if(this.tab!=='claim' && x.phone && x.status!=='Rejected') acts += '<button class="btn btn-wa btn-sm" title="WhatsApp receipt" onclick="FieldApp.receipt(\''+x.id+'\')">&#128172;</button>';
+      if(admin && x.status==='Pending') acts += this.tab==='claim'
+        ? '<button class="btn btn-primary btn-sm" onclick="FieldApp.decide(\'claim\',\''+x.id+'\',\'Approved\')">Approve</button><button class="btn btn-outline btn-sm" onclick="FieldApp.decide(\'claim\',\''+x.id+'\',\'Rejected\')">Reject</button>'
+        : '<button class="btn btn-primary btn-sm" onclick="FieldApp.verify(\''+x.id+'\')">Verify</button><button class="btn btn-outline btn-sm" onclick="FieldApp.decide(\'col\',\''+x.id+'\',\'Rejected\')">Reject</button>';
+      if(admin && this.tab==='claim' && x.status==='Approved') acts += '<button class="btn btn-outline btn-sm" onclick="FieldApp.decide(\'claim\',\''+x.id+'\',\'Paid\')">Mark paid</button>';
+      return '<div class="fa-fu"><div class="fa-fu-t"><b>'+main+'</b><div class="hint">'+sub+'</div></div><div class="fa-amt">'+this.money(x.amount)+'<div><span class="badge '+pc(x.status)+'">'+E(x.status)+'</span></div></div><div class="fa-fu-b">'+acts+'</div></div>';
+    }).join('');
+    document.getElementById('content').innerHTML =
+      '<div class="fa-wrap fa-wide">' +
+      '<div class="tabs"><button class="tab-btn '+(this.tab==='col'?'active':'')+'" onclick="FieldApp.tab=\'col\';FieldApp.statusF=\'\';FieldApp.renderMoney()">&#128176; Collections</button><button class="tab-btn '+(this.tab==='claim'?'active':'')+'" onclick="FieldApp.tab=\'claim\';FieldApp.statusF=\'\';FieldApp.renderMoney()">&#129534; Expense claims</button></div>' +
+      '<div class="toolbar" style="flex-wrap:wrap;">' +
+        (admin && staff.length ? '<select aria-label="Staff" onchange="FieldApp.staffF=this.value;FieldApp.renderMoney()"><option value="">All staff</option>'+staff.map(x=>'<option '+(x===this.staffF?'selected':'')+'>'+E(x)+'</option>').join('')+'</select>' : '') +
+        '<select aria-label="Status" onchange="FieldApp.statusF=this.value;FieldApp.renderMoney()"><option value="">All statuses</option>'+statuses.map(x=>'<option '+(x===this.statusF?'selected':'')+'>'+x+'</option>').join('')+'</select>' +
+        '<div class="toolbar-spacer"></div>' +
+        (admin ? '<button class="btn btn-outline btn-sm" onclick="FieldApp.exportMoney()">&#128228; Excel</button>' : '') +
+        '<button class="btn btn-primary btn-sm" onclick="'+(this.tab==='claim'?'FieldApp.openClaim()':'FieldApp.openCollect()')+'">&#65291; '+(this.tab==='claim'?'New claim':'Record collection')+'</button>' +
+      '</div>' +
+      '<div class="fa-money card" style="padding:12px 14px;margin-bottom:12px;">'+statuses.map(st=>'<div><span class="hint">'+st+'</span><b>'+this.money(sum(st))+'</b></div>').join('')+'</div>' +
+      '<div class="card fa-card">'+(rows || '<div class="hint" style="padding:8px 2px;">Nothing here yet.</div>')+'</div>' +
+      '</div>';
+  },
+  showPhoto(kind, id){
+    const x = ((kind==='claim'?Store.data.fieldClaims:Store.data.fieldCollections)||[]).find(r=>r.id===id); if(!x||!x.photo) return;
+    UI.openModal('Photo \u2014 '+id, '<img alt="" style="max-width:100%;border-radius:8px;" src="'+Util.escapeHtml(x.photo)+'">', '<button class="btn btn-primary" onclick="UI.closeModal()">Close</button>');
+  },
+  exportMoney(){
+    const claim = this.tab==='claim', src = claim ? (Store.data.fieldClaims||[]) : (Store.data.fieldCollections||[]);
+    const rows = src.map(x=>claim
+      ? { ID:x.id, Date:x.date, Staff:x.staff, Type:x.type, Amount:x.amount, Km:x.km, For:x.note, Status:x.status, 'Decided by':x.decidedBy||'', Reason:x.reason||'' }
+      : { ID:x.id, Date:x.date, Staff:x.staff, Customer:x.customerName, Invoice:x.invoiceNo||'', Amount:x.amount, Mode:x.mode, Reference:x.ref||'', 'Cheque date':x.chequeDate||'', Note:x.note||'', Status:x.status, 'Verified by':x.decidedBy||'', Reason:x.reason||'' });
+    Reports.download(rows, claim ? 'expense-claims' : 'field-collections');
+  },
+  /* ---------- bottom bar on phones ---------- */
+  bar(){
+    let el = document.getElementById('fieldBar');
+    const show = !!(Auth.session && this.enabled() && window.innerWidth<=820 && document.getElementById('appScreen') && document.getElementById('appScreen').style.display!=='none');
+    document.body.classList.toggle('has-fieldbar', show);
+    if(!show){ if(el) el.style.display = 'none'; return; }
+    if(!el){ el = document.createElement('nav'); el.id = 'fieldBar'; el.setAttribute('aria-label','Field menu'); document.body.appendChild(el); }
+    el.style.display = '';
+    const cur = UI.currentView, fu = this.myFollowups().length;
+    const b = (v, ic, l, click, badge)=>'<button type="button" class="'+(cur===v?'on':'')+'" onclick="'+click+'"><span class="fb-ic">'+ic+(badge?'<span class="fb-n">'+badge+'</span>':'')+'</span><span>'+l+'</span></button>';
+    el.innerHTML = b('fieldapp','&#127968;','Home',"go('fieldapp')") + b('followupcentre','&#9200;','Follow-ups',"go('followupcentre')", fu) +
+      (hasMenuAccess('visits') ? b('visits','&#128205;','Visit',"Field.Visits.openStartForm()") : b('customers','&#128100;','Lead',"Field.QuickLead.open()")) +
+      b('fieldmoney','&#128176;','Money',"go('fieldmoney')") + b('', '&#9776;','Menu',"FieldApp.openMenu()");
+  },
+  openMenu(){ UI.toggleSidebar(); }
+};
+function fieldCollectCustSelected(c){ FieldApp.invoicesFor(c); }
+Views.fieldapp = ()=>FieldApp.render();
+Views.fieldmoney = ()=>FieldApp.renderMoney();
+(function(){
+  const _goF = go;
+  go = function(view){ const rv = _goF.apply(this, arguments); try{ FieldApp.bar(); }catch(e){} return rv; };
+  window.addEventListener('resize', ()=>{ try{ FieldApp.bar(); }catch(e){} });
+})();
 
 /* ---------------------------------------------------------------------
    FIELD REPORTS
@@ -18128,10 +18776,10 @@ const WaQuick = {
     this.open({ kind:'followup', name:f.customerName, phone:f.phone, topic:f.purpose, customerId:f.customerId }); },
   quotation(id){ const q = Store.data.quotations.find(x=>x.id===id); if(!q) return;
     const cu = Store.data.customers.find(c=>c.id===q.customerId);
-    this.open({ kind:'quotation', name:q.customerName, phone:q.phone||(cu&&(cu.whatsapp||cu.phone)), ref:q.id, amount:Util.fmtMoney(q.total).replace('\u20b9','Rs.'), customerId:q.customerId, text:Quotations.waSummary(q) }); },
+    this.open({ kind:'quotation', after:async()=>{ q.chases = (Number(q.chases)||0)+1; q.lastChase = Util.todayISO(); await FieldSync.createAndSave('quotations', q); if(UI.currentView==='quotations') Quotations.render(); }, name:q.customerName, phone:q.phone||(cu&&(cu.whatsapp||cu.phone)), ref:q.id, amount:Util.fmtMoney(q.total).replace('\u20b9','Rs.'), customerId:q.customerId, text:Quotations.waSummary(q) }); },
   payment(id){ const p = Store.data.payments.find(x=>x.id===id); if(!p) return;
     const pend = p.dueAmount!==undefined ? Math.max(Number(p.dueAmount)||0,0) : Math.max((Number(p.amount)||0)-(Number(p.amountPaid)||0),0);
-    this.open({ kind:'payment', name:p.contact||p.party, phone:p.phone, ref:p.invoiceNumber||p.id, amount:Util.fmtMoney(pend).replace('\u20b9','Rs.'), customerId:p.customerId }); }
+    this.open({ kind:'payment', after:async()=>{ p.reminders = (Number(p.reminders)||0)+1; p.lastReminder = Util.todayISO(); await Store.save('payments'); if(UI.currentView==='payments') Payments.render(); }, name:p.contact||p.party, phone:p.phone, ref:p.invoiceNumber||p.id, amount:Util.fmtMoney(pend).replace('\u20b9','Rs.'), customerId:p.customerId }); }
 };
 
 /* ---------- Today's Actions: one screen with everything that needs doing now ---------- */
@@ -18278,6 +18926,7 @@ const ActionCentre = {
       return {};
     };
     const r = recOf(); if(!r.rec){ UI.toast('That item no longer exists'); this.render(); return; }
+    if(what==='done' && a.done && a.t==='fu'){ Followups.markDone(a.id); return; }   /* asks for the outcome and the next date */
     if(what==='done' && a.done){
       const key = 'status', prev = r.rec[key];
       r.rec[key] = a.t==='fu' ? 'Done' : 'Completed';
@@ -18307,15 +18956,15 @@ const ActionCentre = {
     if(q) rows = rows.filter(i=>[i.main,i.sub,i.owner,i.kind,i.status].join(' ').toLowerCase().includes(q));
     const pbadge = p=>'<span class="badge '+(p==='High'?'badge-red':p==='Medium'?'badge-amber':'badge-gray')+'">'+p+'</span>';
     const dueCell = i=>{ if(i.dueText) return '<span class="hint">'+E(i.dueText)+'</span>'; if(!i.due) return '<span class="hint">Needs office action</span>'; const t = Util.todayISO();
-      return i.due<t ? '<span style="color:var(--red,#dc2626);font-weight:600;">'+Util.fmtDate(i.due)+'</span><div class="hint">overdue</div>' : (i.due===t ? '<b>Today</b>' : Util.fmtDate(i.due)); };
+      return i.due<t ? '<span style="color:var(--red,#dc2626);font-weight:600;">'+Util.relDue(i.due)+'</span><div class="hint">'+Util.fmtDate(i.due)+'</div>' : (i.due===t ? '<b>Today</b>' : Util.fmtDate(i.due)+'<div class="hint">'+Util.relDue(i.due)+'</div>'); };
     const acts = i=>{ if(!i.act) return ''; return (i.act.done?' <button class="btn btn-outline btn-sm" title="Mark done" aria-label="Mark done" onclick="ActionCentre.act('+i._ix+',\'done\')">&#10003;</button>':'') +
       (i.act.snooze?' <select class="ac-snooze" aria-label="Postpone" onchange="ActionCentre.act('+i._ix+',\'snooze\',this.value)"><option value="">Postpone…</option><option value="1">Tomorrow</option><option value="3">In 3 days</option><option value="7">Next week</option></select>':''); };
     box.innerHTML = rows.length ?
-      '<div class="table-wrap"><table><thead><tr><th>Priority</th><th>Action / Record</th><th>Owner</th><th>Due</th><th>Status</th><th>Action</th></tr></thead><tbody>' +
+      '<div class="table-wrap"><table><thead><tr><th>Priority</th><th class="col-title">Action / Record</th><th>Owner</th><th>Due</th><th>Status</th><th class="col-actions">Action</th></tr></thead><tbody>' +
       rows.slice(0,this.LIMIT).map(i=>'<tr><td>'+pbadge(i.priority)+'</td>' +
         '<td style="white-space:normal;min-width:220px;"><span class="badge badge-blue" style="margin-right:6px;">'+E(i.kind)+'</span><b>'+E(i.main)+'</b><div class="hint">'+E(i.sub)+'</div></td>' +
         '<td>'+E(i.owner||'—')+'</td><td>'+dueCell(i)+'</td><td><span class="badge badge-gray">'+E(i.status||'')+'</span></td>' +
-        '<td style="white-space:nowrap;"><button class="btn btn-primary btn-sm" onclick="'+E(i.open)+'">View</button>' +
+        '<td class="col-actions" style="white-space:nowrap;"><button class="btn btn-primary btn-sm" onclick="'+E(i.open)+'">View</button>' +
         (i.tel?' <a class="btn btn-outline btn-sm" style="text-decoration:none;" href="tel:'+E(String(i.tel).replace(/[^0-9+]/g,''))+'">&#9742;</a>':'') +
         (i.wa?' <button class="btn btn-wa btn-sm" title="WhatsApp" onclick="'+E(i.wa)+'">&#128172;</button>':'') + acts(i) + '</td></tr>').join('') +
       '</tbody></table></div>' + (rows.length>this.LIMIT ? '<div class="hint" style="padding:8px 12px;">Showing the first '+this.LIMIT+' of '+rows.length+'. Use search to narrow the list.</div>' : '')
@@ -18331,7 +18980,7 @@ const ActionCentre = {
     document.getElementById('content').innerHTML =
       '<div class="toolbar" style="flex-wrap:wrap;"><div><b style="font-size:16px;">'+(c.today+c.overdue ? (c.today+c.overdue)+' item(s) need action now' : 'You are all caught up')+'</b><div class="hint">'+Util.fmtDate(Util.todayISO())+' · each item appears once and opens its original record</div></div><div class="toolbar-spacer"></div>' +
         (Auth.isAdmin() ? '<select aria-label="Whose items" onchange="ActionCentre.setScope(this.value)"><option value="mine"'+(this.scope==='mine'?' selected':'')+'>My items</option><option value="all"'+(this.scope==='all'?' selected':'')+'>Everyone</option></select>' : '') + '</div>' +
-      (qa.length ? '<div class="toolbar" style="flex-wrap:wrap;gap:8px;">'+qa.map(x=>'<button class="btn btn-outline btn-sm" onclick="'+E(x[2])+'">+ '+x[1]+'</button>').join('')+'</div>' : '') +
+      (qa.length ? '<div class="toolbar ac-qa" style="flex-wrap:wrap;gap:8px;">'+qa.map(x=>'<button class="btn btn-outline btn-sm" onclick="'+E(x[2])+'">+ '+x[1]+'</button>').join('')+'</div>' : '') +
       '<div class="toolbar" style="flex-wrap:wrap;">'+tabs.map(t=>'<button class="tab-btn '+(this.tab===t[0]?'active':'')+'" onclick="ActionCentre.setTab(\''+t[0]+'\')">'+t[1]+' <span class="cnt">'+c[t[0]]+'</span></button>').join('') +
         '<div class="toolbar-spacer"></div>' +
         (owners.length ? '<select id="acStaff" aria-label="Filter by staff" onchange="ActionCentre.setStaff(this.value)"><option value="">All staff</option>'+owners.map(o=>'<option value="'+E(o)+'"'+(o===this.staff?' selected':'')+'>'+E(o)+'</option>').join('')+'</select>' : '') +
@@ -18385,8 +19034,8 @@ const DashboardV2 = {
     const pb = p=>'<span class="badge '+(p==='High'?'badge-red':p==='Medium'?'badge-amber':'badge-gray')+'">'+p+'</span>';
     const chip = (t,l)=>'<button type="button" class="d2-chip'+(t==='today'?' on':'')+'" onclick="DashboardV2.openTab(\''+t+'\')">'+l+' <b>'+cnt[t]+'</b></button>';
     const prio = '<div class="card card-pad d2-card"><div class="d2-head"><h3>&#9889; Priority Action Centre</h3><div class="d2-chips">'+chip('today','Today')+chip('overdue','Overdue')+chip('upcoming','Upcoming')+chip('office','Waiting on Office')+'</div></div>' +
-      (top.length ? '<div class="table-wrap"><table><thead><tr><th>Priority</th><th>Action / Record</th><th>Owner</th><th>Due</th><th></th></tr></thead><tbody>' +
-        top.map(i=>'<tr><td>'+pb(i.priority)+'</td><td style="white-space:normal;min-width:180px;"><b>'+E(i.main)+'</b><div class="hint">'+E(i.kind+(i.sub?' · '+i.sub:''))+'</div></td><td>'+E(i.owner||'—')+'</td><td>'+(i.dueText?'<span class="hint">'+E(i.dueText)+'</span>':i.bucket==='overdue'?'<span style="color:var(--red,#dc2626);font-weight:600;">'+Util.fmtDate(i.due)+'</span>':'Today')+'</td><td><button class="btn btn-primary btn-sm" onclick="'+E(i.open)+'">View</button></td></tr>').join('') +
+      (top.length ? '<div class="table-wrap"><table><thead><tr><th>Priority</th><th class="col-title">Action / Record</th><th>Owner</th><th>Due</th><th class="col-actions"></th></tr></thead><tbody>' +
+        top.map(i=>'<tr><td>'+pb(i.priority)+'</td><td style="white-space:normal;min-width:180px;"><b>'+E(i.main)+'</b><div class="hint">'+E(i.kind+(i.sub?' · '+i.sub:''))+'</div></td><td>'+E(i.owner||'—')+'</td><td>'+(i.dueText?'<span class="hint">'+E(i.dueText)+'</span>':i.bucket==='overdue'?'<span style="color:var(--red,#dc2626);font-weight:600;">'+Util.relDue(i.due)+'</span><div class="hint">'+Util.fmtDate(i.due)+'</div>':'Today')+'</td><td class="col-actions"><button class="btn btn-primary btn-sm" onclick="'+E(i.open)+'">View</button></td></tr>').join('') +
         '</tbody></table></div><div style="margin-top:8px;"><button class="btn btn-outline btn-sm" onclick="go(\'actioncentre\')">Open Action Centre ('+(cnt.today+cnt.overdue)+' due now) &rarr;</button></div>'
         : '<div class="empty-state" style="padding:18px;"><div class="d">Nothing due today or overdue. Nice work.</div></div>') + '</div>';
     /* business snapshot */
@@ -18497,7 +19146,7 @@ const TAB_GROUPS = [
   ['suppliers','rfq','purchaseorders'],
   ['payments','outstanding'],
   ['expenses','siteexp'],
-  ['reports','fieldreports'],
+  ['reports','fieldreports','datahealth'],
   ['visits','requirements','travel'],
   ['fieldmap','findlocation','officefinder'],
   ['complaints','amc'],
@@ -18544,6 +19193,46 @@ const TabStrip = {
     .nav-build{padding:0 12px 16px;font-size:11px;opacity:.7;text-align:center;} .nav-refresh-btn{font:inherit;font-size:11px;background:none;border:none;color:inherit;text-decoration:underline;cursor:pointer;padding:0;}
   .nav-compact-row{padding:10px 12px 6px;} .nav-compact-btn{font:inherit;font-size:12px;width:100%;padding:7px 10px;border-radius:8px;border:1px dashed rgba(255,255,255,.35);background:transparent;color:inherit;opacity:.8;cursor:pointer;} .nav-compact-btn:hover{opacity:1;}
     .ac-snooze{font:inherit;font-size:12px;padding:3px 4px;border-radius:6px;border:1px solid var(--border,#e5e7eb);max-width:104px;}
+  /* field app (build 51) */
+  .fa-wrap{max-width:640px;margin:0 auto;} .fa-wrap.fa-wide{max-width:900px;}
+  .fa-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;} .fa-hi{font-size:20px;font-weight:800;}
+  .fa-day{display:flex;justify-content:space-between;align-items:center;gap:10px;background:#fff;border:1px solid var(--border,#e5e7eb);border-radius:14px;padding:14px 16px;margin-bottom:12px;}
+  .fa-day.on{border-color:#86efac;background:#f0fdf4;}
+  .fa-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin-bottom:12px;}
+  .fa-tile{font:inherit;display:flex;flex-direction:column;align-items:flex-start;gap:2px;text-align:left;background:#fff;border:1px solid var(--border,#e5e7eb);border-radius:14px;padding:14px;min-height:96px;cursor:pointer;color:inherit;}
+  .fa-tile:active{transform:scale(.98);} .fa-tile.fa-on{border-color:var(--orange,#f26b21);background:#fff7ed;}
+  .fa-ic{font-size:24px;line-height:1;margin-bottom:6px;} .fa-l{font-weight:700;font-size:14.5px;} .fa-s{font-size:12px;color:var(--text-mute,#6b7280);}
+  .fa-card{padding:12px 14px;margin-bottom:12px;} .fa-card-h{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;}
+  .fa-fu{display:flex;align-items:center;gap:10px;padding:10px 0;border-top:1px solid #EEF2F7;flex-wrap:wrap;} .fa-fu:first-of-type{border-top:0;}
+  .fa-fu-t{flex:1 1 180px;min-width:0;} .fa-fu-b{display:flex;gap:6px;flex-wrap:wrap;} .fa-amt{text-align:right;font-weight:700;}
+  .fa-money{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;} .fa-money>div{display:flex;flex-direction:column;} .fa-money b{font-size:17px;}
+  .fa-selfie{width:40px;height:40px;border-radius:50%;object-fit:cover;border:1px solid var(--border,#e5e7eb);}
+  .nav-fieldmode{padding:6px 14px 0;} .nav-fieldmode-btn{font:inherit;font-size:12px;background:none;border:1px dashed rgba(255,255,255,.35);color:inherit;border-radius:8px;padding:6px 8px;cursor:pointer;width:100%;}
+  #fieldBar{position:fixed;left:0;right:0;bottom:0;z-index:250;display:flex;background:#fff;border-top:1px solid var(--border,#e5e7eb);box-shadow:0 -4px 16px rgba(15,23,42,.08);padding-bottom:env(safe-area-inset-bottom);}
+  #fieldBar button{flex:1;font:inherit;font-size:11px;background:none;border:0;padding:7px 2px 6px;display:flex;flex-direction:column;align-items:center;gap:2px;color:var(--text-mute,#6b7280);cursor:pointer;}
+  #fieldBar button.on{color:var(--orange,#f26b21);font-weight:700;} .fb-ic{font-size:20px;line-height:1;position:relative;}
+  .fb-n{position:absolute;top:-6px;right:-12px;background:var(--orange,#f26b21);color:#fff;border-radius:9px;font-size:10px;padding:1px 5px;font-weight:700;}
+  body.has-fieldbar #mobileBottomNav{display:none!important;}
+  body.has-fieldbar #content{padding-bottom:84px;} body.has-fieldbar .bottom-scroll, body.has-fieldbar #bottomScroll{bottom:62px;}
+  /* review build 50 */
+  :where(#content) select, :where(#content) input[type="search"]{padding:8px 10px;border:1px solid var(--border,#e5e7eb);border-radius:var(--r-input,8px);background:#fff;font-size:13.5px;color:inherit;min-height:36px;}
+  :where(#content) input[type="search"]{min-width:0;}
+  .rab-more{display:inline-block;position:relative;} .rab-more>summary{list-style:none;cursor:pointer;} .rab-more>summary::-webkit-details-marker{display:none;}
+  .rab-menu{position:fixed;z-index:300;background:#fff;border:1px solid var(--border,#e5e7eb);border-radius:10px;box-shadow:0 10px 30px rgba(15,23,42,.16);padding:4px;min-width:160px;display:flex;flex-direction:column;gap:2px;}
+  .rab-menu .icon-btn{width:auto;height:auto;justify-content:flex-start;gap:8px;padding:8px 10px;border:0;border-radius:8px;display:flex;align-items:center;}
+  .rab-menu .icon-btn:hover{background:#f3f4f6;} .rab-lbl{font-size:13px;color:var(--text,#111827);}
+  .col-hide{display:none!important;}
+  .cust-flags{margin-top:3px;display:flex;flex-wrap:wrap;gap:4px;} .cust-flags .badge{font-size:10.5px;font-weight:600;padding:2px 7px;}
+  .quo-hist{margin:-4px 0 10px 2px;font-size:12px;}
+  .dh-check{margin-bottom:10px;padding:0;} .dh-check>summary{list-style:none;} .dh-check>summary::-webkit-details-marker{display:none;}
+  @media (max-width:640px){
+    .d2-kpis{grid-template-columns:1fr 1fr;gap:8px;} .d2-kpi{flex-direction:column;align-items:flex-start;gap:6px;padding:12px;}
+    .ac-qa{flex-wrap:nowrap!important;overflow-x:auto;padding-bottom:4px;} .ac-qa .btn{white-space:nowrap;flex:0 0 auto;}
+    .toolbar .btn .lbl, .fu-pill-row .btn .lbl{display:none;}
+    table.m-cards td.mc-title{flex-wrap:wrap;} table.m-cards td.mc-title > .hint{flex-basis:100%;font-weight:500;}
+    .fu-card{flex-wrap:wrap;} .fu-card .fu-actions{width:100%;justify-content:flex-start;flex-wrap:wrap;margin-top:8px;}
+    body #tabHint{padding:6px 12px;font-size:12px;gap:8px;flex-wrap:nowrap;} body #tabHint>span{flex:1 1 auto;} body #tabHint .btn{padding:4px 10px;font-size:12px;min-height:0;flex:0 0 auto;}
+  }
   #tabHint{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:8px 22px;background:#fff7ed;color:#9a3412;border-bottom:1px solid #fed7aa;font-size:12.5px;} #tabHint>span{flex:1 1 320px;} #tabHint .btn{flex:0 0 auto;} @media(max-width:700px){#tabHint{padding:8px 10px;}}
   #tabStrip .ts-tab:focus-visible{outline:2px solid var(--orange,#f26b21);outline-offset:-2px;}
   #tabStrip .ts-n{display:inline-block;min-width:18px;padding:0 5px;border-radius:999px;background:#e5e7eb;color:#374151;font-size:11px;text-align:center;margin-left:4px;}
@@ -18556,7 +19245,7 @@ const TabStrip = {
 /* ---------- Browser / phone Back button: moves back through the pages you opened instead of leaving the app ---------- */
 const NavHistory = {
   popping:false,
-  startView(){ const h = (location.hash||'').replace(/^#/,''); return (h && typeof Views[h]==='function' && hasMenuAccess(h)) ? h : 'dashboard'; },
+  startView(){ const h = (location.hash||'').replace(/^#/,''); return (h && typeof Views[h]==='function' && hasMenuAccess(h)) ? h : ((typeof FieldApp!=='undefined' && FieldApp.enabled()) ? 'fieldapp' : 'dashboard'); },
   push(view){ try{ const st = history.state; if(st && st.v===view) return; if(!st || !st.v) history.replaceState({v:view}, '', '#'+view); else history.pushState({v:view}, '', '#'+view); }catch(e){} },
   clear(){ try{ history.replaceState(null, '', location.pathname+location.search); }catch(e){} }
 };
@@ -18992,7 +19681,23 @@ const Reports = {
         ${tableFromAgg(byDistrict,'Customers by District','district')}
         ${this.followupFunnel()}
       </div>
+      ${this.scoreboard()}
     `;
+  },
+  /* Who did what in the last 7 days, counted from the activity log (which keeps the most recent 500 actions). */
+  scoreboard(){
+    const log = Store.data.activityLog||[], since = Date.now()-7*864e5, E = Util.escapeHtml;
+    const cats = [['Leads added',/^Added lead\/customer/],['Follow-ups done',/^Follow-up completed/],['WhatsApp sent',/^WhatsApp opened/],['Quotations',/^(Created quotation|Quotation duplicated)/],['Orders',/^(Added order|.*converted to Order)/],['Invoices',/^Added invoice/],['Visits',/^Visit completed/]];
+    const rows = {}; let oldest = null;
+    log.forEach(e=>{ const t = Date.parse(e.ts); if(!t) return; if(!oldest || t<oldest) oldest = t; if(t<since) return;
+      const ci = cats.findIndex(c=>c[1].test(e.action||'')); if(ci<0) return;
+      const u = e.user||'—'; rows[u] = rows[u] || cats.map(()=>0); rows[u][ci]++; });
+    const users = Object.keys(rows).sort((a,b)=>rows[b].reduce((x,y)=>x+y,0)-rows[a].reduce((x,y)=>x+y,0));
+    const partial = oldest && oldest > since;
+    return '<div class="card" style="margin-top:16px;"><div class="card-pad"><h3 style="margin:0 0 4px;">&#127942; Team scoreboard \u2014 last 7 days</h3><div class="hint">Counted from the activity log'+(partial?' (it only reaches back to '+new Date(oldest).toLocaleDateString('en-IN')+')':'')+'.</div></div>' +
+      (users.length ? '<div class="table-wrap"><table data-keep-table="1"><thead><tr><th>Staff</th>'+cats.map(c=>'<th>'+c[0]+'</th>').join('')+'<th>Total</th></tr></thead><tbody>' +
+        users.map(u=>'<tr><td class="cell-main">'+E(u)+'</td>'+rows[u].map(n=>'<td class="mono">'+(n||'\u2014')+'</td>').join('')+'<td class="mono"><b>'+rows[u].reduce((x,y)=>x+y,0)+'</b></td></tr>').join('') + '</tbody></table></div>'
+        : '<div class="empty-state" style="padding:16px;"><div class="d">No logged activity in the last 7 days.</div></div>') + '</div>';
   },
   followupFunnel(){
     const today = Util.todayISO();
@@ -19063,6 +19768,42 @@ const Reports = {
   }
 };
 Views.reports = ()=>Reports.render();
+
+/* =====================================================================
+   DATA HEALTH - records that need fixing, each with an Open button
+===================================================================== */
+const DataHealth = {
+  checks(){
+    const D = Store.data, today = Util.todayISO(), E = Util.escapeHtml, out = [];
+    const norm = ph=>String(ph||'').replace(/\D/g,'').slice(-10);
+    const byPhone = new Map(); (D.customers||[]).forEach(c=>{ const k = norm(c.phone); if(k.length===10){ if(!byPhone.has(k)) byPhone.set(k, []); byPhone.get(k).push(c); } });
+    const dups = [...byPhone.values()].filter(g=>g.length>1);
+    out.push({ id:'dup', title:'Customers sharing a phone number', why:'Probably the same customer entered twice. Open them and merge or delete the extra one.',
+      rows:dups.map(g=>({ main:g.map(c=>c.name).join('  |  '), sub:g[0].phone, open:"Customers.openDetail('"+g[0].id+"')" })) });
+    out.push({ id:'nophone', title:'Customers without a phone number', why:'They cannot be called or sent WhatsApp from the CRM.',
+      rows:(D.customers||[]).filter(c=>norm(c.phone).length<10).map(c=>({ main:c.name, sub:c.status||'', open:"Customers.openForm('"+c.id+"')" })) });
+    const att = Customers.attentionMap();
+    out.push({ id:'nostep', title:'Active leads with no next follow-up', why:'Nobody is scheduled to contact them again.',
+      rows:(D.customers||[]).filter(c=>(att.get(c.id)||[]).includes('No next step')).map(c=>({ main:c.name, sub:(c.status||'')+(c.assignedTo?' \u00b7 '+c.assignedTo:''), open:"Followups.openForm(null,'"+c.id+"')", btn:'Schedule' })) });
+    out.push({ id:'quote', title:'Sent quotations waiting 14+ days', why:'No reply and not chased in the last 7 days.',
+      rows:(D.quotations||[]).filter(q=>q.status==='Sent' && -(Util.daysFrom(q.date)||0)>=14 && (!q.lastChase || -(Util.daysFrom(q.lastChase)||0)>=7)).map(q=>({ main:q.customerName||'', sub:q.id+' \u00b7 '+Util.fmtMoney(q.total)+' \u00b7 sent '+Util.relAgo(q.date), open:"WaQuick.quotation('"+q.id+"')", btn:'Chase' })) });
+    out.push({ id:'accepted', title:'Accepted quotations without an order', why:'Make the order so delivery and billing can be tracked.',
+      rows:(D.quotations||[]).filter(q=>q.status==='Accepted' && !(q.orderId && (D.orders||[]).some(o=>o.id===q.orderId))).map(q=>({ main:q.customerName||'', sub:q.id+' \u00b7 '+Util.fmtMoney(q.total), open:"Quotations.convertToOrder('"+q.id+"')", btn:'Make order' })) });
+    out.push({ id:'paynofu', title:'Unpaid invoices with no follow-up date', why:'They will never show up as due in the Action Centre.',
+      rows:(D.payments||[]).filter(p=>p.status!=='Paid' && !p.followupDate).map(p=>({ main:p.party||'', sub:(p.invoiceNumber||p.id)+' \u00b7 '+Util.fmtMoney(p.amount), open:"go('payments');setTimeout(()=>Payments.openForm('"+p.id+"'),60)", btn:'Set date' })) });
+    out.push({ id:'latefu', title:'Follow-ups more than 7 days late', why:'Either do them, move them, or close them with an outcome.',
+      rows:(D.followups||[]).filter(f=>f.status!=='Done' && f.date && -(Util.daysFrom(f.date)||0)>7).map(f=>({ main:f.customerName||'', sub:(f.purpose||'')+' \u00b7 '+Util.relDue(f.date), open:"Followups.markDone('"+f.id+"')", btn:'Close' })) });
+    return out;
+  },
+  render(){
+    const E = Util.escapeHtml, list = this.checks(), bad = list.filter(c=>c.rows.length).length;
+    document.getElementById('content').innerHTML =
+      '<div class="toolbar"><div><b style="font-size:16px;">'+(bad ? bad+' of '+list.length+' checks need attention' : 'All checks are clean')+'</b><div class="hint">Checked just now from the data on this device. Fixing a record and coming back here updates the counts.</div></div></div>' +
+      list.map(c=>'<details class="card dh-check"'+(c.rows.length?' open':'')+'><summary class="card-pad" style="cursor:pointer;display:flex;gap:10px;align-items:center;"><span class="badge '+(c.rows.length?'badge-amber':'badge-green')+'">'+c.rows.length+'</span><b>'+E(c.title)+'</b><span class="hint" style="margin-left:6px;">'+E(c.why)+'</span></summary>' +
+        (c.rows.length ? '<div class="table-wrap"><table data-keep-table="1"><tbody>'+c.rows.slice(0,50).map(r=>'<tr><td class="cell-main" style="white-space:normal;">'+E(r.main)+'<div class="hint">'+E(r.sub||'')+'</div></td><td style="text-align:right;white-space:nowrap;"><button class="btn btn-outline btn-sm" onclick="'+E(r.open)+'">'+E(r.btn||'Open')+'</button></td></tr>').join('')+'</tbody></table></div>'+(c.rows.length>50?'<div class="hint" style="padding:8px 14px;">Showing 50 of '+c.rows.length+'.</div>':'') : '<div class="hint" style="padding:0 18px 14px;">Nothing to fix.</div>') + '</details>').join('');
+  }
+};
+Views.datahealth = ()=>DataHealth.render();
 
 /* =====================================================================
    BACKUP & RESTORE
@@ -19182,7 +19923,7 @@ const Backup = {
       emdPbg: Store.data.emdPbg, suppliers: Store.data.suppliers, purchaseOrders: Store.data.purchaseOrders, amcRecords: Store.data.amcRecords,
       rfqs: Store.data.rfqs, officeExpenses: Store.data.officeExpenses,
       officeWork: Store.data.officeWork, handovers: Store.data.handovers,
-      siteOrders: Store.data.siteOrders, siteExpenses: Store.data.siteExpenses, sitePayments: Store.data.sitePayments, siteCollections: Store.data.siteCollections, siteTemplates: Store.data.siteTemplates, lbContacts: Store.data.lbContacts
+      siteOrders: Store.data.siteOrders, siteExpenses: Store.data.siteExpenses, sitePayments: Store.data.sitePayments, siteCollections: Store.data.siteCollections, siteTemplates: Store.data.siteTemplates, lbContacts: Store.data.lbContacts, fieldCollections: Store.data.fieldCollections, fieldClaims: Store.data.fieldClaims
     };
   },
   async downloadJSON(opts){
@@ -19226,7 +19967,7 @@ const Backup = {
       const data = JSON.parse(text);
       try{ await sb.rpc('store_snapshot', { p_reason:'before file restore' }); }catch(e){ console.warn('pre-restore snapshot failed', e); }   // safety copy of the current data on the server
       Store.forceOverwrite = true;
-      ['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo','dayPlans','staffTargets','emdPbg','suppliers','purchaseOrders','amcRecords','rfqs','officeExpenses','officeWork','handovers','siteOrders','siteExpenses','sitePayments','siteCollections','siteTemplates','lbContacts'].forEach(k=>{
+      ['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppProjects','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo','dayPlans','staffTargets','emdPbg','suppliers','purchaseOrders','amcRecords','rfqs','officeExpenses','officeWork','handovers','siteOrders','siteExpenses','sitePayments','siteCollections','siteTemplates','lbContacts','fieldCollections','fieldClaims'].forEach(k=>{
         if(data[k]!==undefined) Store.data[k] = data[k];
       });
       // oppProjects lives in its own indexed table now, not the
@@ -19234,7 +19975,7 @@ const Backup = {
       // the dedicated full-replace path so opp_projects_rows (what
       // imports actually merge against) gets restored too, not just
       // the legacy blob.
-      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo','dayPlans','staffTargets','emdPbg','suppliers','purchaseOrders','amcRecords','rfqs','officeExpenses','officeWork','handovers','siteOrders','siteExpenses','sitePayments','siteCollections','siteTemplates','lbContacts'].map(k=>Store.save(k)));
+      await Promise.all(['customers','products','quotations','payments','followups','tasks','notes','settings','counters','gemcrac','orders','complaints','bids','waTemplates','waHistory','rateTemplates','rateDocs','rateTerms','rateDocTemplates','oppTracking','oppProducts','oppImportHistory','oppKeywordGroups','attendance','leaveRequests','bidDocs','visits','requirements','travelLogs','lsgOfficeGeo','dayPlans','staffTargets','emdPbg','suppliers','purchaseOrders','amcRecords','rfqs','officeExpenses','officeWork','handovers','siteOrders','siteExpenses','sitePayments','siteCollections','siteTemplates','lbContacts','fieldCollections','fieldClaims'].map(k=>Store.save(k)));
       Store.forceOverwrite = false;
       if(data['oppProjects']!==undefined) await Store.replaceAllOppProjects(Store.data.oppProjects);
       // Tender Centre tables: merged back by id (never deleted), only when the backup has them.
@@ -20424,7 +21165,7 @@ const ACCESS_MODULES = [
   {id:'siteexp',   label:'Site Expenses & project costing (costs, profit, payments)', keys:['jays_siteorders','jays_siteexpenses','jays_sitepayments','jays_sitecollections','jays_sitetemplates'], menus:['siteexp']},
   {id:'tasks',     label:'Tasks & Notes (older list)', keys:['jays_tasks','jays_notes'], menus:['notes']},
   {id:'complaints',label:'Complaints & AMC',           keys:['jays_complaints','jays_amcrecords'], menus:['complaints','amc']},
-  {id:'field',     label:'Field sales (visits, requirements, travel)', keys:['jays_visits','jays_requirements','jays_travellogs','jays_dayplans','jays_lsgofficegeo'], menus:['visits','requirements','travel','fieldmap']},
+  {id:'field',     label:'Field sales (visits, requirements, travel)', keys:['jays_visits','jays_requirements','jays_travellogs','jays_dayplans','jays_lsgofficegeo','jays_fieldcollections','jays_fieldclaims'], menus:['fieldapp','fieldmoney','visits','requirements','travel','fieldmap']},
   {id:'attendance',label:'Attendance & Leave',         keys:['jays_attendance','jays_leaverequests'], menus:['attendance']},
   {id:'whatsapp',  label:'WhatsApp templates & history',keys:['jays_watemplates','jays_wahistory'], menus:[]}
 ];
@@ -22185,7 +22926,7 @@ const Ico = {
   svg(name, cls){ const d = this.p[name]; return d ? '<svg class="'+(cls||'')+'" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">'+d+'</svg>' : ''; }
 };
 /* menu id -> icon; anything not listed keeps its existing emoji so nothing is ever blank */
-const NAV_ICON = { actioncentre:'bolt', dashboard:'dashboard', growth:'trend', notifications:'bell', leads:'users', customers:'user', pipeline:'trend', mywork:'target', followupcentre:'clock', officework:'list', handover:'swap',
+const NAV_ICON = { fieldapp:'phone', datahealth:'check', actioncentre:'bolt', dashboard:'dashboard', growth:'trend', notifications:'bell', leads:'users', customers:'user', pipeline:'trend', mywork:'target', followupcentre:'clock', officework:'list', handover:'swap',
   mycalls:'phone', officequeue:'list', quotations:'file', rate_docs:'file', orders:'box', bidsearch:'search', tenders:'briefcase', oppfinder:'landmark', biddocs:'file', tendervault:'lock', gemcrac:'list', emdpbg:'lock',
   products:'box', inventory:'store', suppliers:'truck', purchaseorders:'cart', rfq:'list', payments:'wallet', outstanding:'alert', expenses:'receipt', siteexp:'wallet',
   fieldhome:'pin', visits:'pin', requirements:'list', travel:'truck', fieldmap:'pin', findlocation:'search', officefinder:'search',
@@ -22199,13 +22940,47 @@ const NavIcons = {
 const Design = {
   /* Tables that have an Actions column are record lists: on phones each row becomes a labelled card.
      Comparison / financial tables (no Actions column) stay as scrolling tables with an edge shadow. */
+  /* Rarely used row buttons (Delete, Duplicate) go behind a ⋯ menu so the everyday ones are easy to hit and nobody deletes by accident. */
+  moreMenus(root){
+    (root||document).querySelectorAll('.row-action-btns:not([data-mm])').forEach(box=>{
+      box.setAttribute('data-mm','1');
+      const btns = [...box.children].filter(b=>b.matches('button,a'));
+      const rare = btns.filter(b=>/delete|remove|duplicate/i.test((b.getAttribute('title')||'')+' '+(b.getAttribute('aria-label')||'')) || (b.textContent||'').indexOf('\u{1F5D1}')>=0);
+      if(btns.length<4 || !rare.length) return;
+      const d = document.createElement('details'); d.className = 'rab-more';
+      d.innerHTML = '<summary class="icon-btn" title="More actions" aria-label="More actions">&#8943;</summary><div class="rab-menu" role="menu"></div>';
+      const menu = d.querySelector('.rab-menu');
+      rare.forEach(b=>{
+        const t = b.getAttribute('title') || ((b.textContent||'').indexOf('\u{1F5D1}')>=0 ? 'Delete' : 'More');
+        if(!b.getAttribute('title')) b.setAttribute('title', t);
+        b.setAttribute('role','menuitem'); b.insertAdjacentHTML('beforeend', '<span class="rab-lbl">'+Util.escapeHtml(t)+'</span>');
+        menu.appendChild(b);
+      });
+      box.appendChild(d);
+    });
+  },
+  /* Wide tables: a column that is empty on every row of this page is hidden, so the useful columns fit the screen. */
+  hideEmptyCols(root){
+    (root||document).querySelectorAll('.table-wrap > table:not([data-ech])').forEach(t=>{
+      t.setAttribute('data-ech','1');
+      if(t.closest('.modal') || t.dataset.keepTable) return;
+      const heads = [...t.querySelectorAll('thead th')], rows = [...t.querySelectorAll('tbody tr')];
+      if(heads.length<8 || !rows.length || t.querySelector('td[colspan],th[colspan]')) return;
+      heads.forEach((h,i)=>{
+        if(h.classList.contains('col-actions') || h.classList.contains('sortable')) return;
+        const empty = rows.every(tr=>{ const td = tr.children[i]; if(!td) return true; const x = (td.textContent||'').trim(); return (x==='' || x==='\u2014' || x==='-') && !td.querySelector('input,button,a,select,img'); });
+        if(empty){ h.classList.add('col-hide'); rows.forEach(tr=>{ if(tr.children[i]) tr.children[i].classList.add('col-hide'); }); }
+      });
+    });
+  },
   cardify(root){
     (root||document).querySelectorAll('.table-wrap > table').forEach(t=>{
       if(t.closest('.modal') || t.dataset.keepTable) return;
       const heads = [...t.querySelectorAll('thead th')];
       if(!heads.some(h=>h.classList.contains('col-actions'))) return;
       const labels = heads.map(h=>h.classList.contains('col-actions') ? '' : (h.textContent||'').replace(/[↑↓⇅▲▼]/g,'').trim());
-      let titleIdx = heads.findIndex((h,i)=>!h.classList.contains('col-actions') && labels[i]);
+      let titleIdx = heads.findIndex(h=>h.classList.contains('col-title'));
+      if(titleIdx<0) titleIdx = heads.findIndex((h,i)=>!h.classList.contains('col-actions') && labels[i]);
       t.classList.add('m-cards');
       t.querySelectorAll('tbody tr').forEach(tr=>{
         [...tr.children].forEach((td,i)=>{
@@ -22250,7 +23025,15 @@ const Design = {
     document.querySelectorAll('[data-ico]').forEach(e=>{ e.innerHTML = Ico.svg(e.getAttribute('data-ico')); });
     const bi = document.getElementById('tbBellIco'); if(bi) bi.innerHTML = Ico.svg('bell');
     const c = document.getElementById('content'); let q = false;
-    const run = ()=>{ q=false; this.cardify(c); this.keyboards(c); };
+    const run = ()=>{ q=false; this.hideEmptyCols(c); this.moreMenus(c); this.cardify(c); this.keyboards(c); };
+    document.addEventListener('click', e=>{
+      document.querySelectorAll('details.rab-more[open]').forEach(d=>{ if(!d.contains(e.target) || e.target.closest('.rab-menu')) setTimeout(()=>{ d.open = false; }, 0); });
+    });
+    document.addEventListener('toggle', e=>{
+      const d = e.target; if(!d || !d.classList || !d.classList.contains('rab-more') || !d.open) return;
+      const m = d.querySelector('.rab-menu'), r = d.querySelector('summary').getBoundingClientRect(); if(!m) return;
+      m.style.top = Math.min(r.bottom+4, window.innerHeight-m.offsetHeight-8)+'px'; m.style.left = Math.max(8, Math.min(r.left, window.innerWidth-m.offsetWidth-8))+'px';
+    }, true);
     if(c) new MutationObserver(()=>{ if(!q){ q=true; requestAnimationFrame(run); } }).observe(c,{childList:true,subtree:true});
     new MutationObserver(m=>{ m.forEach(x=>x.addedNodes.forEach(n=>{ if(n.nodeType===1 && n.closest && n.closest('.modal-overlay')) this.keyboards(n); })); }).observe(document.body,{childList:true,subtree:true});
     document.addEventListener('click',e=>{ if(!e.target.closest('.tb-user')) this.toggleUserMenu(false); });
