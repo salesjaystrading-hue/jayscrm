@@ -3174,7 +3174,7 @@ function navBadgeCount(id){
    localStorage only (never in the business-data store). */
 /* Which version is running on this device, and a way to drop the saved copy of the app (service worker + cache)
    so that a newly uploaded index.html is really used. Login, settings and saved data are not touched. */
-const APP_BUILD = '2026-11-02 (build 51)';
+const APP_BUILD = '2026-11-03 (build 52)';
 const AppUpdate = {
   reload(){ location.reload(); },
   async refresh(){
@@ -10694,6 +10694,7 @@ const BidSearch = {
         </div>
       </div>
       ${GemPdf.dropHTML()}
+      ${BidIntel.importHTML()}
       <div class="toolbar">
         <div class="search"><span class="ic">&#128269;</span><input id="bidSearch" autocomplete="off" placeholder="Search bid number, title, category, organisation, department..." oninput="BidSearch.render()" value="${Util.escapeHtml(q)}"></div>
         <div class="toolbar-spacer"></div>
@@ -11048,6 +11049,7 @@ const BidSearch = {
       ${GemPdf.detailHTML(b)}
       ${BidAtc.placeholder(b)}
       ${GoNoGo.cardHTML(b)}
+      ${BidIntel.resultHTML(b)}
       ${(()=>{ const r=bidReadiness(b); return `<div class="card card-pad" style="margin:14px 0 0;"><b>Bid Readiness: ${bidReadinessBadge(b)}</b> <span class="cell-mute" style="font-size:12px;">${r.missing.length?'Missing: '+Util.escapeHtml(r.missing.join(' · ')):'Everything in place — ready to submit.'}</span>${r.needsEmd&&!r.emdRec?` <button class="btn btn-outline btn-sm" style="margin-left:8px;" onclick="BidSearch.recordEmd('${id}')">Record EMD</button>`:''}</div>`; })()}
       <h4 style="font-size:12px;text-transform:uppercase;color:var(--text-mute);margin:16px 0 6px;">Document Checklist — ${doneCount}/${b.checklist.length}</h4>
       <div class="doc-progress"><div style="width:${pct}%;"></div></div>
@@ -18881,6 +18883,10 @@ const ActionCentre = {
       (D.bids||[]).forEach(b=>{ if(TENDER_ALERT_SKIP.includes(b.status)) return; const d = bidDeadlineInfo(b.endDate).days; if(d===null || d<0) return;
         add({ key:'bid:'+b.id, kind:'Tender', main:b.title||b.bidNumber||'Bid', sub:'Bid closes · '+(b.organisation||'')+(b.bidNumber?' · '+b.bidNumber:''), owner:b.assignedTo||'', due:this.addDays(today,d), status:b.status||'Open', urgent:d<=1,
           view:'bidsearch', open:"TodayPlan.openBid('"+b.id+"')" }); }); }
+    if(hasMenuAccess('bidsearch')){
+      (D.bids||[]).forEach(b=>{ if(!b.preBidDate || TENDER_ALERT_SKIP.includes(b.status)) return; const d = Util.daysFrom(b.preBidDate); if(d===null || d<0 || d>3) return;
+        add({ key:'prebid:'+b.id, kind:'Tender', main:b.title||b.bidNumber||'Bid', sub:'Pre-bid meeting '+(d===0?'today':d===1?'tomorrow':'in '+d+' days')+' · send your queries'+(b.bidNumber?' · '+b.bidNumber:''), owner:b.assignedTo||'', due:this.addDays(today,d), status:b.status||'Open', urgent:d<=1,
+          view:'bidsearch', open:"TodayPlan.openBid('"+b.id+"')" }); }); }
     if(hasMenuAccess('oppfinder')){
       const trk = D.oppTracking||{}, keys = Object.keys(trk).filter(k=>{ const t = trk[k]; return t && t.followup && !['Won','Lost'].includes(t.status) && (all || !t.staff || t.staff===me); });
       const names = {}; const dueKeys = keys.filter(k=>this.bucket(trk[k].followup, today));
@@ -19260,6 +19266,331 @@ const NavHistory = {
 
 /* ---------- Closed tenders you did not take part in: removed 7 days after closing, with a restore list ---------- */
 const BID_CLEAN_STATUSES = ['New','Saved','Under Review','Go / No-Go Decision','Not Participating'];
+/* ===== BidIntel (build 52) - additive bid features =====
+   1. Import bids from a GeMSentry export (.json / .csv / .xlsx): new bids only, existing bids are never changed.
+   2. Pre-bid meeting date with an Action Centre reminder.
+   3. Bid result record (L1 price, our rank, winner, competitors, reason) and win/loss insights.
+   Everything is stored as NEW optional fields on a bid (importedFrom, gemsentry, preBidDate, result), so old bids and old screens work exactly as before. */
+const BidIntel = {
+  S: { file: '', rows: [] },
+  MAX_ROWS: 400,
+  E(s){ return Util.escapeHtml(s == null ? '' : String(s)); },
+  norm(s){ return String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); },
+  key(s){ return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, ''); },
+
+  /* ---------- reading values out of a GeMSentry record (JSON: nested, Excel/CSV: flat headers) ---------- */
+  pick(o, names){
+    /* names are in priority order; each name is searched through the record and its nested parts (up to 4 levels) before the next name is tried */
+    for(const nm of names){
+      const w = this.key(nm);
+      let level = [o];
+      for(let depth = 0; depth < 4 && level.length; depth++){
+        const next = [];
+        for(const node of level){
+          if(!node || typeof node !== 'object' || Array.isArray(node)) continue;
+          for(const k of Object.keys(node)){
+            if(this.key(k) !== w) continue;
+            const v = node[k];
+            if(v == null || v === '') continue;
+            if(Array.isArray(v)){ const flat = v.filter(x => x != null && typeof x !== 'object').join(', '); if(flat) return flat; continue; }
+            if(typeof v === 'object') continue;
+            return v;
+          }
+          Object.keys(node).forEach(k => { const v = node[k]; if(v && typeof v === 'object' && !Array.isArray(v)) next.push(v); });
+        }
+        level = next;
+      }
+    }
+    return '';
+  },
+  isoDate(v){
+    if(v == null || v === '') return '';
+    if(typeof v === 'number' && v > 20000 && v < 80000){ const d = new Date(Math.round((v - 25569) * 86400000)); return isNaN(d) ? '' : d.toISOString().slice(0, 10); }
+    const s = String(v).trim().replace(/(\d+)(st|nd|rd|th)\b/gi, '$1');
+    let m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s); if(m) return m[1] + '-' + String(m[2]).padStart(2, '0') + '-' + String(m[3]).padStart(2, '0');
+    m = /^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{4})/.exec(s); if(m) return m[3] + '-' + String(m[2]).padStart(2, '0') + '-' + String(m[1]).padStart(2, '0');
+    const d = new Date(s); if(!isNaN(d)){ const y = d.getFullYear(); if(y > 2000 && y < 2100) return Util.isoLocal(d); }
+    return '';
+  },
+  num(v){
+    if(typeof v === 'number') return isFinite(v) ? v : 0;
+    const s = String(v == null ? '' : v).replace(/,/g, '');
+    const m = /(\d+(?:\.\d+)?)\s*(lakh|lac|crore|cr)?/i.exec(s); if(!m) return 0;
+    let n = Number(m[1]); const u = (m[2] || '').toLowerCase();
+    if(u === 'lakh' || u === 'lac') n *= 100000; else if(u === 'crore' || u === 'cr') n *= 10000000;
+    return isFinite(n) ? n : 0;
+  },
+  yes(v){ if(v === true) return true; const s = String(v == null ? '' : v).trim().toLowerCase(); return s === 'yes' || s === 'true' || s === 'required' || s === 'y' || s === '1'; },
+  no(v){ if(v === false) return true; const s = String(v == null ? '' : v).trim().toLowerCase(); return s === 'no' || s === 'false' || s === 'n' || s === '0' || s === 'not required'; },
+
+  mapRecord(r){
+    const P = (...n) => this.pick(r, n);
+    const bidNo = String(P('bid_no', 'bid number', 'bid no', 'bidnumber') || '').trim();
+    if(!bidNo) return null;
+    const url = [P('pdf_url'), P('url'), P('gem portal'), P('rfp pdf')].map(x => String(x || '')).find(x => /^https?:\/\//i.test(x)) || '';
+    const emdAmt = this.num(P('emd_amount', 'emdamount'));
+    const emdTxt = String(P('emd_status', 'emd') || '');
+    const score = Number(P('fit_score', 'fit', 'score'));
+    const g = {
+      bidNo, score: isFinite(score) && P('fit_score', 'fit', 'score') !== '' ? score : null,
+      verdict: String(P('recommendation', 'verdict') || ''), eligibility: String(P('eligibility') || ''),
+      keyword: String(P('keyword', 'keywords', 'matched_keywords') || ''), risk: String(P('risk') || ''),
+      status: String(P('status') || ''), emd: emdTxt || (emdAmt ? String(emdAmt) : ''),
+      epbgRequired: this.yes(P('epbg_required', 'epbg')) ? true : (this.no(P('epbg_required', 'epbg')) ? false : null),
+      epbgPercent: this.num(P('epbg_percentage', 'epbg_percent')),
+      preBidRequired: this.yes(P('pre_bid_required', 'prebid_required', 'prebid')) ? true : null,
+      preBidDate: this.isoDate(P('pre_bid_date', 'prebid_date')),
+      startup: String(P('startup_exemption') || ''), mse: String(P('mse_exemption', 'mse_pref') || ''),
+      quantity: String(P('quantity', 'total_quantity') || ''), source: String(P('source_name') || ''),
+      importedAt: new Date().toISOString()
+    };
+    return {
+      bidNumber: bidNo,
+      title: String(P('title', 'item', 'keyword') || bidNo).trim().slice(0, 300),
+      department: String(P('buyer_dept', 'buyer / department', 'department') || '').trim(),
+      organisation: String(P('buyer_org', 'organisation', 'organization') || '').trim(),
+      ministry: String(P('ministry') || '').trim(),
+      location: String(P('state', 'location') || '').trim(),
+      startDate: this.isoDate(P('start_date', 'start date')), endDate: this.isoDate(P('end_date', 'end date')),
+      estimatedValue: this.num(P('estimated_value', 'est. value (inr)', 'tender_value')),
+      emdAmount: emdAmt || this.num(emdTxt), sourceUrl: url, gemsentry: g
+    };
+  },
+
+  /* ---------- file reading ---------- */
+  parseCSV(text){
+    const rows = []; let row = [], cur = '', q = false;
+    for(let i = 0; i < text.length; i++){
+      const c = text[i];
+      if(q){ if(c === '"'){ if(text[i + 1] === '"'){ cur += '"'; i++; } else q = false; } else cur += c; }
+      else if(c === '"') q = true;
+      else if(c === ','){ row.push(cur); cur = ''; }
+      else if(c === '\n' || c === '\r'){ if(c === '\r' && text[i + 1] === '\n') i++; row.push(cur); cur = ''; if(row.some(x => x !== '')) rows.push(row); row = []; }
+      else cur += c;
+    }
+    row.push(cur); if(row.some(x => x !== '')) rows.push(row);
+    if(rows.length < 2) return [];
+    const head = rows[0].map(h => h.trim());
+    return rows.slice(1).map(r => { const o = {}; head.forEach((h, i) => { if(h) o[h] = r[i] == null ? '' : r[i]; }); return o; });
+  },
+  extractJSON(j){
+    if(Array.isArray(j)) return j;
+    if(j && Array.isArray(j.tenders)) return j.tenders;
+    if(j && j.tenders && typeof j.tenders === 'object') return Object.values(j.tenders);
+    if(j && typeof j === 'object'){ const vals = Object.values(j); if(vals.length && vals.every(v => v && typeof v === 'object' && (v.bid_no || v.bidNo))) return vals; }
+    return [];
+  },
+  async onFile(files){
+    const f = files && files[0]; if(!f) return;
+    try{
+      if(f.size > 25 * 1024 * 1024) throw new Error('file is larger than 25 MB');
+      let recs = [];
+      if(/\.json$/i.test(f.name)) recs = this.extractJSON(JSON.parse(await f.text()));
+      else if(/\.csv$/i.test(f.name)) recs = this.parseCSV(await f.text());
+      else if(/\.xlsx?$/i.test(f.name)){
+        if(!window.XLSX) throw new Error('Excel reader is not loaded. Check your internet connection and reload.');
+        const wb = XLSX.read(await f.arrayBuffer(), { type: 'array' });
+        let best = [];
+        wb.SheetNames.forEach(n => { const rows = XLSX.utils.sheet_to_json(wb.Sheets[n], { defval: '' }); if(rows.length && Object.keys(rows[0]).some(k => /bid\s*(no|number)/i.test(k)) && rows.length > best.length) best = rows; });
+        recs = best;
+      } else throw new Error('Choose a .json, .csv or .xlsx file exported from GeMSentry');
+      const mapped = recs.map(r => this.mapRecord(r)).filter(Boolean);
+      if(!mapped.length) throw new Error('No bids with a Bid Number were found in this file');
+      this.S = { file: f.name, rows: mapped.slice(0, 5000), total: recs.length };
+      this.openPreview();
+    }catch(e){ UI.toast('Import: ' + (e && e.message ? e.message : e), 5000); }
+  },
+
+  /* ---------- preview + import ---------- */
+  opts(){
+    const g = id => document.getElementById(id);
+    return { skipClosed: g('bi_closed') ? g('bi_closed').checked : true, skipRej: g('bi_rej') ? g('bi_rej').checked : true, minScore: g('bi_min') ? (Number(g('bi_min').value) || 0) : 0 };
+  },
+  compute(o){
+    const have = new Set(); (Store.data.bids || []).forEach(b => { if(b.bidNumber) have.add(this.norm(b.bidNumber)); if(b.raNumber) have.add(this.norm(b.raNumber)); });
+    const seen = new Set(), add = [], c = { dup: 0, closed: 0, rej: 0, low: 0, repeat: 0 };
+    this.S.rows.forEach(r => {
+      const k = this.norm(r.bidNumber);
+      if(seen.has(k)){ c.repeat++; return; } seen.add(k);
+      if(have.has(k)){ c.dup++; return; }
+      if(o.skipClosed && r.endDate && bidDeadlineInfo(r.endDate).days < 0){ c.closed++; return; }
+      if(o.skipRej && /reject|not\s*eligible|no[-\s]*go/i.test(r.gemsentry.status + ' ' + r.gemsentry.verdict)){ c.rej++; return; }
+      if(o.minScore && (r.gemsentry.score == null || r.gemsentry.score < o.minScore)){ c.low++; return; }
+      add.push(r);
+    });
+    return { add, c };
+  },
+  openPreview(){
+    UI.openModal('Import bids from GeMSentry', '<div id="bi_body"></div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" id="bi_go" onclick="BidIntel.doImport()">Import</button>', true);
+    this.drawPreview(true);
+  },
+  drawPreview(first){
+    const o = first ? { skipClosed: true, skipRej: true, minScore: 0 } : this.opts();
+    const { add, c } = this.compute(o), E = s => this.E(s);
+    const cut = Math.max(0, add.length - this.MAX_ROWS);
+    document.getElementById('bi_body').innerHTML = `
+      <div class="hint" style="margin-bottom:10px;">File: <b>${E(this.S.file)}</b> &middot; ${this.S.rows.length} bids read. Bids already in the CRM are never changed or overwritten &mdash; only new bid numbers are added, as <b>New</b>.</div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:12px;font-size:13px;">
+        <label><input type="checkbox" id="bi_closed" ${o.skipClosed ? 'checked' : ''} onchange="BidIntel.drawPreview()"> Skip bids already closed</label>
+        <label><input type="checkbox" id="bi_rej" ${o.skipRej ? 'checked' : ''} onchange="BidIntel.drawPreview()"> Skip bids GeMSentry rejected</label>
+        <label>Minimum fit score <input type="number" id="bi_min" value="${o.minScore}" min="0" max="100" style="width:70px;" onchange="BidIntel.drawPreview()"></label>
+      </div>
+      <div class="card card-pad" style="margin-bottom:10px;"><b>${Math.min(add.length, this.MAX_ROWS)} new bids will be added</b>
+        <div class="cell-mute" style="font-size:12px;margin-top:4px;">Already in CRM: ${c.dup} &middot; closed: ${c.closed} &middot; rejected: ${c.rej} &middot; below score: ${c.low} &middot; repeated in file: ${c.repeat}${cut ? ' &middot; <b>' + cut + ' more not imported now (max ' + this.MAX_ROWS + ' per import &mdash; import again afterwards)</b>' : ''}</div></div>
+      ${add.length ? `<div class="table-wrap"><table><thead><tr><th>Bid No</th><th>Title</th><th>Buyer</th><th>Closes</th><th>Fit</th></tr></thead><tbody>${add.slice(0, 8).map(r => `<tr><td class="mono">${E(r.bidNumber)}</td><td style="white-space:normal;max-width:240px;">${E(r.title)}</td><td class="cell-mute">${E(r.department || r.organisation || '')}</td><td class="cell-mute">${E(r.endDate ? Util.fmtDate(r.endDate) : '')}</td><td>${r.gemsentry.score == null ? '' : E(r.gemsentry.score)}</td></tr>`).join('')}</tbody></table></div>${add.length > 8 ? '<div class="hint">Showing the first 8.</div>' : ''}` : '<div class="empty-state"><div class="d">Nothing new to import with these settings.</div></div>'}`;
+    const btn = document.getElementById('bi_go'); if(btn) btn.disabled = !add.length;
+    this._plan = add.slice(0, this.MAX_ROWS);
+  },
+  async doImport(){
+    const add = this._plan || []; if(!add.length) return;
+    const btn = document.getElementById('bi_go'); if(btn){ btn.disabled = true; btn.textContent = 'Importing...'; }
+    try{
+      const D = Store.data, nowIso = new Date().toISOString(), who = bidUserName(), prefix = D.settings.bidPrefix || 'BID-';
+      const ids = new Set(D.bids.map(b => b.id)); let n = D.counters.bidNext || 1;
+      const made = add.map(r => {
+        let id; do{ id = prefix + String(n).padStart(4, '0'); n++; }while(ids.has(id)); ids.add(id);
+        const g = r.gemsentry, notes = [g.keyword ? 'Keyword: ' + g.keyword : '', g.quantity ? 'Quantity: ' + g.quantity : ''].filter(Boolean).join(' | ');
+        return {
+          id, bidNumber: r.bidNumber, raNumber: '', title: r.title, bidType: /\/R\//i.test(r.bidNumber) ? 'RA (Reverse Auction)' : 'Bid',
+          category: '', boqTitle: '', description: notes, technicalSpecs: '',
+          ministry: r.ministry, department: r.department, organisation: r.organisation, buyerName: '', consignee: '', state: '', district: '', location: r.location,
+          estimatedValue: r.estimatedValue || 0, emdRequired: !!r.emdAmount, emdAmount: r.emdAmount || 0, tenderFee: 0, securityDeposit: 0, expectedMargin: 0, ourQuote: 0,
+          publishedDate: '', startDate: r.startDate, endDate: r.endDate, openingDate: '', offerValidity: '',
+          status: 'New', assignedTo: '', sourceUrl: r.sourceUrl,
+          checklist: DEFAULT_BID_CHECKLIST.map(name => ({ name, done: false })),
+          timeline: [{ date: nowIso, text: 'Imported from GeMSentry' + (g.score != null ? ' (fit score ' + g.score + ')' : ''), by: who }],
+          createdDate: Util.todayISO(), savedBy: who, savedAt: nowIso, updatedBy: who, updatedAt: nowIso,
+          importedFrom: 'GeMSentry', gemsentry: g, preBidDate: g.preBidDate || ''
+        };
+      });
+      D.bids.unshift(...made);
+      D.counters.bidNext = n;
+      await Store.save('counters');
+      await Store.save('bids');
+      await Activity.log('Bids imported from GeMSentry', made.length + ' new bids');
+      UI.closeModal(); UI.toast(made.length + ' new bids imported from GeMSentry', 4500); Router.render('bidsearch');
+    }catch(e){ UI.toast('Import failed: ' + (e && e.message ? e.message : e), 6000); if(btn){ btn.disabled = false; btn.textContent = 'Import'; } }
+  },
+
+  /* ---------- card shown above the bid list ---------- */
+  importHTML(){
+    try{
+      return `<div class="card card-pad" style="margin-bottom:16px;">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+          <div style="flex:1 1 260px;"><div style="font-size:14px;font-weight:600;">&#128229; Import bids from GeMSentry</div>
+          <div class="hint" style="margin-top:2px;">Choose the file exported from GeMSentry (.json, .csv or .xlsx). You see a preview first; existing bids are never changed.</div></div>
+          <button class="btn btn-outline btn-sm" onclick="document.getElementById('biFile').click()">Choose file</button>
+          <input id="biFile" type="file" accept=".json,.csv,.xlsx,.xls" style="display:none;" onchange="BidIntel.onFile(this.files); this.value='';">
+        </div>
+        <details style="margin-top:8px;"><summary class="cell-mute" style="cursor:pointer;font-size:12px;">How to get the file from GeMSentry</summary>
+          <div class="hint" style="margin-top:6px;line-height:1.6;">On the computer where GeMSentry runs, open <code>http://localhost:5000/api/tenders</code> in the browser and save the page as a <b>.json</b> file (right-click &rarr; Save as). Or use its <b>Export summary (.xlsx)</b> button. Then choose that file here. GeMSentry only runs on that computer, so import whenever you want the latest bids.</div></details>
+        ${this.insightsHTML()}
+      </div>`;
+    }catch(e){ return ''; }
+  },
+
+  /* ---------- result tracking ---------- */
+  REASONS: ['', 'Price (not L1)', 'Technically disqualified', 'Documents missing / rejected', 'MSE / MII / Startup preference', 'OEM / authorization issue', 'Bid cancelled by buyer', 'Did not participate', 'Other'],
+  gapPct(r){ const a = Number(r.ourPrice) || 0, l = Number(r.l1Price) || 0; return (a > 0 && l > 0) ? Math.round((a - l) / l * 1000) / 10 : null; },
+  insightsHTML(){
+    const withRes = (Store.data.bids || []).filter(b => b.result && (b.status === 'Won' || b.status === 'Lost' || b.result.l1Price || b.result.winner));
+    if(!withRes.length) return '';
+    const won = withRes.filter(b => b.status === 'Won').length, lost = withRes.filter(b => b.status === 'Lost').length;
+    const gaps = withRes.filter(b => b.status === 'Lost').map(b => this.gapPct(b.result)).filter(x => x != null);
+    const avg = gaps.length ? Math.round(gaps.reduce((a, x) => a + x, 0) / gaps.length * 10) / 10 : null;
+    const cnt = (arr) => { const m = {}; arr.forEach(x => { const k = String(x || '').trim(); if(k) m[k] = (m[k] || 0) + 1; }); return Object.entries(m).sort((a, b) => b[1] - a[1]); };
+    const reasons = cnt(withRes.filter(b => b.status === 'Lost').map(b => b.result.reason)).slice(0, 4);
+    const winners = cnt(withRes.filter(b => b.status === 'Lost').map(b => b.result.winner)).filter(x => x[1] >= 2).slice(0, 4);
+    const E = s => this.E(s);
+    return `<details style="margin-top:8px;"><summary style="cursor:pointer;font-size:13px;font-weight:600;">Bid results so far: ${won} won, ${lost} lost${won + lost ? ' (' + Math.round(won / (won + lost) * 100) + '% win rate)' : ''}</summary>
+      <div class="hint" style="margin-top:6px;line-height:1.7;">
+        ${avg != null ? 'On lost bids, our price was on average <b>' + (avg > 0 ? avg + '% above' : Math.abs(avg) + '% below') + '</b> the L1 price (' + gaps.length + ' bids with prices recorded).<br>' : ''}
+        ${reasons.length ? 'Main reasons lost: ' + reasons.map(r => E(r[0]) + ' (' + r[1] + ')').join(', ') + '<br>' : ''}
+        ${winners.length ? 'Competitors who beat us more than once: ' + winners.map(r => E(r[0]) + ' (' + r[1] + ')').join(', ') : ''}
+      </div></details>`;
+  },
+  resultLine(b){
+    const r = b.result; if(!r) return '<span class="cell-mute">No result recorded yet.</span>';
+    const gap = this.gapPct(r), M = Util.fmtMoney, E = s => this.E(s);
+    const parts = [
+      r.ourRank ? 'Our rank: <b>' + E(r.ourRank) + '</b>' : '', r.l1Price ? 'L1 price: <b>' + M(r.l1Price) + '</b>' : '', r.ourPrice ? 'Our price: <b>' + M(r.ourPrice) + '</b>' : '',
+      gap != null ? (gap > 0 ? 'we were <b>' + gap + '% above</b> L1' : gap < 0 ? 'we were <b>' + Math.abs(gap) + '% below</b> L1' : 'same as L1') : '',
+      r.winner ? 'Winner: <b>' + E(r.winner) + '</b>' : '', r.participants ? E(r.participants) + ' bidders' : '', r.reason ? 'Reason: ' + E(r.reason) : ''
+    ].filter(Boolean);
+    const comp = (r.competitors || []).length ? '<div class="cell-mute" style="font-size:12px;margin-top:4px;">Competitors: ' + r.competitors.map(c => E(c.name) + (c.price ? ' (' + Util.fmtMoney(c.price) + ')' : '')).join(', ') + '</div>' : '';
+    return parts.join(' &middot; ') + comp + (r.note ? '<div class="cell-mute" style="font-size:12px;margin-top:4px;">' + E(r.note) + '</div>' : '');
+  },
+  resultHTML(b){
+    try{
+      const g = b.gemsentry, E = s => this.E(s), id = E(b.id);
+      const chips = [];
+      if(g){
+        if(g.score != null) chips.push('Fit score ' + E(g.score));
+        if(g.verdict) chips.push(E(g.verdict));
+        if(g.epbgRequired === true) chips.push('ePBG' + (g.epbgPercent ? ' ' + E(g.epbgPercent) + '%' : '') + ' required');
+        if(g.emd) chips.push('EMD: ' + E(g.emd));
+        if(g.mse) chips.push('MSE: ' + E(g.mse));
+        if(g.startup) chips.push('Startup: ' + E(g.startup));
+        if(g.preBidRequired) chips.push('Pre-bid meeting');
+      }
+      const pre = b.preBidDate || '', preD = pre ? Util.daysFrom(pre) : null;
+      const show = ['Submitted', 'Technical Evaluation', 'Financial Evaluation', 'Won', 'Lost'].includes(b.status) || b.result;
+      return `<div class="card card-pad" style="margin:14px 0 0;">
+        <b>Bid intelligence</b> ${g ? '<span class="cell-mute" style="font-size:12px;">(imported from GeMSentry)</span>' : ''}
+        ${chips.length ? '<div style="display:flex;gap:6px;flex-wrap:wrap;margin:8px 0;">' + chips.map(c => '<span class="badge" style="background:var(--surface-2,#eef2f7);color:var(--text,#1f2937);">' + c + '</span>').join('') + '</div>' : ''}
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;font-size:13px;">
+          <label for="bi_pre_${id}">Pre-bid meeting date</label>
+          <input type="date" id="bi_pre_${id}" value="${E(pre)}" onchange="BidIntel.setPreBid('${id}', this.value)">
+          ${preD != null ? '<span class="cell-mute">' + (preD < 0 ? 'was ' + Math.abs(preD) + ' days ago' : preD === 0 ? 'today' : 'in ' + preD + ' days') + '</span>' : ''}
+        </div>
+        ${show ? '<div style="margin-top:12px;font-size:13px;"><b>Result</b><div style="margin-top:4px;">' + this.resultLine(b) + '</div><button class="btn btn-outline btn-sm" style="margin-top:8px;" onclick="BidIntel.openResult(\'' + id + '\')">' + (b.result ? 'Edit result' : 'Record result') + '</button></div>' : '<div class="hint" style="margin-top:8px;">After the bid is submitted you can record the result here (L1 price, our rank, winner, reason).</div>'}
+      </div>`;
+    }catch(e){ return ''; }
+  },
+  async setPreBid(id, val){
+    const b = Store.data.bids.find(x => x.id === id); if(!b) return;
+    b.preBidDate = val || ''; b.updatedBy = bidUserName(); b.updatedAt = new Date().toISOString();
+    try{ await Store.save('bids'); UI.toast('Pre-bid date saved'); }catch(e){ UI.toast('Could not save: ' + (e && e.message ? e.message : e), 5000); }
+  },
+  openResult(id){
+    const b = Store.data.bids.find(x => x.id === id); if(!b) return;
+    const r = b.result || {}, E = s => this.E(s);
+    UI.openModal('Bid result - ' + (b.bidNumber || b.id), `
+      <div class="form-row">
+        <div class="field"><label>Our price</label><input type="number" id="br_our" value="${E(r.ourPrice || b.ourQuote || '')}"></div>
+        <div class="field"><label>L1 (lowest) price</label><input type="number" id="br_l1" value="${E(r.l1Price || '')}"></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>Our rank (e.g. L1, L2, L3)</label><input id="br_rank" value="${E(r.ourRank || '')}" placeholder="L2"></div>
+        <div class="field"><label>Number of bidders</label><input type="number" id="br_part" value="${E(r.participants || '')}"></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>Winner (seller name)</label><input id="br_win" value="${E(r.winner || '')}"></div>
+        <div class="field"><label>Main reason (if lost)</label><select id="br_reason">${this.REASONS.map(s => `<option value="${E(s)}" ${s === (r.reason || '') ? 'selected' : ''}>${E(s || '-')}</option>`).join('')}</select></div>
+      </div>
+      <div class="field"><label>Other bidders &mdash; one per line: <i>Seller name | price</i></label><textarea id="br_comp" rows="4">${E((r.competitors || []).map(c => c.name + (c.price ? ' | ' + c.price : '')).join('\n'))}</textarea></div>
+      <div class="field"><label>Note</label><textarea id="br_note" rows="2">${E(r.note || '')}</textarea></div>
+      <div class="hint">This only records the result. To mark the bid Won or Lost, change its status as usual.</div>
+    `, `<button class="btn btn-outline" onclick="UI.closeModal();BidSearch.openDetail('${E(id)}')">Cancel</button><button class="btn btn-primary" onclick="BidIntel.saveResult('${E(id)}')">Save result</button>`, true);
+  },
+  async saveResult(id){
+    const b = Store.data.bids.find(x => x.id === id); if(!b) return;
+    const g = el => document.getElementById(el).value.trim();
+    const competitors = g('br_comp').split(/\n+/).map(l => l.trim()).filter(Boolean).map(l => { const p = l.split('|'); return { name: p[0].trim(), price: p[1] ? this.num(p[1]) : 0 }; }).filter(c => c.name).slice(0, 30);
+    const rank = g('br_rank').toUpperCase().replace(/\s+/g, '');
+    const nowIso = new Date().toISOString();
+    b.result = { ourPrice: Number(g('br_our')) || 0, l1Price: Number(g('br_l1')) || 0, ourRank: rank, participants: Number(g('br_part')) || 0,
+      winner: g('br_win'), reason: g('br_reason'), competitors, note: g('br_note'), recordedAt: nowIso, by: bidUserName() };
+    b.timeline = b.timeline || []; b.timeline.push({ date: nowIso, text: 'Result recorded' + (rank ? ' (our rank ' + rank + ')' : ''), by: bidUserName() });
+    b.updatedBy = bidUserName(); b.updatedAt = nowIso;
+    try{
+      await Store.save('bids'); await Activity.log('Bid result recorded', b.bidNumber || b.title);
+      UI.closeModal(); UI.toast('Result saved'); BidSearch.openDetail(id); Router.render('bidsearch');
+    }catch(e){ UI.toast('Could not save: ' + (e && e.message ? e.message : e), 5000); }
+  }
+};
+
 const BidClean = {
   cfg(){ const s = Store.data.settings||{}; return { enabled: s.bidCleanEnabled!==false, days: Math.max(1, Math.min(365, Number(s.bidCleanDays)||7)) }; },
   canRun(){ return !!(Auth.session && Auth.session.role==='Admin' && typeof Access!=='undefined' && Access.level('jays_bids')==='edit' && !Store.loadFailed['jays_bids']); },
@@ -22667,6 +22998,10 @@ const Growth = {
     (D.bids||[]).filter(b=>!BID_TERMINAL_STATUSES.includes(b.status)).forEach(b=>{
       const d = bidDeadlineInfo(b.endDate).days; if(d===null || d<0 || d>14) return;
       push('A',{pr:d<=3?0:2, title:b.title||b.bidNumber||b.id, sub:[b.buyerName||b.organisation,b.district].filter(Boolean).join(' · ')+(b.estimatedValue?' · est. '+M(b.estimatedValue):'')+' · '+bidDeadlineInfo(b.endDate).label+' · status '+b.status+(b.assignedTo?' · '+b.assignedTo:' · NOT ASSIGNED'), why:!b.assignedTo?'Closing soon and no owner':'Closing soon', action:d<=3?'Decide / submit':'Check progress', view:'bidsearch'});
+    });
+    (D.bids||[]).filter(b=>b.preBidDate && !TENDER_ALERT_SKIP.includes(b.status)).forEach(b=>{
+      const d = Util.daysFrom(b.preBidDate); if(d===null || d<0 || d>3) return;
+      push('A',{pr:d<=1?0:1, title:b.title||b.bidNumber||b.id, sub:'Pre-bid meeting '+(d===0?'today':d===1?'tomorrow':'in '+d+' days')+' \u00b7 '+(b.bidNumber||'')+(b.assignedTo?' \u00b7 '+b.assignedTo:' \u00b7 NOT ASSIGNED'), why:'Pre-bid meeting soon - send your queries', action:'Prepare queries', view:'bidsearch'});
     });
     /* ---- B: sales to close ---- */
     (D.quotations||[]).forEach(q=>{
