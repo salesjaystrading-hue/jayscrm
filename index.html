@@ -1090,6 +1090,49 @@
   @media(prefers-reduced-motion:reduce){ .lg-card{animation:none;} .lg-spin{animation-duration:1.6s;} .lg-input input,.lg-btn{transition:none;} }
   .lg-mbrand{display:none;}
   @media(max-width:767px){ .lg-right{flex-direction:column;} .lg-mbrand{display:block;align-self:center;margin-top:max(4vh,14px);color:#fff;font-size:22px;font-weight:800;letter-spacing:-.3px;} .lg-mbrand span{color:var(--orange);} .lg-card{margin-top:14px;} }
+
+/* build 53: lead focus rows */
+.lf-row{display:flex;gap:10px;align-items:center;padding:8px 0;border-top:1px solid var(--line,#e5e7eb);}
+.lf-row:first-child{border-top:0;}
+.lf-main{flex:1 1 auto;min-width:0;font-size:13px;}
+.lf-act{display:flex;gap:6px;flex:0 0 auto;}
+@media (max-width:640px){.lf-row{flex-wrap:wrap;}.lf-main{flex-basis:calc(100% - 90px);}.lf-act{width:100%;}.lf-act .btn{flex:1;text-align:center;}}
+
+/* build 54: motion (transform/opacity only, so it stays smooth on phones) */
+@keyframes b54In{from{opacity:0;transform:translateY(12px);}to{opacity:1;transform:none;}}
+@keyframes b54Row{from{opacity:0;transform:translateX(-8px);}to{opacity:1;transform:none;}}
+@keyframes b54Toast{from{opacity:0;transform:translateY(14px);}to{opacity:1;transform:none;}}
+body:not(.no-anim) #content.view-enter > *{animation:b54In .34s cubic-bezier(.2,.7,.2,1) both;}
+body:not(.no-anim) #content.view-enter > *:nth-child(2){animation-delay:.04s;}
+body:not(.no-anim) #content.view-enter > *:nth-child(3){animation-delay:.08s;}
+body:not(.no-anim) #content.view-enter > *:nth-child(4){animation-delay:.12s;}
+body:not(.no-anim) #content.view-enter > *:nth-child(5){animation-delay:.16s;}
+body:not(.no-anim) #content.view-enter > *:nth-child(n+6){animation-delay:.2s;}
+body:not(.no-anim) #content.view-enter tbody tr:nth-child(-n+12){animation:b54Row .3s ease both;animation-delay:.14s;}
+body:not(.no-anim) #content.view-enter tbody tr:nth-child(2){animation-delay:.17s;}
+body:not(.no-anim) #content.view-enter tbody tr:nth-child(3){animation-delay:.2s;}
+body:not(.no-anim) #content.view-enter tbody tr:nth-child(4){animation-delay:.23s;}
+body:not(.no-anim) #content.view-enter tbody tr:nth-child(5){animation-delay:.26s;}
+body:not(.no-anim) #content.view-enter tbody tr:nth-child(n+6):nth-child(-n+12){animation-delay:.3s;}
+body:not(.no-anim) .btn{transition:transform .12s ease, box-shadow .15s ease, background-color .15s ease, border-color .15s ease, color .15s ease;}
+body:not(.no-anim) .btn:active{transform:scale(.97);}
+body:not(.no-anim) .nav-item{transition:background .15s ease, color .15s ease, transform .15s ease;}
+body:not(.no-anim) .tab-btn, body:not(.no-anim) .badge{transition:background-color .2s ease, color .2s ease, border-color .2s ease;}
+body:not(.no-anim) .toast{animation:b54Toast .25s ease both;}
+body:not(.no-anim) details[open] > *:not(summary){animation:b54In .22s ease both;}
+body:not(.no-anim) .lf-row{transition:background-color .15s ease;}
+@media (hover:hover){
+  body:not(.no-anim) .card[onclick]:hover{transform:translateY(-2px);box-shadow:0 10px 24px rgba(15,23,42,.10);}
+  body:not(.no-anim) .nav-item:hover{transform:translateX(2px);}
+  body:not(.no-anim) .btn-primary:hover{box-shadow:0 6px 16px rgba(234,88,12,.28);}
+  body:not(.no-anim) tbody tr{transition:background-color .15s ease;}
+  .lf-row:hover{background:rgba(148,163,184,.10);}
+}
+.nav-anim{padding:2px 14px 4px;font-size:11px;text-align:center;opacity:.75;} .nav-anim a{color:inherit;}
+@media (prefers-reduced-motion: reduce){
+  #content.view-enter > *, #content.view-enter tbody tr, .toast, details[open] > *{animation:none!important;}
+  .btn, .card, .nav-item{transition:none!important;} .btn:active, .card[onclick]:hover, .nav-item:hover{transform:none!important;}
+}
 </style>
 </head>
 <body>
@@ -3174,7 +3217,7 @@ function navBadgeCount(id){
    localStorage only (never in the business-data store). */
 /* Which version is running on this device, and a way to drop the saved copy of the app (service worker + cache)
    so that a newly uploaded index.html is really used. Login, settings and saved data are not touched. */
-const APP_BUILD = '2026-11-03 (build 52)';
+const APP_BUILD = '2026-11-10 (build 54)';
 const AppUpdate = {
   reload(){ location.reload(); },
   async refresh(){
@@ -19266,6 +19309,441 @@ const NavHistory = {
 
 /* ---------- Closed tenders you did not take part in: removed 7 days after closing, with a restore list ---------- */
 const BID_CLEAN_STATUSES = ['New','Saved','Under Review','Go / No-Go Decision','Not Participating'];
+/* ===== Build 53: LeadFocus, QuoteDues, SummaryShortcut =====
+   Additive helpers. They only READ existing data and show extra information:
+   - LeadFocus: scores open leads/prospects and lists who to call first (shown on the Fresh Leads tab).
+   - QuoteDues: when a customer is picked in the quotation form, reminds about that customer's unpaid invoices.
+   - SummaryShortcut: a button on the Action Centre that opens the existing Daily Summary.
+   Nothing here creates, changes or deletes a record (only the Admin "days" setting for LeadFocus is saved). */
+const LeadFocus = {
+  OPEN: ['New Lead', 'First Contact', 'Call Not Taken', 'WhatsApp Sent', 'Quotation Sent', 'Follow-up Scheduled'],
+  TOP: 8,
+  E(s){ return Util.escapeHtml(s == null ? '' : String(s)); },
+  staleDays(){ return Math.max(1, Math.min(90, Number((Store.data.settings || {}).leadStaleDays) || 7)); },
+  index(){
+    const D = Store.data, by = (arr, f) => { const m = new Map(); (arr || []).forEach(x => { const k = x && x.customerId; if(!k) return; if(!m.has(k)) m.set(k, []); m.get(k).push(x); }); return m; };
+    return { quo: by(D.quotations), req: by(D.requirements), vis: by(D.visits), fu: by(D.followups), ord: by(D.orders), rd: by(D.rateDocs) };
+  },
+  lastTouch(c, ix){
+    const ds = [];
+    const push = d => { d = String(d || '').slice(0, 10); if(/^\d{4}-\d{2}-\d{2}$/.test(d)) ds.push(d); };
+    push(c.lastContact);
+    (c.timeline || []).forEach(t => push(t.date));
+    (ix.vis.get(c.id) || []).forEach(v => push(v.date || v.checkInAt || v.createdAt));
+    (ix.fu.get(c.id) || []).filter(f => f.status === 'Done').forEach(f => push(f.doneDate || f.date));
+    const today = Util.todayISO();
+    const past = ds.filter(d => d <= today).sort();
+    return past.length ? past[past.length - 1] : '';
+  },
+  score(c, ix){
+    let s = 0; const why = [];
+    const add = (n, t) => { s += n; if(t) why.push({ n, t }); };
+    const quos = ix.quo.get(c.id) || [], openQ = quos.filter(q => ['Generated', 'Sent', 'Negotiation'].includes(q.status));
+    if(openQ.length){ const v = Math.max.apply(null, openQ.map(q => Number(q.total) || 0)); add(25, 'Open quotation' + (v ? ' ' + Util.fmtMoney(v) : '')); if(v >= 100000) add(5, ''); }
+    if(!openQ.length && ((ix.rd && ix.rd.get(c.id)) || []).length) add(25, 'Rate document prepared');
+    const reqs = (ix.req.get(c.id) || []).filter(r => !/closed|lost|cancel/i.test(r.status || ''));
+    if(reqs.length) add(15, 'Requirement recorded');
+    const last = this.lastTouch(c, ix), idle = last ? -Util.daysFrom(last) : null;
+    const recentVisit = (ix.vis.get(c.id) || []).some(v => { const d = String(v.date || v.checkInAt || '').slice(0, 10); const n = d ? Util.daysFrom(d) : null; return n !== null && n <= 0 && n >= -30; });
+    if(recentVisit) add(10, 'Visited in last 30 days');
+    if(idle !== null && idle <= 7) add(15, 'Contacted this week'); else if(idle !== null && idle <= 30) add(8, 'Contacted this month');
+    if((ix.fu.get(c.id) || []).some(f => f.status !== 'Done')) add(10, 'Follow-up scheduled');
+    if(/Government|Institution|Dealer/i.test(c.customerType || '')) add(10, c.customerType);
+    if(/Referral|Existing Customer/i.test(c.leadSource || '')) add(10, 'Source: ' + c.leadSource); else if(c.leadSource) add(3, '');
+    if((ix.ord.get(c.id) || []).length) add(10, 'Has ordered before');
+    const hasPhone = String(c.phone || c.whatsapp || '').replace(/\D/g, '').length >= 10;
+    if(hasPhone) add(5, ''); else add(-15, 'No phone number');
+    if(c.status === 'Call Not Taken') add(-10, 'Call not taken');
+    if(idle !== null && idle > 30) add(-10, 'No contact for ' + idle + ' days');
+    s = Math.max(0, Math.min(100, s));
+    why.sort((a, b) => Math.abs(b.n) - Math.abs(a.n));
+    return { score: s, band: s >= 60 ? 'Hot' : s >= 35 ? 'Warm' : 'Cold', reasons: why.map(w => w.t).filter(Boolean).slice(0, 3), last, idle };
+  },
+  list(){
+    const me = (Auth.session && (Auth.session.name || Auth.session.username)) || '', admin = Auth.isAdmin();
+    const ix = this.index();
+    return (Store.data.customers || []).filter(c => this.OPEN.includes(c.status) && (admin || !c.assignedTo || c.assignedTo === me))
+      .map(c => Object.assign({ c }, this.score(c, ix)));
+  },
+  closed(){ try{ return localStorage.getItem('jays_leadfocus_closed') === '1'; }catch(e){ return false; } },
+  toggle(){ try{ localStorage.setItem('jays_leadfocus_closed', this.closed() ? '0' : '1'); }catch(e){} this.mount(); },
+  async setStale(){
+    if(!Auth.isAdmin()) return;
+    const v = prompt('Show a lead as "untouched" after how many days without contact? (1-90)', String(this.staleDays())); if(v === null) return;
+    const n = Math.round(Number(v)); if(!(n >= 1 && n <= 90)){ UI.toast('Enter a number from 1 to 90'); return; }
+    Store.data.settings.leadStaleDays = n;
+    try{ await Store.save('settings'); UI.toast('Saved'); }catch(e){ UI.toast('Could not save: ' + (e && e.message ? e.message : e), 5000); }
+    this.mount();
+  },
+  html(){
+    const E = s => this.E(s), all = this.list(); if(!all.length) return '';
+    const top = all.slice().sort((a, b) => b.score - a.score || String(b.last).localeCompare(String(a.last))).slice(0, this.TOP);
+    const N = this.staleDays(), stale = all.filter(x => x.idle === null || x.idle >= N).sort((a, b) => (b.idle === null ? 9999 : b.idle) - (a.idle === null ? 9999 : a.idle));
+    const hot = all.filter(x => x.band === 'Hot').length, warm = all.filter(x => x.band === 'Warm').length;
+    const col = { Hot: '#dc2626', Warm: '#d97706', Cold: '#64748b' };
+    const row = x => {
+      const c = x.c, ph = String(c.phone || c.whatsapp || '').replace(/[^0-9+]/g, ''), id = E(c.id);
+      return `<div class="lf-row">
+        <span class="badge" style="background:${col[x.band]};color:#fff;min-width:74px;text-align:center;">${x.band} ${x.score}</span>
+        <div class="lf-main"><a href="#" onclick="Customers.openDetail('${id}');return false;"><b>${E(c.name)}</b></a>
+          <span class="cell-mute"> &middot; ${E(c.status)}${c.assignedTo ? ' &middot; ' + E(c.assignedTo) : ''}</span>
+          <div class="cell-mute" style="font-size:12px;">${x.reasons.map(E).join(' &middot; ') || 'No activity recorded yet'}${x.last ? ' &middot; last contact ' + (x.idle === 0 ? 'today' : x.idle + ' days ago') : ' &middot; never contacted'}</div></div>
+        <div class="lf-act">${ph ? `<a class="btn btn-outline btn-sm" href="tel:${E(ph)}">Call</a><a class="btn btn-outline btn-sm" target="_blank" rel="noopener" href="${E(Util.waLink(ph))}">WhatsApp</a>` : ''}</div>
+      </div>`;
+    };
+    const closed = this.closed();
+    return `<div class="card card-pad" id="leadFocusCard" style="margin-bottom:14px;">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+        <div style="flex:1 1 240px;"><b>Lead focus: who to call first</b>
+          <div class="hint" style="margin-top:2px;">${all.length} open leads &middot; ${hot} hot &middot; ${warm} warm &middot; ${stale.length} untouched for ${N}+ days${Auth.isAdmin() ? ' <a href="#" onclick="LeadFocus.setStale();return false;">(change days)</a>' : ''}</div></div>
+        <button class="btn btn-outline btn-sm" onclick="LeadFocus.toggle()">${closed ? 'Show' : 'Hide'}</button>
+      </div>
+      ${closed ? '' : `<div style="margin-top:10px;">${top.map(row).join('')}</div>
+        ${stale.length ? `<details style="margin-top:8px;"><summary style="cursor:pointer;font-size:13px;font-weight:600;">Untouched for ${N}+ days (${stale.length})</summary><div style="margin-top:6px;">${stale.slice(0, 15).map(row).join('')}${stale.length > 15 ? '<div class="hint">Showing the 15 longest waiting.</div>' : ''}</div></details>` : ''}
+        <div class="hint" style="margin-top:8px;">The score is a guide from what is recorded: open quotation, requirement, recent contact, visits, follow-ups, customer type and source. It does not change any record.</div>`}
+    </div>`;
+  },
+  mount(){
+    try{
+      const old = document.getElementById('leadFocusCard'); if(old) old.remove();
+      if(Customers.filterMode !== 'leads' || !['leads','customers'].includes(UI.currentView)) return;
+      const content = document.getElementById('content'); if(!content) return;
+      const html = this.html(); if(!html) return;
+      const tabs = content.querySelector('.tabs');
+      const box = document.createElement('div'); box.innerHTML = html;
+      const card = box.firstElementChild; if(!card) return;
+      if(tabs && tabs.parentNode) tabs.parentNode.insertBefore(card, tabs.nextSibling); else content.insertBefore(card, content.firstChild);
+    }catch(e){ console.error('LeadFocus', e); }
+  }
+};
+
+const QuoteDues = {
+  can(){ try{ return hasMenuAccess('payments') || hasMenuAccess('outstanding'); }catch(e){ return false; } },
+  forCustomer(id){
+    const c = (Store.data.customers || []).find(x => x.id === id); if(!c) return null;
+    const today = Util.todayISO(), nm = String(c.name || '').trim().toLowerCase();
+    let due = 0, overdue = 0, n = 0, oldest = '';
+    (Store.data.payments || []).forEach(p => {
+      const mine = p.customerId ? p.customerId === id : (nm && String(p.party || '').trim().toLowerCase() === nm);
+      if(!mine) return;
+      const d = Math.max((Number(p.amount) || 0) - (Number(p.amountPaid) || 0), 0); if(d <= 0) return;
+      due += d; n++;
+      if(p.followupDate && p.followupDate < today) overdue += d;
+      const basis = String(p.invoiceDate || p.followupDate || '').slice(0, 10);
+      if(basis && (!oldest || basis < oldest)) oldest = basis;
+    });
+    return { name: c.name, due, overdue, n, oldestDays: oldest ? Math.max(0, -Util.daysFrom(oldest)) : null };
+  },
+  show(){
+    try{
+      const sel = document.getElementById('q_cust'), box = document.getElementById('q_dues'); if(!sel || !box) return;
+      const r = sel.value ? this.forCustomer(sel.value) : null;
+      if(!r || r.due <= 0){ box.innerHTML = ''; return; }
+      const M = Util.fmtMoney, E = Util.escapeHtml;
+      box.innerHTML = `<div class="card card-pad" style="border-left:4px solid var(--amber,#d97706);margin:0 0 12px;font-size:13px;">
+        <b>Unpaid dues:</b> ${E(r.name)} has <b>${M(r.due)}</b> unpaid on ${r.n} invoice${r.n === 1 ? '' : 's'}${r.overdue > 0 ? '; <b>' + M(r.overdue) + '</b> is past its follow-up date' : ''}${r.oldestDays !== null ? '; the oldest is ' + r.oldestDays + ' days old' : ''}.
+        <div class="hint" style="margin-top:2px;">This is only a reminder. You can still save the quotation.</div></div>`;
+    }catch(e){ console.error('QuoteDues', e); }
+  },
+  attach(){
+    try{
+      if(!this.can()) return;
+      const sel = document.getElementById('q_cust'); if(!sel || document.getElementById('q_dues')) return;
+      const row = sel.closest('.form-row') || sel.parentNode; if(!row || !row.parentNode) return;
+      const box = document.createElement('div'); box.id = 'q_dues';
+      row.parentNode.insertBefore(box, row.nextSibling);
+      sel.addEventListener('change', () => this.show());
+      this.show(); setTimeout(() => this.show(), 80);
+    }catch(e){ console.error('QuoteDues', e); }
+  }
+};
+
+/* The CRM already has a Daily Summary (Notifications page). This only adds a shortcut button to it on the Action Centre. */
+const SummaryShortcut = {
+  mount(){
+    try{
+      if(UI.currentView !== 'actioncentre' || typeof DailySummary === 'undefined') return;
+      const content = document.getElementById('content'); if(!content || document.getElementById('dsBar')) return;
+      const bar = document.createElement('div'); bar.id = 'dsBar'; bar.style.cssText = 'display:flex;justify-content:flex-end;margin-bottom:10px;';
+      bar.innerHTML = '<button class="btn btn-outline btn-sm" onclick="DailySummary.open()">&#128172; Daily Summary</button>';
+      content.insertBefore(bar, content.firstChild);
+    }catch(e){ console.error('SummaryShortcut', e); }
+  }
+};
+
+/* Hook-ups: each original function runs exactly as before; the extra display is added afterwards and can never stop it. */
+(function(){
+  const after = (obj, name, fn) => {
+    const orig = obj[name]; if(typeof orig !== 'function') return;
+    obj[name] = function(){
+      const out = orig.apply(this, arguments);
+      const run = () => { try{ fn(); }catch(e){ console.error(name, e); } };
+      if(out && typeof out.then === 'function') out.then(run, () => {}); else run();
+      return out;
+    };
+  };
+  after(Customers, 'render', () => LeadFocus.mount());
+  after(Quotations, 'openForm', () => QuoteDues.attach());
+  after(ActionCentre, 'render', () => SummaryShortcut.mount());
+})();
+
+/* ===== Build 54: LeadFlow, BulkAssign, RateLink, BidTriage, SimpleMenu, Motion =====
+   All additive. Each hook runs the original function first and exactly as before; the extra step comes after it
+   and is wrapped so an error in it can never stop the original action. */
+const LeadFlow = {
+  NEXT_FOR: ['First Contact', 'Call Not Taken'],
+  LOST: ['Not Interested', 'Closed Lost'],
+  REASONS: ['Price too high', 'Bought elsewhere', 'No requirement now', 'No budget / funds', 'Not reachable', 'Other'],
+  E(s){ return Util.escapeHtml(s == null ? '' : String(s)); },
+  canFU(){ try{ return Access.level('jays_followups') === 'edit'; }catch(e){ return true; } },
+  hasPendingFU(id){ return (Store.data.followups || []).some(f => f.customerId === id && f.status !== 'Done'); },
+  afterSave(id, prevStatus, beforeIds){
+    const list = Store.data.customers || [];
+    const c = id ? list.find(x => x.id === id) : list.find(x => !beforeIds.has(x.id));
+    if(!c) return;                                              /* nothing was saved (validation stopped it) */
+    if(id && c.status === prevStatus) return;                   /* status did not change */
+    if(this.NEXT_FOR.includes(c.status) && this.canFU() && !this.hasPendingFU(c.id)) this.openNext(c.id);
+    else if(id && this.LOST.includes(c.status)) this.openReason(c.id);
+  },
+  openNext(id){
+    const c = Store.data.customers.find(x => x.id === id); if(!c) return;
+    const E = s => this.E(s), d = n => Util.isoLocal(new Date(Date.now() + n * 864e5));
+    UI.openModal('Next step for ' + c.name, `
+      <div class="hint" style="margin-bottom:10px;">${E(c.name)} is now <b>${E(c.status)}</b> and has no follow-up. When should someone contact them again?</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+        ${[[3, 'In 3 days'], [7, 'In 7 days'], [15, 'In 15 days']].map(x => `<button class="btn btn-outline" onclick="document.getElementById('lf_date').value='${d(x[0])}'">${x[1]}</button>`).join('')}
+      </div>
+      <div class="form-row">
+        <div class="field"><label>Follow-up date</label><input type="date" id="lf_date" value="${d(c.status === 'Call Not Taken' ? 1 : 3)}"></div>
+        <div class="field"><label>What for</label><input id="lf_purpose" value="${c.status === 'Call Not Taken' ? 'Call again' : 'Call back after first contact'}"></div>
+      </div>`,
+      `<button class="btn btn-outline" onclick="UI.closeModal()">No follow-up needed</button><button class="btn btn-primary" onclick="LeadFlow.saveNext('${E(id)}')">Save follow-up</button>`);
+  },
+  async saveNext(id){
+    const c = Store.data.customers.find(x => x.id === id); if(!c) return;
+    const date = document.getElementById('lf_date').value, purpose = document.getElementById('lf_purpose').value.trim();
+    if(!date){ UI.toast('Choose a date'); return; }
+    const rec = { id: Util.uid('F', Store.data.followups), customerId: c.id, customerName: c.name, phone: c.phone, date, purpose: purpose || 'Follow-up', status: 'Pending', notes: 'Added when status changed to ' + c.status };
+    Store.data.followups.unshift(rec);
+    try{
+      const ok = await Store.save('followups');
+      if(ok === false){ Store.data.followups = Store.data.followups.filter(f => f !== rec); UI.toast('Could not save the follow-up', 5000); return; }
+      UI.closeModal(); UI.toast('Follow-up saved for ' + Util.fmtDate(date).replace(/<[^>]+>/g, ''));
+      try{ renderNav(); }catch(e){}
+    }catch(e){ Store.data.followups = Store.data.followups.filter(f => f !== rec); UI.toast('Could not save: ' + (e && e.message ? e.message : e), 5000); }
+  },
+  openReason(id){
+    const c = Store.data.customers.find(x => x.id === id); if(!c) return;
+    const E = s => this.E(s);
+    UI.openModal('Why was ' + c.name + ' lost?', `
+      <div class="hint" style="margin-bottom:10px;">A reason helps you see later why leads are being lost. It is added to the customer's timeline.</div>
+      <div class="field"><label>Reason</label><select id="lf_reason">${this.REASONS.map(r => `<option>${E(r)}</option>`).join('')}</select></div>
+      <div class="field"><label>Note (optional)</label><input id="lf_rnote"></div>`,
+      `<button class="btn btn-outline" onclick="UI.closeModal()">Skip</button><button class="btn btn-primary" onclick="LeadFlow.saveReason('${E(id)}')">Save reason</button>`);
+  },
+  async saveReason(id){
+    const reason = document.getElementById('lf_reason').value, note = document.getElementById('lf_rnote').value.trim();
+    UI.closeModal();
+    try{ await Customers.logTimeline(id, 'Note', 'Lost reason: ' + reason + (note ? ' - ' + note : ''), { silent: true }); UI.toast('Reason saved'); }
+    catch(e){ UI.toast('Could not save the reason: ' + (e && e.message ? e.message : e), 5000); }
+  }
+};
+
+const BulkAssign = {
+  OPEN: ['New Lead', 'First Contact', 'Call Not Taken'],
+  MAX: 200,
+  E(s){ return Util.escapeHtml(s == null ? '' : String(s)); },
+  pool(status){ return (Store.data.customers || []).filter(c => !c.assignedTo && (status ? c.status === status : this.OPEN.includes(c.status))); },
+  mount(){
+    try{
+      const old = document.getElementById('bulkAssignBar'); if(old) old.remove();
+      if(!Auth.isAdmin() || !['leads', 'customers'].includes(UI.currentView)) return;
+      const n = this.pool('').length; if(!n) return;
+      const content = document.getElementById('content'); if(!content) return;
+      const bar = document.createElement('div'); bar.id = 'bulkAssignBar'; bar.className = 'card card-pad'; bar.style.cssText = 'margin-bottom:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;';
+      bar.innerHTML = '<div style="flex:1 1 220px;font-size:13px;"><b>' + n + ' open leads have no owner.</b> <span class="cell-mute">Nobody sees them in their own lists.</span></div><button class="btn btn-outline btn-sm" onclick="BulkAssign.open()">Assign them</button>';
+      const anchor = document.getElementById('leadFocusCard') || content.querySelector('.tabs');
+      if(anchor && anchor.parentNode) anchor.parentNode.insertBefore(bar, anchor.nextSibling); else content.insertBefore(bar, content.firstChild);
+    }catch(e){ console.error('BulkAssign', e); }
+  },
+  open(){
+    if(!Auth.isAdmin()) return;
+    const E = s => this.E(s), staff = (DROPDOWNS.assignedTo || []).slice();
+    UI.openModal('Assign leads that have no owner', `
+      <div class="field"><label>Which leads</label><select id="ba_status" onchange="BulkAssign.count()"><option value="">All open leads (New Lead, First Contact, Call Not Taken)</option>${this.OPEN.map(s => `<option>${E(s)}</option>`).join('')}</select></div>
+      <div class="field"><label>Share them equally among</label><div style="display:flex;gap:12px;flex-wrap:wrap;">${staff.map((s, i) => `<label style="font-weight:500;"><input type="checkbox" class="ba_staff" value="${E(s)}"> ${E(s)}</label>`).join('') || '<span class="hint">No staff names are set up in Settings.</span>'}</div></div>
+      <div class="field"><label>How many now (up to ${this.MAX} at a time)</label><input type="number" id="ba_n" min="1" max="${this.MAX}" value="${Math.min(this.MAX, this.pool('').length)}"></div>
+      <div class="hint" id="ba_info"></div>
+      <div class="hint" style="margin-top:6px;">Only leads with no owner are touched. Leads that already have an owner are never changed.</div>`,
+      `<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" id="ba_go" onclick="BulkAssign.run()">Assign</button>`);
+    this.count();
+  },
+  count(){ const st = document.getElementById('ba_status'), info = document.getElementById('ba_info'); if(st && info) info.textContent = this.pool(st.value).length + ' leads match.'; },
+  async run(){
+    if(!Auth.isAdmin() || this._busy) return;
+    const staff = Array.from(document.querySelectorAll('.ba_staff:checked')).map(x => x.value);
+    if(!staff.length){ UI.toast('Tick at least one person'); return; }
+    const n = Math.max(1, Math.min(this.MAX, Math.round(Number(document.getElementById('ba_n').value) || 0)));
+    const list = this.pool(document.getElementById('ba_status').value).slice(0, n); if(!list.length){ UI.toast('No leads match'); return; }
+    const btn = document.getElementById('ba_go'), info = document.getElementById('ba_info');
+    this._busy = true; if(btn) btn.disabled = true;
+    let done = 0, failed = 0; const who = (Auth.session && Auth.session.name) || 'Admin';
+    try{
+      for(let i = 0; i < list.length; i++){
+        const c = list[i], to = staff[i % staff.length];
+        c.assignedTo = to; c.updatedBy = who; c.updatedAt = new Date().toISOString();
+        let r; try{ r = await Store.saveCustomerRow(c); }catch(e){ r = { ok: false }; }
+        if(r && r.ok) done++; else { c.assignedTo = ''; failed++; if(failed >= 5 && done === 0) break; }
+        if(info) info.textContent = 'Assigning... ' + (i + 1) + ' of ' + list.length;
+      }
+      try{ await Activity.log('Leads assigned in bulk', done + ' lead(s) to ' + staff.join(', ')); }catch(e){}
+    } finally { this._busy = false; }
+    UI.closeModal();
+    UI.toast(done + ' leads assigned' + (failed ? ' - ' + failed + ' could not be saved (someone else changed them, or the connection dropped). Try again for those.' : ''), failed ? 8000 : 4000);
+    try{ Router.render(UI.currentView); }catch(e){}
+  }
+};
+
+/* Rate documents are how this team sends prices. When one is saved for a fresh lead, offer (once per document) to move the lead to "Quotation Sent". */
+const RateLink = {
+  FRESH: ['New Lead', 'First Contact', 'Call Not Taken', 'WhatsApp Sent', 'Follow-up Scheduled'],
+  asked(docId){ try{ return (JSON.parse(localStorage.getItem('jays_ratelink_asked') || '[]')).includes(docId); }catch(e){ return false; } },
+  markAsked(docId){ try{ const a = JSON.parse(localStorage.getItem('jays_ratelink_asked') || '[]'); a.push(docId); localStorage.setItem('jays_ratelink_asked', JSON.stringify(a.slice(-300))); }catch(e){} },
+  customerOf(d){
+    const list = Store.data.customers || [];
+    if(d.customerId){ const c = list.find(x => x.id === d.customerId); if(c) return c; }
+    return null;
+  },
+  async afterSave(versionBefore){
+    const d = RatePDF.draft; if(!d || !d.id) return;
+    const saved = (Store.data.rateDocs || []).find(x => x.id === d.id); if(!saved || saved.updatedAt === versionBefore) return;   /* the save did not go through */
+    const c = this.customerOf(d); if(!c || !this.FRESH.includes(c.status) || this.asked(d.id)) return;
+    this.markAsked(d.id);
+    if(!confirm('Mark ' + c.name + ' as "Quotation Sent" in the sales pipeline?\n\nPress Cancel to leave the lead as "' + c.status + '".')) return;
+    const prev = c.status; c.status = 'Quotation Sent';
+    try{ await Customers.logTimeline(c.id, 'Quotation Sent', 'Rate document ' + (d.docNumber || d.id) + ' prepared (was ' + prev + ')', { silent: true }); UI.toast(c.name + ' moved to Quotation Sent'); }
+    catch(e){ c.status = prev; UI.toast('Could not update the lead: ' + (e && e.message ? e.message : e), 5000); }
+  }
+};
+
+const BidTriage = {
+  TOP: 6,
+  E(s){ return Util.escapeHtml(s == null ? '' : String(s)); },
+  closed(){ try{ return localStorage.getItem('jays_bidtriage_closed') === '1'; }catch(e){ return false; } },
+  toggle(){ try{ localStorage.setItem('jays_bidtriage_closed', this.closed() ? '0' : '1'); }catch(e){} this.mount(); },
+  data(){
+    const fresh = (Store.data.bids || []).filter(b => b.status === 'New').map(b => ({ b, d: bidDeadlineInfo(b.endDate) }));
+    const open = fresh.filter(x => x.d.days === null || x.d.days >= 0).sort((a, c) => (a.d.days === null ? 9999 : a.d.days) - (c.d.days === null ? 9999 : c.d.days));
+    return { open, expired: fresh.length - open.length, soon: open.filter(x => x.d.days !== null && x.d.days <= 3).length, noOwner: open.filter(x => !x.b.assignedTo).length };
+  },
+  html(){
+    const t = this.data(); if(!t.open.length && !t.expired) return '';
+    const E = s => this.E(s), closed = this.closed(), staff = DROPDOWNS.assignedTo || [];
+    const canEdit = (() => { try{ return Access.level('jays_bids') === 'edit'; }catch(e){ return true; } })();
+    const row = x => { const b = x.b, id = E(b.id);
+      return `<div class="lf-row"><div class="lf-main"><a href="#" onclick="BidSearch.openDetail('${id}');return false;"><b>${E(b.title || b.bidNumber || b.id)}</b></a>
+          <div class="cell-mute" style="font-size:12px;">${E(b.bidNumber || '')}${b.organisation || b.department ? ' &middot; ' + E(b.organisation || b.department) : ''} &middot; ${x.d.days === null ? 'no closing date' : E(x.d.label || ('Closes in ' + x.d.days + ' days'))}</div></div>
+        ${canEdit ? `<div class="lf-act"><select aria-label="Assign to" onchange="BidTriage.assign('${id}', this.value)" style="max-width:130px;"><option value="">${b.assignedTo ? E(b.assignedTo) : 'Assign to...'}</option>${staff.filter(s => s !== b.assignedTo).map(s => `<option>${E(s)}</option>`).join('')}</select>
+          <button class="btn btn-outline btn-sm" onclick="BidTriage.set('${id}','Under Review')">Review</button>
+          <button class="btn btn-outline btn-sm" onclick="BidTriage.skip('${id}')">Not for us</button></div>` : ''}</div>`; };
+    return `<div class="card card-pad" id="bidTriageCard" style="margin-bottom:16px;">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;"><div style="flex:1 1 240px;"><b>Bids waiting for a decision</b>
+        <div class="hint" style="margin-top:2px;">${t.open.length} new &middot; ${t.soon} closing within 3 days &middot; ${t.noOwner} with no owner${t.expired ? ' &middot; ' + t.expired + ' already closed (use Clean-up to remove them)' : ''}</div></div>
+        <button class="btn btn-outline btn-sm" onclick="BidTriage.toggle()">${closed ? 'Show' : 'Hide'}</button></div>
+      ${closed || !t.open.length ? '' : `<div style="margin-top:10px;">${t.open.slice(0, this.TOP).map(row).join('')}</div>${t.open.length > this.TOP ? '<div class="hint" style="margin-top:6px;">Showing the ' + this.TOP + ' closing soonest. Decide these and the next ones appear.</div>' : ''}`}
+    </div>`;
+  },
+  mount(){
+    try{
+      const old = document.getElementById('bidTriageCard'); if(old) old.remove();
+      if(UI.currentView !== 'bidsearch') return;
+      const content = document.getElementById('content'); if(!content) return;
+      const html = this.html(); if(!html) return;
+      const box = document.createElement('div'); box.innerHTML = html; const card = box.firstElementChild; if(!card) return;
+      const anchor = document.getElementById('gemDrop'); const host = anchor ? (anchor.closest('.card') || anchor) : null;
+      if(host && host.parentNode) host.parentNode.insertBefore(card, host); else content.insertBefore(card, content.firstChild);
+    }catch(e){ console.error('BidTriage', e); }
+  },
+  async assign(id, who){
+    const b = Store.data.bids.find(x => x.id === id); if(!b || !who) return;
+    const prev = b.assignedTo; b.assignedTo = who; b.timeline = b.timeline || [];
+    b.timeline.push({ date: new Date().toISOString(), text: 'Assigned to ' + who, by: (Auth.session && Auth.session.name) || 'System' });
+    try{ const ok = await Store.save('bids'); if(ok === false) throw new Error('not saved'); UI.toast('Assigned to ' + who); }
+    catch(e){ b.assignedTo = prev; b.timeline.pop(); UI.toast('Could not save: ' + (e && e.message ? e.message : e), 5000); }
+    this.mount();
+  },
+  async set(id, status){ try{ await BidSearch.setStatus(id, status); }catch(e){ UI.toast('Could not change the status', 5000); } this.mount(); },
+  async skip(id){ const b = Store.data.bids.find(x => x.id === id); if(!b) return; if(!confirm('Mark "' + (b.title || b.bidNumber || b.id) + '" as Not Participating?')) return; await this.set(id, 'Not Participating'); }
+};
+
+/* Admin can switch pages off for staff. Uses the same check the menu already uses, so a hidden page is also not openable by staff. Admin always sees everything. */
+const SimpleMenu = {
+  KEEP: ['dashboard', 'actioncentre', 'notifications', 'leads', 'customers', 'settings', 'users', 'backup', 'datahealth', 'workmgmt', 'callalloc'],
+  DATA: { tasks: 'tasks', notes: 'notes', followupcentre: 'followups', quotations: 'quotations', orders: 'orders', payments: 'payments', outstanding: 'payments', complaints: 'complaints', amc: 'amcRecords',
+    visits: 'visits', requirements: 'requirements', travel: 'travelLogs', suppliers: 'suppliers', purchaseorders: 'purchaseOrders', rfq: 'rfqs', expenses: 'expenses', siteexp: 'siteOrders', emdpbg: 'emdPbg',
+    gemcrac: 'gemcrac', bidsearch: 'bids', biddocs: 'bidDocs', fieldmoney: 'fieldCollections', officework: 'officeWork', handover: 'handovers', attendance: 'attendance' },
+  hidden(){ const a = (Store.data.settings || {}).staffHiddenMenus; return Array.isArray(a) ? a : []; },
+  isHidden(id){ return !!(Auth.session && Auth.session.role !== 'Admin' && this.hidden().includes(id) && !this.KEEP.includes(id)); },
+  pages(){ const out = []; (NAV || []).forEach(sec => (sec.items || []).forEach(it => { if(it && it.id && !it.adminOnly && !this.KEEP.includes(it.id)) out.push({ id: it.id, label: String(it.label || it.id).replace(/&amp;/g, '&'), sec: String(sec.sec || '').replace(/&amp;/g, '&') }); })); return out; },
+  empty(id){ const k = this.DATA[id]; if(!k) return null; const v = Store.data[k]; return Array.isArray(v) ? v.length === 0 : null; },
+  html(){
+    const E = Util.escapeHtml, hid = new Set(this.hidden()), pages = this.pages(); let sec = '';
+    return `<div class="card card-pad" id="simpleMenuCard" style="margin-top:16px;">
+      <h3 style="margin:0 0 4px;font-size:15px;">Simple menu for staff</h3>
+      <div class="hint" style="margin-bottom:10px;">Tick the pages your staff do not use. Ticked pages disappear from the menu for everyone except Admin, and staff cannot open them. No data is deleted, and you can untick a page at any time. Pages marked <b>no data yet</b> have never been used.</div>
+      <div class="hint" style="margin-bottom:10px;">Careful: the Field App needs My Day, Visits, Requirements and Travel Log. Leave those unticked for field staff.</div>
+      ${pages.map(p => { const head = p.sec !== sec ? `<div style="font-weight:600;font-size:12px;margin:10px 0 4px;text-transform:uppercase;letter-spacing:.04em;" class="cell-mute">${E(p.sec)}</div>` : ''; sec = p.sec; const em = this.empty(p.id);
+        return head + `<label style="display:inline-flex;gap:6px;align-items:center;width:260px;max-width:100%;font-weight:500;font-size:13px;padding:3px 0;"><input type="checkbox" class="sm_chk" value="${E(p.id)}" ${hid.has(p.id) ? 'checked' : ''}> ${E(p.label)}${em === true ? ' <span class="badge" style="background:#e2e8f0;color:#334155;">no data yet</span>' : ''}</label>`; }).join('')}
+      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;"><button class="btn btn-primary btn-sm" onclick="SimpleMenu.save()">Save menu</button><button class="btn btn-outline btn-sm" onclick="SimpleMenu.clear()">Show all pages to staff</button></div>
+    </div>`;
+  },
+  mount(){
+    try{
+      const old = document.getElementById('simpleMenuCard'); if(old) old.remove();
+      if(UI.currentView !== 'datahealth' || !Auth.isAdmin()) return;
+      const content = document.getElementById('content'); if(!content) return;
+      const box = document.createElement('div'); box.innerHTML = this.html(); content.appendChild(box.firstElementChild);
+    }catch(e){ console.error('SimpleMenu', e); }
+  },
+  async write(list){
+    if(!Auth.isAdmin()) return;
+    const prev = Store.data.settings.staffHiddenMenus; Store.data.settings.staffHiddenMenus = list;
+    try{ const ok = await Store.save('settings'); if(ok === false) throw new Error('not saved'); UI.toast(list.length ? list.length + ' pages hidden from staff' : 'All pages are visible to staff'); }
+    catch(e){ Store.data.settings.staffHiddenMenus = prev; UI.toast('Could not save: ' + (e && e.message ? e.message : e), 5000); }
+    this.mount();
+  },
+  save(){ return this.write(Array.from(document.querySelectorAll('.sm_chk:checked')).map(x => x.value).filter(id => !this.KEEP.includes(id))); },
+  clear(){ return this.write([]); }
+};
+
+/* Smooth page-entry animation: only when the page actually changes, never on a redraw after a save. */
+const Motion = {
+  last: '',
+  on(){ try{ return localStorage.getItem('jays_anim') !== '0'; }catch(e){ return true; } },
+  apply(){ try{ document.body.classList.toggle('no-anim', !this.on()); }catch(e){} },
+  toggle(){ try{ localStorage.setItem('jays_anim', this.on() ? '0' : '1'); }catch(e){} this.apply(); try{ renderNav(); }catch(e){} },
+  enter(view){
+    try{
+      if(view === this.last) return; this.last = view;
+      if(!this.on()) return;
+      const c = document.getElementById('content'); if(!c) return;
+      c.classList.remove('view-enter'); void c.offsetWidth; c.classList.add('view-enter');
+      clearTimeout(this._t); this._t = setTimeout(() => c.classList.remove('view-enter'), 900);
+    }catch(e){}
+  },
+  navLink(){
+    try{
+      const box = document.getElementById('navList'); if(!box || box.querySelector('.nav-anim')) return;
+      this.apply(); const fm = box.querySelector('.nav-build'); if(!fm) return;
+      const d = document.createElement('div'); d.className = 'nav-anim';
+      d.innerHTML = '<a href="#" onclick="Motion.toggle();return false;">Animations: ' + (this.on() ? 'On' : 'Off') + '</a>';
+      fm.parentNode.insertBefore(d, fm.nextSibling);
+    }catch(e){}
+  }
+};
+
+/* build 54 hooks are installed at the end of the script, after every module exists */
+
 /* ===== BidIntel (build 52) - additive bid features =====
    1. Import bids from a GeMSentry export (.json / .csv / .xlsx): new bids only, existing bids are never changed.
    2. Pre-bid meeting date with an Action Centre reminder.
@@ -23886,6 +24364,48 @@ const SettingsView = {
 
 </script>
 <script>
+/* ---- build 54 hooks ---- */
+(function(){
+  const after = (obj, name, fn) => {
+    const orig = obj[name]; if(typeof orig !== 'function') return;
+    obj[name] = function(){
+      const args = arguments, out = orig.apply(this, args);
+      const run = () => { try{ fn.apply(null, args); }catch(e){ console.error(name, e); } };
+      if(out && typeof out.then === 'function') out.then(run, () => {}); else run();
+      return out;
+    };
+  };
+  /* customers: lead source needed for a NEW lead; next-step / reason prompt after a status change */
+  const origSave = Customers.save;
+  Customers.save = async function(id){
+    let prevStatus = null, before = new Set();
+    try{
+      if(!id){ const ls = document.getElementById('f_leadSource'); if(ls && !ls.value){ UI.toast('Please choose a Lead Source - it shows where your business comes from'); try{ ls.focus(); }catch(e){} return; } }
+      const prev = id ? (Store.data.customers || []).find(c => c.id === id) : null; prevStatus = prev ? prev.status : null;
+      before = new Set((Store.data.customers || []).map(c => c.id));
+    }catch(e){ console.error('LeadFlow pre', e); }
+    const out = await origSave.apply(this, arguments);
+    try{ LeadFlow.afterSave(id, prevStatus, before); }catch(e){ console.error('LeadFlow', e); }
+    return out;
+  };
+  after(Customers, 'render', () => BulkAssign.mount());
+  const origRate = RatePDF.saveDraft;
+  RatePDF.saveDraft = async function(){
+    let ver = null; try{ const d = RatePDF.draft; const rec = d && d.id ? (Store.data.rateDocs || []).find(x => x.id === d.id) : null; ver = rec ? rec.updatedAt : null; }catch(e){}
+    const out = await origRate.apply(this, arguments);
+    try{ await RateLink.afterSave(ver); }catch(e){ console.error('RateLink', e); }
+    return out;
+  };
+  after(BidSearch, 'render', () => BidTriage.mount());
+  after(DataHealth, 'render', () => SimpleMenu.mount());
+  const origHidden = Access.menuHidden;
+  Access.menuHidden = function(id){ return origHidden.apply(this, arguments) || SimpleMenu.isHidden(id); };
+  after(Router, 'render', (view) => Motion.enter(view));
+  const origNav = renderNav;
+  renderNav = function(){ const out = origNav.apply(this, arguments); Motion.navLink(); return out; };
+  Motion.apply();
+})();
+
 App.init();
 </script>
 <script>
