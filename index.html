@@ -1812,6 +1812,29 @@ const Store = {
     else if(cur && typeof cur==='object' && val && typeof val==='object' && !Array.isArray(val)){ Object.keys(cur).forEach(k=>delete cur[k]); Object.assign(cur, val); }
     else this.data[name] = val;
   },
+  /* Build 60: write-behind save for rapid, tiny edits (ticking checklist boxes).
+     Each Store.save('bids') re-uploads the whole Bids list, so ten ticks in a row
+     meant ten full uploads. saveSoon() applies the change in memory at once and
+     sends ONE save after a short pause; flushSoon() sends it immediately (page
+     hidden / sign-out / closing). A failed save shows a message and keeps the
+     change pending so the next flush retries it. */
+  _soon:{}, _soonT:{},
+  saveSoon(coll, delay){
+    this._soon[coll] = true;
+    clearTimeout(this._soonT[coll]);
+    this._soonT[coll] = setTimeout(()=>{ this.flushSoon(coll); }, delay||1500);
+  },
+  hasSoon(){ return Object.keys(this._soon).some(k=>this._soon[k]); },
+  async flushSoon(only){
+    const names = Object.keys(this._soon).filter(k=>this._soon[k] && (!only || k===only));
+    for(const c of names){
+      clearTimeout(this._soonT[c]);
+      this._soon[c] = false;
+      let ok = false;
+      try{ ok = await this.save(c); }catch(e){ ok = false; }
+      if(!ok){ this._soon[c] = true; UI.toast('A recent change could not be saved yet. It will be retried; keep this page open.', 6000); }
+    }
+  },
   async saveKey(key, value){
     try{
       if(Access.level(key) !== 'edit'){
@@ -2936,6 +2959,7 @@ const Auth = {
     }catch(e){ console.error('tryRestore failed', e); return false; }
   },
   async logout(){
+    try{ await Store.flushSoon(); }catch(e){}
     await Attendance.markLogoutTime();
     await Activity.log('Logout', (this.session&&this.session.username)+' signed out');
     await sb.auth.signOut();
@@ -3222,7 +3246,7 @@ function navBadgeCount(id){
    localStorage only (never in the business-data store). */
 /* Which version is running on this device, and a way to drop the saved copy of the app (service worker + cache)
    so that a newly uploaded index.html is really used. Login, settings and saved data are not touched. */
-const APP_BUILD = '2026-11-23 (build 59)';
+const APP_BUILD = '2026-11-23 (build 61)';
 const AppUpdate = {
   reload(){ location.reload(); },
   async refresh(){
@@ -4826,6 +4850,7 @@ const Products = {
         </select>
         <div class="toolbar-spacer"></div>
         <button class="btn btn-outline btn-sm" onclick="go('backup')">&#128228; Import Excel</button>
+        <button class="btn btn-outline btn-sm" onclick="Products.openWebImport()">&#127760; Import from website</button>
         <button class="btn btn-primary btn-sm" onclick="Products.openForm(null)">&#65291; Add Product</button>
       </div>
       <div class="card"><div class="table-wrap">
@@ -4891,6 +4916,75 @@ const Products = {
     await Activity.log(id?'Updated product':'Added product', name);
     UI.closeModal(); UI.toast('Saved');
     Router.render(UI.currentView);
+  },
+  /* Build 61: bring product names + categories from the jaystrading.in WooCommerce feed
+     (https://jaystrading.in/wp-json/wc/store/v1/products?per_page=100&page=N). The person opens that
+     link in a browser, copies the text (or saves the file) and pastes/chooses it here. Nothing is
+     overwritten: a product whose name already exists (any category) is skipped. */
+  _web: null,
+  webParse(text){
+    let t = String(text||'').trim(); if(!t) return [];
+    t = t.replace(/\]\s*\[/g, ',');                       // several pages pasted one after another
+    let arr; try{ arr = JSON.parse(t); }catch(e){ throw new Error('That is not the product feed text. Open the feed link, select all, copy and paste it here.'); }
+    if(!Array.isArray(arr)) throw new Error('Unexpected format: a list of products was expected.');
+    const dec = x=>{ const d=document.createElement('textarea'); d.innerHTML=String(x==null?'':x); return d.value.replace(/\s+/g,' ').trim(); };
+    const out = [];
+    arr.forEach(r=>{
+      const name = dec(r && r.name); if(!name) return;
+      const cats = ((r.categories)||[]).map(c=>dec(c && c.name)).filter(Boolean).map(c=>c.toLowerCase()==='waste bins' ? 'Waste Management' : c);   /* "waste bins" is a sub-category of Waste Management on the site */
+      const pick = cats[0] || 'Other Products';
+      out.push({name, category: pick});
+    });
+    return out;
+  },
+  webPlan(items){
+    const have = new Set(Store.data.products.map(p=>String(p.name||'').trim().toLowerCase()));
+    const seen = new Set(); const add = []; let dupExisting = 0, dupFile = 0;
+    items.forEach(it=>{
+      const k = it.name.toLowerCase();
+      if(have.has(k)){ dupExisting++; return; }
+      if(seen.has(k)){ dupFile++; return; }
+      seen.add(k); add.push(it);
+    });
+    return {add, dupExisting, dupFile, total: items.length};
+  },
+  openWebImport(){
+    this._web = null;
+    UI.openModal('Import products from website',
+      '<p style="font-size:13px;margin:0 0 8px;">1. Open <b>https://jaystrading.in/wp-json/wc/store/v1/products?per_page=100&amp;page=1</b> in a browser, select all, copy.<br>2. Paste below (or choose the saved file). If the site has more than 100 products repeat with <b>page=2</b>, <b>page=3</b>.</p>'+
+      '<textarea id="webImpText" rows="6" style="width:100%;font-size:12px;" placeholder="Paste the feed text here"></textarea>'+
+      '<div style="margin:6px 0;"><input type="file" id="webImpFile" accept=".txt,.json" onchange="Products.webFile(this.files[0])"></div>'+
+      '<div id="webImpOut" style="font-size:13px;"></div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Close</button> <button class="btn btn-outline" onclick="Products.webPreview()">Preview</button> <button class="btn btn-primary" id="webImpGo" disabled onclick="Products.webApply()">Import</button>', true);
+  },
+  webFile(f){ if(!f) return; const r=new FileReader(); r.onload=()=>{ document.getElementById('webImpText').value=r.result; this.webPreview(); }; r.readAsText(f); },
+  webPreview(){
+    const out = document.getElementById('webImpOut'), go_ = document.getElementById('webImpGo'); if(!out) return;
+    try{
+      const items = this.webParse(document.getElementById('webImpText').value);
+      if(!items.length){ out.innerHTML='<span class="cell-mute">Nothing found.</span>'; go_.disabled=true; return; }
+      const pl = this.webPlan(items); this._web = pl;
+      const bycat = {}; pl.add.forEach(x=>{ bycat[x.category]=(bycat[x.category]||0)+1; });
+      out.innerHTML = '<b>'+pl.add.length+'</b> new products will be added; '+pl.dupExisting+' already in CRM (skipped); '+pl.dupFile+' repeated in the list (skipped); '+pl.total+' read.'+
+        '<div style="margin-top:6px;">'+Object.keys(bycat).sort().map(c=>'<span class="badge badge-blue" style="margin:0 6px 4px 0;">'+Util.escapeHtml(c)+' ('+bycat[c]+')</span>').join('')+'</div>'+
+        '<div class="hint" style="margin-top:6px;font-size:12px;">Unit is set to Nos, price and stock to 0. Set the price in each quotation.</div>';
+      go_.disabled = !pl.add.length;
+    }catch(e){ out.innerHTML='<span style="color:var(--red,#dc2626);">'+Util.escapeHtml(e.message)+'</span>'; go_.disabled=true; this._web=null; }
+  },
+  async webApply(){
+    const pl = this._web; if(!pl || !pl.add.length) return;
+    const btn = document.getElementById('webImpGo'); if(btn) btn.disabled = true;
+    let code = Math.max(0, ...Store.data.products.map(p=>Number(p.code)||0));
+    const made = pl.add.map(it=>({ id: null, code: ++code, category: it.category, name: it.name, unit:'Nos', price:0, stock:0, description:'' }));
+    const before = Store.data.products.slice();
+    const tmp = Store.data.products.slice();
+    made.forEach(r=>{ r.id = Util.uid('P', tmp); tmp.unshift(r); });
+    Store.data.products = tmp;
+    const ok = await Store.save('products');
+    if(!ok){ Store.data.products = before; UI.toast('Import failed: nothing was added. Try again.', 6000); if(btn) btn.disabled=false; return; }
+    for(const r of made){ try{ await DbSync.upsertProduct(r); }catch(e){ console.warn('upsertProduct skipped', e); } }
+    await Activity.log('Products imported from website', made.length+' products');
+    UI.closeModal(); UI.toast(made.length+' products added'); Router.render(UI.currentView);
   },
   async remove(id){
     if(!confirm('Delete this product?')) return;
@@ -9287,6 +9381,7 @@ const BidPack = {
     if(r.kind === 'vault'){ const v = Vault.list.find(x=>x.id===r.ref); if(!v) throw new Error('not found in vault'); return { bytes: await Vault.fetchBytes(v), mime: v.mime }; }
     const rec = (Store.data.bidDocs||[]).find(x=>x.id===r.ref); if(!rec) throw new Error('document not found');
     if(!BidDocs.libsReady()) throw new Error('PDF library not loaded');
+    await BidAssets.ensure();
     const kept = BidDocs.draft;
     try{ BidDocs.draft = JSON.parse(JSON.stringify(rec)); return { bytes: new Uint8Array(BidDocs.buildPDF().output('arraybuffer')), mime:'application/pdf' }; }
     finally{ BidDocs.draft = kept; }
@@ -10983,7 +11078,7 @@ const BidSearch = {
     const b = Store.data.bids.find(x=>x.id===id); if(!b) return;
     b.checklist = b.checklist||[];
     if(b.checklist[idx]) b.checklist[idx].done = !b.checklist[idx].done;
-    await Store.save('bids');
+    Store.saveSoon('bids');
     BidSearch.openDetail(id);
   },
   async addChecklistItem(id){
@@ -10992,7 +11087,7 @@ const BidSearch = {
     const b = Store.data.bids.find(x=>x.id===id); if(!b) return;
     b.checklist = b.checklist||[];
     b.checklist.push({name, done:false});
-    await Store.save('bids');
+    Store.saveSoon('bids', 800);
     BidSearch.openDetail(id);
   },
   async addNote(id){
@@ -20732,7 +20827,7 @@ const Backup = {
       oppProducts: Store.data.oppProducts, oppImportHistory: Store.data.oppImportHistory,
       oppKeywordGroups: Store.data.oppKeywordGroups,
       attendance: Store.data.attendance, leaveRequests: Store.data.leaveRequests,
-      bidDocs: Store.data.bidDocs,
+      bidDocs: (Store.data.bidDocs||[]).map(d=>BidAssets.inlineDoc(d)),
       visits: Store.data.visits, requirements: Store.data.requirements, travelLogs: Store.data.travelLogs,
       lsgOfficeGeo: Store.data.lsgOfficeGeo, dayPlans: Store.data.dayPlans, staffTargets: Store.data.staffTargets,
       emdPbg: Store.data.emdPbg, suppliers: Store.data.suppliers, purchaseOrders: Store.data.purchaseOrders, amcRecords: Store.data.amcRecords,
@@ -20747,6 +20842,7 @@ const Backup = {
     // restricted to Admins, same as restore/import below.
     if(!Auth.isAdmin()){ UI.toast("You don't have permission to export the full database"); return; }
     if(!light && !(await this.needOpp())) return;
+    await BidAssets.ensure();
     const snap = this.snapshot();
     if(light){ delete snap.oppProjects; snap._note = 'Weekly backup: project opportunity rows are not included (too large). Re-import them from the source files.'; }
     /* Tender Centre data lives in its own database tables, not in Store,
@@ -21089,6 +21185,119 @@ const BIDDOC_TEMPLATES = {
   }
 };
 
+/* Build 60: Bid Documents used to store the same ~20 KB company logo (a base64 picture)
+   inside every one of the 686 documents, so the Bid Documents list was ~15 MB and every
+   single save re-uploaded all of it. Pictures are now kept ONCE in their own small list
+   (key jays_biddocassets) and a document just holds a short token 'asset:<id>'.
+   Old documents with an inline picture keep working unchanged; they are converted
+   one at a time when saved, or all together with the Admin "Shrink storage" button.
+   If the picture list cannot be loaded/saved, nothing is converted (pictures stay inline). */
+const BidAssets = {
+  KEY:'jays_biddocassets', FIELDS:['logo','signatureImage','stampImage'], MIN:2000,
+  map:{}, loaded:false, _p:null,
+  isTok(v){ return typeof v==='string' && v.indexOf('asset:')===0; },
+  get(v){ return this.isTok(v) ? (this.map[v.slice(6)]||'') : (v||''); },
+  hash(str){ let a=5381,b=52711; for(let i=0;i<str.length;i++){ const c=str.charCodeAt(i); a=((a*33)^c)>>>0; b=((b*31)+c)>>>0; } return a.toString(36)+b.toString(36)+str.length.toString(36); },
+  ensure(){
+    if(this.loaded) return Promise.resolve(true);
+    if(!this._p) this._p = (async()=>{
+      let ok = false;
+      try{
+        const v = await Store.loadKey(this.KEY, {});
+        if(!(Store.loadFailed && Store.loadFailed[this.KEY])){
+          this.map = (v && typeof v==='object' && !Array.isArray(v)) ? v : {};
+          this.loaded = ok = true;
+        }
+      }catch(e){ console.warn('biddocassets load failed', e); }
+      this._p = null; return ok;
+    })();
+    return this._p;
+  },
+  /* tokenise big inline pictures of ONE document; returns {doc, added:{id:dataUrl}} (does not save) */
+  slimCopy(doc, known){
+    const out = JSON.parse(JSON.stringify(doc)); const added = {};
+    const c = out.company; if(!c) return {doc:out, added};
+    this.FIELDS.forEach(f=>{
+      const v = c[f];
+      if(typeof v==='string' && v.indexOf('data:image')===0 && v.length>=this.MIN){
+        const id = this.hash(v);
+        if(!(known||this.map)[id] && !added[id]) added[id] = v;
+        c[f] = 'asset:'+id;
+      }
+    });
+    return {doc:out, added};
+  },
+  /* put pictures back inline (used for backups so a backup file is self-contained) */
+  inlineDoc(doc){
+    if(!doc || !doc.company) return doc;
+    let need = false; this.FIELDS.forEach(f=>{ if(this.isTok(doc.company[f])) need = true; });
+    if(!need) return doc;
+    const out = JSON.parse(JSON.stringify(doc));
+    this.FIELDS.forEach(f=>{ if(this.isTok(out.company[f])) out.company[f] = this.get(out.company[f]); });
+    return out;
+  },
+  async _saveMap(newMap){
+    const ok = await Store.saveKey(this.KEY, newMap);
+    return !!ok;
+  },
+  /* called by BidDocs._persist before the document is stored. Never throws; on any problem the doc keeps its inline pictures. */
+  async slimForSave(doc){
+    try{
+      const ready = await this.ensure(); if(!ready) return;
+      const r = this.slimCopy(doc); const ids = Object.keys(r.added);
+      if(!ids.length && JSON.stringify(r.doc.company)===JSON.stringify(doc.company)) return;
+      if(ids.length){
+        const next = Object.assign({}, this.map, r.added);
+        if(!(await this._saveMap(next))) return;      // could not store the pictures: keep them inline
+        this.map = next;
+      }
+      doc.company = r.doc.company;
+    }catch(e){ console.warn('slimForSave skipped', e); }
+  },
+  /* Admin one-time shrink of all existing documents. Shows what will change first. */
+  plan(){
+    const docs = Store.data.bidDocs||[]; let before=0, after=0, changed=0; const add = {};
+    const known = Object.assign({}, this.map);
+    docs.forEach(d=>{
+      const b = JSON.stringify(d).length; const r = this.slimCopy(d, Object.assign({}, known, add));
+      Object.assign(add, r.added);
+      const a = JSON.stringify(r.doc).length; before+=b; after+=a; if(a<b) changed++;
+    });
+    const addBytes = Object.values(add).reduce((n,v)=>n+v.length,0);
+    return {docs:docs.length, changed, before, after, add, addBytes};
+  },
+  async openShrink(){
+    if(!Auth.isAdmin()){ UI.toast('Admin only'); return; }
+    if(!(await this.ensure())){ UI.toast('Could not load the picture list. Try again in a moment.'); return; }
+    const p = this.plan(); const mb = n=>(n/1048576).toFixed(2)+' MB';
+    UI.openModal('Shrink Bid Documents storage',
+      '<p style="font-size:13px;">Right now every document carries its own copy of the logo/signature/stamp pictures.</p>'+
+      '<ul style="font-size:13px;line-height:1.7;"><li>Documents: <b>'+p.docs+'</b> ('+p.changed+' will be changed)</li>'+
+      '<li>Bid Documents size: <b>'+mb(p.before)+'</b> &rarr; about <b>'+mb(p.after+p.addBytes)+'</b></li></ul>'+
+      '<p class="hint" style="font-size:12px;">Nothing is deleted: pictures move into one shared list and every document looks exactly the same. A server backup copy is taken first. If anything fails, nothing is changed.</p>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button> <button class="btn btn-primary" '+(p.changed?'':'disabled ')+'onclick="BidAssets.runShrink()">Shrink now</button>');
+  },
+  async runShrink(){
+    if(!Auth.isAdmin()) return;
+    UI.closeModal();
+    const original = Store.data.bidDocs;
+    try{
+      await Store.flushSoon();
+      try{ await sb.rpc('store_snapshot', { p_reason:'before bid documents shrink' }); }catch(e){ console.warn('snapshot failed', e); }
+      const p = this.plan();
+      const nextMap = Object.assign({}, this.map, p.add);
+      if(Object.keys(p.add).length && !(await this._saveMap(nextMap))){ UI.toast('Shrink stopped: pictures could not be saved. Nothing was changed.', 7000); return; }
+      this.map = nextMap;
+      Store.data.bidDocs = original.map(d=>this.slimCopy(d).doc);
+      const ok = await Store.save('bidDocs');
+      if(!ok){ Store.data.bidDocs = original; UI.toast('Shrink stopped: documents could not be saved. Nothing was changed.', 7000); return; }
+      await Activity.log('Bid documents storage shrunk', p.changed+' documents');
+      UI.toast('Done. '+p.changed+' documents shrunk.', 6000);
+    }catch(e){ Store.data.bidDocs = original; console.error(e); UI.toast('Shrink failed; nothing was changed.', 6000); }
+    try{ BidDocs.render(); }catch(e){}
+  }
+};
+
 const BidDocs = {
   draft: null,
   viewMode:'dashboard',
@@ -21426,6 +21635,7 @@ const BidDocs = {
     }
     d.status = status;
     d.updatedAt = new Date().toISOString();
+    await BidAssets.slimForSave(d);
     if(isNew) Store.data.bidDocs.unshift(d);
     else{
       const idx = Store.data.bidDocs.findIndex(x=>x.id===d.id);
@@ -21505,7 +21715,7 @@ const BidDocs = {
     const cl = d.closing||{};
     return '<div class="bd-preview-page">' +
       '<div class="bd-preview-head">' +
-        (c.logo? '<img src="'+c.logo+'" class="bd-preview-logo">' : '<div class="bd-preview-logo bd-preview-logo-empty"></div>') +
+        (BidAssets.get(c.logo)? '<img src="'+BidAssets.get(c.logo)+'" class="bd-preview-logo">' : '<div class="bd-preview-logo bd-preview-logo-empty"></div>') +
         '<div class="bd-preview-companyblock"><div class="bd-preview-companyname">' + E((c.name||'JAYS TRADING AND BUSINESS SOLUTION').toUpperCase()) + '</div>' +
         [c.phone,c.address,c.gstin?('GSTIN: '+c.gstin):'',c.email].filter(Boolean).map(l=>'<div>'+E(l)+'</div>').join('') + '</div>' +
       '</div>' +
@@ -21516,8 +21726,8 @@ const BidDocs = {
       '<div class="bd-preview-body">' + (body || '<p class="hint">Nothing to preview yet — fill in the sections on the left.</p>') + '</div>' +
       '<div class="bd-preview-closing"><p>' + merge(cl.companyLine) + '</p>' +
         '<div class="bd-preview-sigbox"><div class="hint" style="margin-bottom:4px;">(Signature of Authorized Signatory)</div>' +
-        (c.signatureImage&&cl.showSignature!==false? '<img src="'+c.signatureImage+'" style="height:34px;">' : '') +
-        (c.stampImage&&cl.showStamp!==false? '<img src="'+c.stampImage+'" style="height:40px;margin-left:8px;">' : '') +
+        (BidAssets.get(c.signatureImage)&&cl.showSignature!==false? '<img src="'+BidAssets.get(c.signatureImage)+'" style="height:34px;">' : '') +
+        (BidAssets.get(c.stampImage)&&cl.showStamp!==false? '<img src="'+BidAssets.get(c.stampImage)+'" style="height:40px;margin-left:8px;">' : '') +
         (cl.extraWord? '<div>'+E(cl.extraWord)+'</div>' : '') +
         '<div style="margin-top:6px;">'+E(c.name||'')+'</div>' +
         (c.designation? '<div>Designation :- '+E(c.designation)+'</div>' : '') +
@@ -21542,13 +21752,14 @@ const BidDocs = {
     const merge = (t)=>String(t||'').replace(/\{\{(\w+)\}\}/g,(m,k)=>(ctx[k]!==undefined&&ctx[k]!=='')?ctx[k]:'');
 
     let y = M, logoBottom = y;
-    if(c.logo){
+    const _logo = BidAssets.get(c.logo), _sig = BidAssets.get(c.signatureImage), _stamp = BidAssets.get(c.stampImage);
+    if(_logo){
       try{
-        const props = doc.getImageProperties(c.logo);
+        const props = doc.getImageProperties(_logo);
         const maxW=28, maxH=22;
         const sc = Math.min(maxW/props.width, maxH/props.height);
         const lw = props.width*sc, lh = props.height*sc;
-        doc.addImage(c.logo, 'JPEG', M, y, lw, lh);
+        doc.addImage(_logo, 'JPEG', M, y, lw, lh);
         logoBottom = y + lh;
       }catch(e){ console.warn('logo skipped', e); }
     }
@@ -21658,11 +21869,11 @@ const BidDocs = {
     doc.setFontSize(9); doc.setTextColor(60);
     doc.text('(Signature of Authorized Signatory)', sx, sy); sy += 3;
     const imgY = sy;
-    if(cl.showSignature!==false && c.signatureImage){
-      try{ doc.addImage(c.signatureImage,'JPEG', sx, imgY, 38, 16); }catch(e){ console.warn('signature skipped',e); }
+    if(cl.showSignature!==false && _sig){
+      try{ doc.addImage(_sig,'JPEG', sx, imgY, 38, 16); }catch(e){ console.warn('signature skipped',e); }
     }
-    if(cl.showStamp!==false && c.stampImage){
-      try{ doc.addImage(c.stampImage,'JPEG', sx+40, imgY, 18, 18); }catch(e){ console.warn('stamp skipped',e); }
+    if(cl.showStamp!==false && _stamp){
+      try{ doc.addImage(_stamp,'JPEG', sx+40, imgY, 18, 18); }catch(e){ console.warn('stamp skipped',e); }
     }
     sy = imgY + 20;
     if(cl.extraWord){ doc.setFont('helvetica','normal'); doc.setFontSize(9.5); doc.text(String(cl.extraWord), sx, sy); sy += 5; }
@@ -21692,7 +21903,8 @@ const BidDocs = {
     try{ return fn(this.buildPDF()); }
     catch(e){ console.error(e); UI.toast((label||'PDF')+' failed: '+(e.message||'unknown error')); return null; }
   },
-  previewPDF(){
+  async previewPDF(){
+    await BidAssets.ensure();
     this.withPDF(doc=>{
       const box = document.getElementById('bdPdfFrame');
       if(box) box.src = doc.output('bloburl');
@@ -21701,8 +21913,9 @@ const BidDocs = {
       UI.toast('PDF preview updated');
     }, 'Preview');
   },
-  download(){ this.withPDF(doc=>{ doc.save(this.fileName()); }, 'Download'); },
-  print(){
+  async download(){ await BidAssets.ensure(); this.withPDF(doc=>{ doc.save(this.fileName()); }, 'Download'); },
+  async print(){
+    await BidAssets.ensure();
     this.withPDF(doc=>{
       const url = doc.output('bloburl');
       const w = window.open(url,'_blank');
@@ -21710,8 +21923,8 @@ const BidDocs = {
       else UI.toast('Allow pop-ups to print');
     }, 'Print');
   },
-  quickDownload(id){ const rec=Store.data.bidDocs.find(x=>x.id===id); if(!rec) return; const kept=this.draft; this.draft=JSON.parse(JSON.stringify(rec)); this.download(); this.draft=kept; },
-  quickPrint(id){ const rec=Store.data.bidDocs.find(x=>x.id===id); if(!rec) return; const kept=this.draft; this.draft=JSON.parse(JSON.stringify(rec)); this.print(); this.draft=kept; },
+  async quickDownload(id){ const rec=Store.data.bidDocs.find(x=>x.id===id); if(!rec) return; await BidAssets.ensure(); const kept=this.draft; this.draft=JSON.parse(JSON.stringify(rec)); await this.download(); this.draft=kept; },
+  async quickPrint(id){ const rec=Store.data.bidDocs.find(x=>x.id===id); if(!rec) return; await BidAssets.ensure(); const kept=this.draft; this.draft=JSON.parse(JSON.stringify(rec)); await this.print(); this.draft=kept; },
   quickPreview(id){ this.edit(id); setTimeout(()=>this.previewPDF(),50); },
 
   /* ---------------- editor UI ---------------- */
@@ -21777,6 +21990,9 @@ const BidDocs = {
     '</div>';
   },
   render(){
+    if(!BidAssets.loaded && !BidAssets._p && (Store.data.bidDocs||[]).some(x=>x.company && BidAssets.isTok(x.company.logo))){
+      BidAssets.ensure().then(ok=>{ if(ok && UI.currentView==='biddocs'){ try{ BidDocs.render(); }catch(e){} } });
+    }
     if(this.viewMode==='editor' && this.draft) return this.renderEditor();
     return this.renderDashboard();
   },
@@ -21827,7 +22043,7 @@ const BidDocs = {
           '</div>' +
           '<div class="form-row">' +
             '<div class="field"><label>Logo</label>' +
-              '<div class="wa-imgbox" style="min-height:50px;">'+(d.company.logo?('<img src="'+d.company.logo+'" style="max-height:44px;">'):'<span class="hint">No logo</span>')+'</div>' +
+              '<div class="wa-imgbox" style="min-height:50px;">'+(BidAssets.get(d.company.logo)?('<img src="'+BidAssets.get(d.company.logo)+'" style="max-height:44px;">'):'<span class="hint">No logo</span>')+'</div>' +
               '<input type="file" accept="image/*" id="bd_logoFile" style="display:none;" onchange="BidDocs.onCompanyImageFile(this,\'logo\',300)">' +
               '<div class="toolbar" style="margin-top:6px;">' +
                 '<button class="btn btn-outline btn-sm" onclick="document.getElementById(\'bd_logoFile\').click()">Upload</button>' +
@@ -21835,7 +22051,7 @@ const BidDocs = {
               '</div>' +
             '</div>' +
             '<div class="field"><label>Signature</label>' +
-              '<div class="wa-imgbox" style="min-height:50px;">'+(d.company.signatureImage?('<img src="'+d.company.signatureImage+'" style="max-height:44px;">'):'<span class="hint">No signature</span>')+'</div>' +
+              '<div class="wa-imgbox" style="min-height:50px;">'+(BidAssets.get(d.company.signatureImage)?('<img src="'+BidAssets.get(d.company.signatureImage)+'" style="max-height:44px;">'):'<span class="hint">No signature</span>')+'</div>' +
               '<input type="file" accept="image/*" id="bd_sigFile" style="display:none;" onchange="BidDocs.onCompanyImageFile(this,\'signatureImage\',300)">' +
               '<div class="toolbar" style="margin-top:6px;">' +
                 '<button class="btn btn-outline btn-sm" onclick="document.getElementById(\'bd_sigFile\').click()">Upload</button>' +
@@ -21844,7 +22060,7 @@ const BidDocs = {
             '</div>' +
           '</div>' +
           '<div class="field"><label>Stamp <span class="hint">(optional, drawn beside the signature)</span></label>' +
-            '<div class="wa-imgbox" style="min-height:50px;">'+(d.company.stampImage?('<img src="'+d.company.stampImage+'" style="max-height:44px;">'):'<span class="hint">No stamp</span>')+'</div>' +
+            '<div class="wa-imgbox" style="min-height:50px;">'+(BidAssets.get(d.company.stampImage)?('<img src="'+BidAssets.get(d.company.stampImage)+'" style="max-height:44px;">'):'<span class="hint">No stamp</span>')+'</div>' +
             '<input type="file" accept="image/*" id="bd_stampFile" style="display:none;" onchange="BidDocs.onCompanyImageFile(this,\'stampImage\',300)">' +
             '<div class="toolbar" style="margin-top:6px;">' +
               '<button class="btn btn-outline btn-sm" onclick="document.getElementById(\'bd_stampFile\').click()">Upload</button>' +
@@ -21953,7 +22169,7 @@ const BidDocs = {
         '<div class="card card-pad" style="text-align:center;"><div style="font-size:22px;font-weight:700;color:var(--accent-dark);">'+Store.data.bidDocs.filter(d=>d.status==='Completed').length+'</div><div class="cell-mute" style="font-size:11.5px;">Completed</div></div>' +
         '<div class="card card-pad" style="text-align:center;"><div style="font-size:22px;font-weight:700;">'+Object.keys(BIDDOC_TEMPLATES).length+'</div><div class="cell-mute" style="font-size:11.5px;">Templates</div></div>' +
       '</div>' +
-      '<div class="toolbar" style="margin-bottom:12px;"><div class="toolbar-spacer"></div><button class="btn btn-outline btn-sm" onclick="MergeDocs.open(\'biddocs\')">&#128230; Merge Documents</button></div>' +
+      '<div class="toolbar" style="margin-bottom:12px;"><div class="toolbar-spacer"></div>'+(Auth.isAdmin()?'<button class="btn btn-outline btn-sm" style="margin-right:8px;" onclick="BidAssets.openShrink()">&#128451; Shrink storage</button>':'')+'<button class="btn btn-outline btn-sm" onclick="MergeDocs.open(\'biddocs\')">&#128230; Merge Documents</button></div>' +
       GemPdf.dropHTML() +
       '<div class="tabs">' + tabs.map(t=>'<button class="tab-btn '+(this.dashTab===t[0]?'active':'')+'" onclick="BidDocs.setTab(\''+t[0]+'\')">'+t[1]+'</button>').join('') + '</div>' +
       '<div id="bdTabBody"></div>';
@@ -22046,7 +22262,7 @@ const ACCESS_MODULES = [
   {id:'orders',    label:'Orders',                     keys:['jays_orders'], menus:['orders']},
   {id:'payments',  label:'Payments & Outstanding',     keys:['jays_payments'], menus:['payments','outstanding']},
   {id:'bids',      label:'GeM bids, GEM CRAC, EMD/PBG',keys:['jays_bids','jays_gemcrac','jays_emdpbg'], menus:['bidsearch','gemcrac','emdpbg']},
-  {id:'biddocs',   label:'Bid documents & letters',    keys:['jays_biddocs'], menus:['biddocs']},
+  {id:'biddocs',   label:'Bid documents & letters',    keys:['jays_biddocs','jays_biddocassets'], menus:['biddocs']},
   {id:'opp',       label:'Project Opportunity (tracking, products, keywords)', keys:['jays_opptracking','jays_oppproducts','jays_oppimporthistory','jays_oppkeywordgroups','jays_lbcontacts'], menus:['oppfinder']},
   {id:'products',  label:'Products, suppliers, purchase orders', keys:['jays_products','jays_suppliers','jays_purchaseorders'], menus:['products','inventory','suppliers','purchaseorders']},
   {id:'rfq',       label:'Supplier RFQs & price comparison (supplier costs)', keys:['jays_rfqs'], menus:['rfq']},
@@ -24773,6 +24989,10 @@ const GemL1 = {
 Views.gemlisting = ()=>GemListing.render();
 Views.geml1 = ()=>GemL1.render();
 
+/* Build 60: send any write-behind (saveSoon) changes when the page is hidden or closed */
+document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='hidden'){ try{ Store.flushSoon(); }catch(e){} } });
+window.addEventListener('pagehide', ()=>{ try{ Store.flushSoon(); }catch(e){} });
+window.addEventListener('beforeunload', (e)=>{ try{ if(Store.hasSoon()){ e.preventDefault(); e.returnValue=''; } }catch(x){} });
 App.init();
 </script>
 <script>
