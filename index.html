@@ -3045,6 +3045,8 @@ const NAV = [
     {id:'biddocs', ic:'&#128196;', label:'Bid Documents'},
     {id:'tendervault', ic:'&#128193;', label:'Tender Vault'},
     {id:'gemcrac', ic:'&#128203;', label:'GEM CRAC'},
+    {id:'gemlisting', ic:'&#128722;', label:'GeM Listing', adminOnly:true},
+    {id:'geml1', ic:'&#127919;', label:'GeM L1 Criteria', adminOnly:true},
     {id:'emdpbg', ic:'&#128274;', label:'EMD / PBG Tracker'},
   ]},
   {sec:'Products &amp; Procurement', ic:'&#128230;', items:[
@@ -3098,6 +3100,8 @@ const PAGE_META = {
   attendance:['Attendance & Leave','Daily attendance, work location and leave requests'],
   outstanding:['Outstanding','Unpaid balances by party'],
   inventory:['Inventory','Stock levels across the product catalog'],
+  gemlisting:['GeM Listing','Your products listed on GeM (administrator only)'],
+  geml1:['GeM L1 Criteria','L1 filter criteria saved for each GeM product (administrator only)'],
   bidsearch:['GeM Bid Search','Find, score and track government procurement opportunities'],
   biddocs:['Bid Documents','Build ATC, Beneficial Ownership, Financial Standing, Make in India, OEM Authorization and other bid letters from reusable templates'],
   notifications:['Notifications','Everything that needs your attention, in one place'],
@@ -3159,6 +3163,7 @@ function hasMenuAccess(viewId){
   if(viewId==='todayplan' || viewId==='actioncentre') return true;   /* everyone's own to-do list; items inside still respect their module access */
   if((viewId==='fieldapp' || viewId==='fieldmoney') && Auth.session.role!=='Admin' && !Access.menuHidden(viewId)) return ['fieldhome','visits','requirements','travel'].some(v=>hasMenuAccess(v));   /* field staff get these with their field pages */
   if(Auth.session.role==='Admin') return true;
+  if(viewId==='gemlisting' || viewId==='geml1') return false;   /* administrator only */
   if(Access.menuHidden(viewId)) return false;
   const perms = Auth.session.permissions;
   if(!perms) return true;
@@ -3217,7 +3222,7 @@ function navBadgeCount(id){
    localStorage only (never in the business-data store). */
 /* Which version is running on this device, and a way to drop the saved copy of the app (service worker + cache)
    so that a newly uploaded index.html is really used. Login, settings and saved data are not touched. */
-const APP_BUILD = '2026-11-11 (build 56)';
+const APP_BUILD = '2026-11-23 (build 59)';
 const AppUpdate = {
   reload(){ location.reload(); },
   async refresh(){
@@ -5245,7 +5250,7 @@ const Payments = {
         <button class="btn btn-outline btn-sm" onclick="Payments.downloadSampleTemplate()">&#128190; Sample Template</button>
         <button class="btn btn-outline btn-sm" onclick="document.getElementById('payImportFile').click()">&#128229; Import from Excel</button>
         <button class="btn btn-outline btn-sm" style="color:var(--red);" onclick="Payments.deleteAll()">&#128465; Delete All</button>
-        <button class="btn btn-primary btn-sm" onclick="Payments.openForm(null)">&#65291; Add Invoice</button>
+        <button class="btn btn-primary btn-sm" onclick="Payments.openForm(null)">&#65291; Add Payment Entry</button>
       </div>
       <div class="toolbar">
         <div class="search"><span class="ic">&#128269;</span><input id="paySearch" placeholder="Search party, invoice #, contact, phone..." oninput="Payments.render()" value="${Util.escapeHtml(q)}"></div>
@@ -5297,7 +5302,7 @@ const Payments = {
         </tr>`;}).join('')}
       </tbody></table>
       ${Paginate.controlsHTML('payments', Paginate.slice('payments', list), "Payments.render()")}` : `<div class="empty-state"><div class="ic">&#128179;</div><div class="t">${(q||fStatus||fCompany||fParty||fOverdue)?'No matching invoices':'No pending payments'}</div><div class="d">${(q||fStatus||fCompany||fParty||fOverdue)?'Try clearing filters or adjusting your search.':'Log an invoice to start tracking payment follow-ups, or import a batch from Excel.'}</div>
-      <button class="btn btn-primary btn-sm" onclick="Payments.openForm(null)">&#65291; Add Invoice</button></div>`}
+      <button class="btn btn-primary btn-sm" onclick="Payments.openForm(null)">&#65291; Add Payment Entry</button></div>`}
       </div></div>
     `;
     if(searchHadFocus){
@@ -5326,7 +5331,7 @@ const Payments = {
     this._orderId = rec ? (rec.orderId||'') : ((preset && preset.orderId) || '');
     const v = rec || {companyName:'JAYS', product:'', invoiceNumber:'', invoiceDate:Util.todayISO(), party:presetCust?presetCust.name:'', taxableValue:'', cgst:'', sgst:'', igst:'', roundOff:0, amount:'', amountPaid:0, contact:presetCust?presetCust.name:'', phone:presetCust?presetCust.phone:'', followupDate:'', response:'', status:'Pending', customerId:presetCustomerId||''};
     if(!rec && preset){ ['party','phone','product','amount'].forEach(k=>{ if(preset[k]!==undefined && preset[k]!=='') v[k] = preset[k]; }); if(preset.party && !v.contact) v.contact = preset.party; }
-    UI.openModal(rec?'Edit Invoice':'Add Invoice / Payment', `
+    UI.openModal(rec?'Edit Payment Entry':'Add Payment Entry', `
       ${this._orderId ? '<div class="hint" style="margin-bottom:8px;">&#128230; For order <b>'+Util.escapeHtml(this._orderId)+'</b></div>' : ''}
       <div class="field"><label>Contact (from Customers)</label>${CustPicker.html('p', v.customerId, 'paymentsCustSelected')}</div>
       <div class="form-row">
@@ -6003,7 +6008,7 @@ const OrdersMgmt = {
           <td class="col-actions"><div class="row-action-btns">
             ${o.phone? `<a class="icon-btn" style="color:#25D366;text-decoration:none;" title="WhatsApp" href="${Util.waLink(o.phone,'')}" target="_blank">&#128172;</a>` : ''}
             <button class="icon-btn" title="Edit" onclick="OrdersMgmt.openForm('${o.id}')">&#9998;</button>
-            <button class="icon-btn" title="${OrdersMgmt.invoicesOf(o).length?'Add another invoice':'Add invoice / payment'}" onclick="OrdersMgmt.addInvoice('${o.id}')">&#129534;</button>
+            <button class="icon-btn" title="${OrdersMgmt.invoicesOf(o).length?'Add another payment entry':'Add payment entry'}" onclick="OrdersMgmt.addInvoice('${o.id}')">&#129534;</button>
             ${OrdersMgmt.quoteOf(o) ? `<button class="icon-btn" title="Proforma invoice" onclick="OrdersMgmt.printDoc('${o.id}','proforma')">&#128196;</button>` : ''}
             <button class="icon-btn" title="Delivery challan" onclick="OrdersMgmt.printDoc('${o.id}','challan')">&#128666;</button>
             <button class="icon-btn" title="Delete" onclick="OrdersMgmt.remove('${o.id}')">&#128465;</button>
@@ -19105,7 +19110,7 @@ const DashboardV2 = {
     let salesHTML = '';
     if(can('payments')){
       const series = monthlyAggregate(D.payments||[], 'invoiceDate', 6, p=>Number(p.amount||0)), cur = series[series.length-1].value, tr = momTrend(series);
-      salesHTML = '<div class="card card-pad d2-card"><div class="d2-head"><h3>&#128176; Billing — last 6 months</h3><span class="hint">by invoice date</span></div>' +
+      salesHTML = '<div class="card card-pad d2-card"><div class="d2-head"><h3>&#128176; Sales value — last 6 months</h3><span class="hint">by invoice date</span></div>' +
         '<div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:4px;"><span style="font-size:24px;font-weight:800;">'+Util.fmtMoney(cur)+'</span><span class="hint">this month</span>' +
         (tr!==null && tr!==undefined ? '<span class="kpi-trend '+(tr>=0?'up':'down')+'">'+(tr>=0?'&#9650;':'&#9660;')+' '+Math.abs(tr)+'% vs last month</span>' : '') + '</div>' + Chart.line(series, 150) + '</div>';
     }
@@ -19199,7 +19204,8 @@ const TAB_GROUPS = [
   ['visits','requirements','travel'],
   ['fieldmap','findlocation','officefinder'],
   ['complaints','amc'],
-  ['products','inventory']
+  ['products','inventory'],
+  ['gemlisting','geml1']
 ];
 const TabStrip = {
   find(id){ return TAB_GROUPS.find(g=>g.includes(id)) || null; },
@@ -21014,7 +21020,7 @@ const BIDDOC_TEMPLATES = {
     title:'', subtitle:'',
     closing:{extraWord:'Sincerely,', designation:'Manager'},
     sections:()=>[
-      bdSection('to','To','lines',['To,','The CEO,','GeM - Government e Marketplace, Delhi.']),
+      bdSection('to','To','lines',['To,','{{department}}','{{organisation}}']),
       bdSection('subject','Subject','lines',["Sub: Manufacturer's Authority Letter GeM Bid/RA No {{bidNumber}}: {{bidTitle}}"]),
       bdSection('salutation','Salutation','lines',['Dear Sir / Madam,']),
       bdSection('body','Body','lines',[
@@ -21054,7 +21060,7 @@ const BIDDOC_TEMPLATES = {
     desc:'Standard covering/submission letter listing the documents enclosed with a bid.',
     title:'BID COVERING LETTER', subtitle:'',
     sections:()=>[
-      bdSection('to','To','lines',['To,','The Tender Inviting Authority,','{{organisation}}']),
+      bdSection('to','To','lines',['To,','{{department}}','{{organisation}}']),
       bdSection('subject','Subject','lines',['Sub: Submission of bid against {{bidTitle}} — Bid No. {{bidNumber}}']),
       bdSection('salutation','Salutation','lines',['Dear Sir / Madam,']),
       bdSection('body','Body','lines',[
@@ -21478,7 +21484,7 @@ const BidDocs = {
       if(sec.kind==='fields'){
         sec.data.forEach(f=>{ if(f.label||f.value) body += '<p style="'+this.pStyle(sec,0,'left','0 0 8px')+'">' + (f.label?('<b>'+E(f.label)+':</b> '):'') + merge(f.value) + '</p>'; });
       } else if(sec.kind==='lines'){
-        sec.data.forEach((l,i)=>{ if(String(l).trim()) body += '<p style="'+this.pStyle(sec,i,'justify')+'">' + merge(l) + '</p>'; });
+        sec.data.forEach((l,i)=>{ if(merge(l).trim()) body += '<p style="'+this.pStyle(sec,i,'justify')+'">' + merge(l) + '</p>'; });
       } else if(sec.kind==='numbered'){
         body += '<ol style="margin:0 0 10px 18px;padding:0;">';
         sec.data.forEach(item=>{
@@ -23815,7 +23821,7 @@ const Ico = {
 };
 /* menu id -> icon; anything not listed keeps its existing emoji so nothing is ever blank */
 const NAV_ICON = { fieldapp:'phone', datahealth:'check', actioncentre:'bolt', dashboard:'dashboard', growth:'trend', notifications:'bell', leads:'users', customers:'user', pipeline:'trend', mywork:'target', followupcentre:'clock', officework:'list', handover:'swap',
-  mycalls:'phone', officequeue:'list', quotations:'file', rate_docs:'file', orders:'box', bidsearch:'search', tenders:'briefcase', oppfinder:'landmark', biddocs:'file', tendervault:'lock', gemcrac:'list', emdpbg:'lock',
+  mycalls:'phone', officequeue:'list', quotations:'file', rate_docs:'file', gemlisting:'store', geml1:'list', orders:'box', bidsearch:'search', tenders:'briefcase', oppfinder:'landmark', biddocs:'file', tendervault:'lock', gemcrac:'list', emdpbg:'lock',
   products:'box', inventory:'store', suppliers:'truck', purchaseorders:'cart', rfq:'list', payments:'wallet', outstanding:'alert', expenses:'receipt', siteexp:'wallet',
   fieldhome:'pin', visits:'pin', requirements:'list', travel:'truck', fieldmap:'pin', findlocation:'search', officefinder:'search',
   complaints:'alert', amc:'wrench', tasks:'check', attendance:'calendar', notes:'file', reports:'chart', fieldreports:'chart', workmgmt:'list', callalloc:'phone', users:'users', settings:'sliders', backup:'db' };
@@ -24480,6 +24486,292 @@ const SettingsView = {
   renderNav = function(){ const out = origNav.apply(this, arguments); Motion.navLink(); return out; };
   Motion.apply();
 })();
+
+/* ===== Build 59: GeM Listing + GeM L1 Criteria (Admin only) =====
+   Two pages for the owner. Data lives in two new store keys (jays_gemlisting, jays_geml1) that the database
+   refuses to every non-admin account (store_level), so hiding the menu is not the only protection. */
+const GemTools = {
+  loaded:{},
+  isAdmin(){ return !!(Auth.session && Auth.session.role==='Admin'); },
+  deny(){ const c=document.getElementById('content'); if(c) c.innerHTML='<div class="empty-state"><div class="ic">&#128274;</div><div class="t">Admin only</div><div class="d">This page is available to the administrator.</div></div>'; },
+  uid(p){ return p+Date.now().toString(36)+Math.random().toString(36).slice(2,6); },
+  clean(v){ return String(v==null?'':v).replace(/\s+/g,' ').trim(); },
+  num(v){ const t=String(v==null?'':v).replace(/[^0-9.\-]/g,''); if(t===''||t==='-'||t==='.') return null; const n=Number(t); return isFinite(n)?n:null; },
+  money(n){ return (n===null||n===undefined||n==='')?'':Number(n).toLocaleString('en-IN',{maximumFractionDigits:2}); },
+  safeUrl(u){ try{ const x=new URL(u); return (x.protocol==='https:' && /(^|\.)gem\.gov\.in$/i.test(x.hostname)) ? x.href : ''; }catch(e){ return ''; } },
+  async load(key, coll){
+    if(this.loaded[coll]) return true;
+    const v = await Store.loadKey(key, []);
+    if(Store.loadFailed[key]) return false;
+    Store.data[coll] = Array.isArray(v) ? v : [];
+    this.loaded[coll] = true; return true;
+  },
+  copy(text){ try{ if(navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text).then(()=>true,()=>false); }catch(e){} try{ const t=document.createElement('textarea'); t.value=text; document.body.appendChild(t); t.select(); const ok=document.execCommand('copy'); t.remove(); return Promise.resolve(ok); }catch(e){ return Promise.resolve(false); } }
+};
+
+const GemListing = {
+  q:'', fp:'', fi:'', fc:'', busy:false, _rows:null,
+  COLS:[['name','Name'],['title','Title on Market Place'],['productId','ProductID'],['catalogueId','Gem Catalogue Id'],['category','Category'],['brand','Brand'],['model','Model'],['mrp','MRP/NDP'],['offerPrice','Offer Price'],['productStatus','Product Status'],['inventoryStatus','Inventory Status']],
+  ALIAS:{ name:['name'], title:['title on market place','title on marketplace','marketplace title','title'], productId:['productid','product id'], catalogueId:['gem catalogue id','gem catalog id','catalogue id','catalog id'], category:['category'], brand:['brand'], model:['model'], mrp:['mrp/ndp','mrp / ndp','mrp','ndp'], offerPrice:['offer price','price'], productStatus:['product status','status'], inventoryStatus:['inventory status','inventory'], action:['action(s)','actions','action'] },
+  list(){ return Store.data.gemListing || []; },
+  keyOf(r){ const p=GemTools.clean(r.productId).toLowerCase(); return p ? 'p:'+p : 'c:'+GemTools.clean(r.catalogueId).toLowerCase()+'|'+GemTools.clean(r.title||r.name).toLowerCase(); },
+  /* turns pasted text (rows copied from the GeM seller table, or from Excel) into records */
+  parse(text){
+    const raw = String(text||'').replace(/\r/g,'').split('\n').filter(l=>l.trim()!=='');
+    const out = { rows:[], skipped:0, header:false };
+    if(!raw.length) return out;
+    let cells;
+    if(raw.some(l=>l.indexOf('\t')>=0)) cells = raw.map(l=>l.split('\t').map(GemTools.clean));
+    else {                                    /* each cell on its own line: group into rows of 12 (with Action) or 11 */
+      const n = raw.length; const size = (n%12===0) ? 12 : (n%11===0 ? 11 : 0);
+      if(!size){ out.skipped = n; out.badShape = true; return out; }
+      cells = []; for(let i=0;i<n;i+=size) cells.push(raw.slice(i,i+size).map(GemTools.clean));
+    }
+    /* header row: map columns by name; otherwise positional in the order of the GeM table */
+    const norm = s=>GemTools.clean(s).toLowerCase();
+    let map = null, start = 0;
+    const hits = r=>r.filter(c=>Object.values(this.ALIAS).some(a=>a.includes(norm(c)))).length;
+    if(hits(cells[0])>=3){ map = {}; cells[0].forEach((c,i)=>{ for(const k in this.ALIAS){ if(this.ALIAS[k].includes(norm(c)) && map[k]===undefined){ map[k]=i; break; } } }); start = 1; out.header = true; }
+    else { map = {}; this.COLS.forEach((c,i)=>{ map[c[0]] = i; }); }
+    for(let i=start;i<cells.length;i++){
+      const c = cells[i]; if(c.length < 4){ out.skipped++; continue; }
+      const g = k=>map[k]===undefined ? '' : (c[map[k]]||'');
+      const r = { name:g('name'), title:g('title'), productId:g('productId'), catalogueId:g('catalogueId'), category:g('category'), brand:g('brand'), model:g('model'),
+        mrp:GemTools.num(g('mrp')), offerPrice:GemTools.num(g('offerPrice')), productStatus:g('productStatus'), inventoryStatus:g('inventoryStatus') };
+      if(!(r.name||r.title) || !(r.productId||r.catalogueId||r.title)){ out.skipped++; continue; }
+      out.rows.push(r);
+    }
+    return out;
+  },
+  plan(rows){
+    const have = new Map(this.list().map(r=>[this.keyOf(r), r])); const seen = new Set(); let add=0, upd=0, same=0, dup=0;
+    rows.forEach(r=>{ const k=this.keyOf(r); if(seen.has(k)){ dup++; return; } seen.add(k); const e=have.get(k);
+      if(!e) add++; else if(this.COLS.some(c=>String(e[c[0]]==null?'':e[c[0]])!==String(r[c[0]]==null?'':r[c[0]]))) upd++; else same++; });
+    return {add, upd, same, dup};
+  },
+  async render(){
+    const box = document.getElementById('content'); if(!box) return;
+    if(!GemTools.isAdmin()) return GemTools.deny();
+    box.innerHTML = '<div class="card card-pad"><div class="hint">Loading&hellip;</div></div>';
+    const ok = await GemTools.load('jays_gemlisting','gemListing'); if(UI.currentView!=='gemlisting') return;
+    if(!ok){ box.innerHTML='<div class="card card-pad"><div class="empty-state"><div class="ic">&#9888;</div><div class="t">Could not load GeM Listing</div><div class="d">Check your connection and refresh the page.</div></div></div>'; return; }
+    this.draw();
+  },
+  filtered(){
+    const q=this.q.toLowerCase();
+    return this.list().filter(r=>(!this.fp||r.productStatus===this.fp) && (!this.fi||r.inventoryStatus===this.fi) && (!this.fc||r.category===this.fc) &&
+      (!q || [r.name,r.title,r.productId,r.catalogueId,r.category,r.brand,r.model].join(' ').toLowerCase().includes(q)));
+  },
+  draw(){
+    const box=document.getElementById('content'); if(!box) return; const E=Util.escapeHtml, all=this.list(), rows=this.filtered();
+    const opts=(k,cur,label)=>'<select onchange="GemListing.setF(\''+k+'\',this.value)"><option value="">'+label+'</option>'+Array.from(new Set(all.map(r=>r[k==='fp'?'productStatus':k==='fi'?'inventoryStatus':'category']).filter(Boolean))).sort().map(v=>'<option value="'+E(v)+'" '+(v===cur?'selected':'')+'>'+E(v)+'</option>').join('')+'</select>';
+    box.innerHTML =
+      '<div class="toolbar"><div class="search"><span class="ic">&#128269;</span><input id="gl_q" placeholder="Search name, title, ID, brand, model..." value="'+E(this.q)+'" oninput="GemListing.setQ(this.value)"></div>' +
+        opts('fp',this.fp,'All product status')+opts('fi',this.fi,'All inventory status')+opts('fc',this.fc,'All categories') +
+        '<div class="toolbar-spacer"></div>' +
+        '<button class="btn btn-outline btn-sm" onclick="GemListing.exportXlsx()">Export Excel</button>' +
+        '<button class="btn btn-outline btn-sm" onclick="GemListing.openForm()">&#65291; Add product</button>' +
+        '<button class="btn btn-primary btn-sm" onclick="GemListing.openPaste()">&#128203; Paste data</button></div>' +
+      '<div class="hint" style="margin:0 2px 8px;">'+all.length+' product'+(all.length===1?'':'s')+' saved'+(rows.length!==all.length?' &middot; '+rows.length+' shown':'')+'. Copy the rows from your GeM seller product list and use <b>Paste data</b>; products with the same ProductID are updated, not duplicated.</div>' +
+      '<div class="card"><div class="table-wrap">' + (rows.length ?
+        '<table><thead><tr>'+this.COLS.map(c=>'<th>'+c[1]+'</th>').join('')+'<th class="col-actions">Action(s)</th></tr></thead><tbody>' +
+        rows.slice(0,250).map(r=>'<tr>' +
+          '<td class="cell-main">'+E(r.name||'')+'</td>' +
+          '<td style="max-width:280px;" title="'+E(r.title||'')+'"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px;">'+E(r.title||'')+'</div></td>' +
+          '<td class="mono">'+E(r.productId||'')+'</td><td class="mono">'+E(r.catalogueId||'')+'</td><td>'+E(r.category||'')+'</td><td>'+E(r.brand||'')+'</td><td>'+E(r.model||'')+'</td>' +
+          '<td style="text-align:right;">'+GemTools.money(r.mrp)+'</td><td style="text-align:right;">'+GemTools.money(r.offerPrice)+'</td>' +
+          '<td>'+E(r.productStatus||'')+'</td><td>'+E(r.inventoryStatus||'')+'</td>' +
+          '<td class="col-actions" style="white-space:nowrap;"><button class="icon-btn" title="Edit" onclick="GemListing.openForm(\''+r.id+'\')">&#9998;</button> <button class="icon-btn" title="Show L1 criteria" onclick="GemListing.toL1(\''+r.id+'\')">L1</button> <button class="icon-btn" title="Delete" onclick="GemListing.remove(\''+r.id+'\')">&#128465;</button></td></tr>').join('') +
+        '</tbody></table>'+(rows.length>250?'<div class="hint" style="padding:8px;">Showing the first 250 of '+rows.length+'. Use search or filters to narrow down.</div>':'')
+        : '<div class="empty-state"><div class="ic">&#128722;</div><div class="t">'+(all.length?'No products match':'No GeM products yet')+'</div><div class="d">'+(all.length?'Clear the search or filters.':'Use Paste data to add your listing.')+'</div></div>') + '</div></div>';
+  },
+  setQ(v){ this.q=v; clearTimeout(this._t); this._t=setTimeout(()=>{ this.draw(); const i=document.getElementById('gl_q'); if(i){ i.focus(); try{ i.setSelectionRange(v.length,v.length); }catch(e){} } },200); },
+  setF(k,v){ this[k]=v; this.draw(); },
+  toL1(id){ const r=this.list().find(x=>x.id===id); if(!r) return; GemL1.q = r.name||r.title||''; go('geml1'); },
+  /* ---------- paste ---------- */
+  openPaste(){
+    this._rows = null;
+    UI.openModal('Paste GeM listing data',
+      '<div class="hint" style="margin-bottom:8px;">Copy the product rows from your GeM seller dashboard (or from Excel) and paste them here. Columns in this order: Name, Title on Market Place, ProductID, Gem Catalogue Id, Category, Brand, Model, MRP/NDP, Offer Price, Product Status, Inventory Status, Action(s). A header row is fine and is detected.</div>' +
+      '<textarea id="glp_text" rows="9" style="width:100%;font-family:monospace;font-size:12px;" placeholder="Paste here&hellip;" oninput="GemListing.checkPaste()"></textarea><div id="glp_out" style="margin-top:10px;"></div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" id="glp_go" disabled onclick="GemListing.doImport()">Import</button>', true);
+  },
+  checkPaste(){
+    const t=document.getElementById('glp_text').value, out=document.getElementById('glp_out'), go=document.getElementById('glp_go'); const E=Util.escapeHtml;
+    if(!t.trim()){ out.innerHTML=''; go.disabled=true; this._rows=null; return; }
+    const p=this.parse(t); this._rows=p.rows;
+    if(p.badShape){ out.innerHTML='<div style="color:#b91c1c;">The pasted text could not be split into rows. Copy the table rows again so the columns are separated by tabs.</div>'; go.disabled=true; return; }
+    const pl=this.plan(p.rows);
+    out.innerHTML='<div><b>'+p.rows.length+'</b> rows read &middot; <b style="color:#15803d;">'+pl.add+' new</b> &middot; <b style="color:#b45309;">'+pl.upd+' updated</b> &middot; '+pl.same+' unchanged'+(pl.dup?' &middot; '+pl.dup+' repeated in the paste (last ignored)':'')+(p.skipped?' &middot; <span style="color:#b91c1c;">'+p.skipped+' skipped (incomplete)</span>':'')+(p.header?' &middot; header row detected':'')+'</div>' +
+      (p.rows.length?'<div class="table-wrap" style="margin-top:8px;max-height:220px;overflow:auto;"><table><thead><tr><th>Name</th><th>ProductID</th><th>Category</th><th>Brand</th><th>Model</th><th>MRP</th><th>Offer</th><th>Status</th></tr></thead><tbody>'+p.rows.slice(0,8).map(r=>'<tr><td>'+E(r.name||r.title)+'</td><td class="mono">'+E(r.productId)+'</td><td>'+E(r.category)+'</td><td>'+E(r.brand)+'</td><td>'+E(r.model)+'</td><td>'+GemTools.money(r.mrp)+'</td><td>'+GemTools.money(r.offerPrice)+'</td><td>'+E(r.productStatus)+'</td></tr>').join('')+'</tbody></table></div>':'');
+    go.disabled = !(pl.add+pl.upd>0);
+  },
+  async doImport(){
+    if(this.busy || !this._rows || !this._rows.length) return; this.busy=true; const btn=document.getElementById('glp_go'); if(btn) btn.disabled=true;
+    try{
+      const list = Store.data.gemListing = Store.data.gemListing || []; const idx = new Map(list.map(r=>[this.keyOf(r), r])); const seen=new Set(); let add=0, upd=0; const now=new Date().toISOString();
+      const before = JSON.stringify(list);
+      this._rows.forEach(r=>{ const k=this.keyOf(r); if(seen.has(k)) return; seen.add(k); const e=idx.get(k);
+        if(e){ const changed=this.COLS.some(c=>String(e[c[0]]==null?'':e[c[0]])!==String(r[c[0]]==null?'':r[c[0]])); if(changed){ Object.assign(e, r, {updatedAt:now}); upd++; } }
+        else { const n=Object.assign({id:GemTools.uid('GL'), addedAt:now, updatedAt:now}, r); list.push(n); idx.set(k,n); add++; } });
+      if(!(await Store.save('gemListing'))){ Store.data.gemListing = JSON.parse(before); if(btn) btn.disabled=false; this.busy=false; return; }
+      try{ await Activity.log('GeM listing pasted', add+' new, '+upd+' updated'); }catch(e){}
+      UI.closeModal(); UI.toast('GeM listing saved: '+add+' new, '+upd+' updated'); this.draw();
+    }catch(e){ console.error('gem listing import', e); UI.toast('Could not save. Try again.'); if(btn) btn.disabled=false; }
+    this.busy=false;
+  },
+  /* ---------- add / edit / delete ---------- */
+  openForm(id){
+    const r = id ? this.list().find(x=>x.id===id) : {}; if(id && !r) return; const E=Util.escapeHtml;
+    const f=(k,l,w)=>'<div class="field"'+(w?' style="grid-column:1/-1;"':'')+'><label>'+l+'</label><input id="glf_'+k+'" value="'+E(r[k]==null?'':r[k])+'"></div>';
+    UI.openModal(id?'Edit product':'Add product',
+      '<div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">'+f('name','Name')+f('productId','ProductID')+f('title','Title on Market Place',1)+f('catalogueId','Gem Catalogue Id')+f('category','Category')+f('brand','Brand')+f('model','Model')+f('mrp','MRP/NDP')+f('offerPrice','Offer Price')+f('productStatus','Product Status')+f('inventoryStatus','Inventory Status')+'</div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" id="glf_save" onclick="GemListing.saveForm('+(id?'\''+id+'\'':'null')+')">Save</button>');
+  },
+  async saveForm(id){
+    if(this.busy) return; const g=k=>document.getElementById('glf_'+k).value; const rec={ name:GemTools.clean(g('name')), title:GemTools.clean(g('title')), productId:GemTools.clean(g('productId')), catalogueId:GemTools.clean(g('catalogueId')), category:GemTools.clean(g('category')), brand:GemTools.clean(g('brand')), model:GemTools.clean(g('model')), mrp:GemTools.num(g('mrp')), offerPrice:GemTools.num(g('offerPrice')), productStatus:GemTools.clean(g('productStatus')), inventoryStatus:GemTools.clean(g('inventoryStatus')) };
+    if(!(rec.name||rec.title)) return UI.toast('Enter the product name or title');
+    const list = Store.data.gemListing = Store.data.gemListing || [];
+    const k=this.keyOf(rec); const clash=list.find(x=>x.id!==id && this.keyOf(x)===k); if(clash && (rec.productId||rec.catalogueId)) return UI.toast('A product with this ProductID already exists');
+    this.busy=true; const before=JSON.stringify(list), now=new Date().toISOString();
+    if(id){ Object.assign(list.find(x=>x.id===id), rec, {updatedAt:now}); } else list.push(Object.assign({id:GemTools.uid('GL'), addedAt:now, updatedAt:now}, rec));
+    if(!(await Store.save('gemListing'))){ Store.data.gemListing = JSON.parse(before); this.busy=false; return; }
+    this.busy=false; UI.closeModal(); UI.toast('Saved'); this.draw();
+  },
+  async remove(id){
+    const r=this.list().find(x=>x.id===id); if(!r || !confirm('Delete "'+(r.name||r.title)+'" from the GeM listing?')) return;
+    const before=JSON.stringify(Store.data.gemListing); Store.data.gemListing = Store.data.gemListing.filter(x=>x.id!==id);
+    if(!(await Store.save('gemListing'))){ Store.data.gemListing = JSON.parse(before); return; }
+    UI.toast('Deleted'); this.draw();
+  },
+  exportXlsx(){
+    if(typeof XLSX==='undefined') return UI.toast('Excel library is still loading. Try again.');
+    const rows=this.filtered(); if(!rows.length) return UI.toast('Nothing to export');
+    const aoa=[this.COLS.map(c=>c[1])].concat(rows.map(r=>this.COLS.map(c=>r[c[0]]==null?'':r[c[0]])));
+    const ws=XLSX.utils.aoa_to_sheet(aoa); ws['!cols']=this.COLS.map((c,i)=>({wch:[24,48,16,18,22,14,14,12,12,14,16][i]})); const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'GeM Listing'); XLSX.writeFile(wb,'gem-listing-'+Util.todayISO()+'.xlsx');
+  }
+};
+
+const GemL1 = {
+  q:'', busy:false, _blocks:null,
+  list(){ return Store.data.gemL1 || []; },
+  /* Parses text copied from a GeM catalogue page. One or many products in one paste. */
+  parse(text, fallbackName){
+    const lines = String(text||'').replace(/\r/g,'').split('\n').map(l=>l.trim());
+    const isX = l=>/^[X×✕✖]$/i.test(l);
+    const markerRe = /\(\s*(Q\d)\s*Category\s*\)/i;
+    const markers=[]; lines.forEach((l,i)=>{ if(markerRe.test(l) || /Category Insights/i.test(l)) markers.push(i); });
+    const prevName = i=>{ for(let j=i-1;j>=0;j--){ if(lines[j] && !isX(lines[j]) && !/:\s*$/.test(lines[j])) return {name:lines[j], at:j}; if(lines[j] && /:\s*$/.test(lines[j])) break; } return null; };
+    const blocks=[];
+    if(markers.length){
+      const starts = markers.map(m=>{ const p=prevName(m); return {marker:m, name:p?p.name:'', from:p?p.at:m}; });
+      /* a marker line right after another marker line (same product) is merged */
+      const uniq=[]; starts.forEach(s=>{ if(!uniq.length || s.marker-uniq[uniq.length-1].marker>1) uniq.push(s); });
+      uniq.forEach((s,k)=>{ const end = k+1<uniq.length ? uniq[k+1].from : lines.length; blocks.push({name:s.name, head:lines.slice(s.from, s.marker+1).join(' '), body:lines.slice(s.marker+1,end)}); });
+    } else {
+      const first = lines.findIndex(l=>l && !isX(l)); if(first<0) return [];
+      const hasName = !/:\s*$/.test(lines[first]);
+      blocks.push({name: hasName?lines[first]:'', head:'', body: lines.slice(hasName?first+1:first)});
+    }
+    return blocks.map(b=>{
+      const head=b.head||''; const q=(head.match(markerRe)||[])[1]||'';
+      const ins=(head.match(/\[\(Category Insights\)\]\((https?:[^)\s]+)\)/i)||[])[1]||'', sell=(head.match(/\[\(Sell in this category\)\]\((https?:[^)\s]+)\)/i)||[])[1]||'';
+      const feats=[]; let cur=null;
+      b.body.forEach(l=>{ if(!l || isX(l)) return; if(/:\s*$/.test(l)){ cur={name:l.replace(/\s*:\s*$/,'').trim(), values:[]}; feats.push(cur); } else if(cur){ cur.values.push(l); } });
+      return { name:GemTools.clean(b.name||fallbackName||''), q, insightsUrl:GemTools.safeUrl(ins), sellUrl:GemTools.safeUrl(sell), features:feats.filter(f=>f.name).map(f=>({name:GemTools.clean(f.name), value:f.values.map(GemTools.clean).join(', ')})) };
+    }).filter(b=>b.name || b.features.length);
+  },
+  async render(){
+    const box=document.getElementById('content'); if(!box) return;
+    if(!GemTools.isAdmin()) return GemTools.deny();
+    box.innerHTML='<div class="card card-pad"><div class="hint">Loading&hellip;</div></div>';
+    const ok = await GemTools.load('jays_geml1','gemL1'); if(UI.currentView!=='geml1') return;
+    if(!ok){ box.innerHTML='<div class="card card-pad"><div class="empty-state"><div class="ic">&#9888;</div><div class="t">Could not load L1 criteria</div><div class="d">Check your connection and refresh the page.</div></div></div>'; return; }
+    this.draw();
+  },
+  filtered(){ const q=this.q.toLowerCase(); return this.list().filter(p=>!q || (p.name+' '+(p.q||'')+' '+p.features.map(f=>f.name+' '+f.value).join(' ')).toLowerCase().includes(q)).sort((a,b)=>a.name.localeCompare(b.name)); },
+  draw(){
+    const box=document.getElementById('content'); if(!box) return; const E=Util.escapeHtml, all=this.list(), rows=this.filtered();
+    box.innerHTML =
+      '<div class="toolbar"><div class="search"><span class="ic">&#128269;</span><input id="l1_q" placeholder="Search product or feature (e.g. hydraulic, 25 tonne)..." value="'+E(this.q)+'" oninput="GemL1.setQ(this.value)"></div><div class="toolbar-spacer"></div>' +
+        '<button class="btn btn-outline btn-sm" onclick="GemL1.exportXlsx()">Export Excel</button>' +
+        '<button class="btn btn-outline btn-sm" onclick="GemL1.openForm()">&#65291; Add manually</button>' +
+        '<button class="btn btn-primary btn-sm" onclick="GemL1.openPaste()">&#128203; Paste L1 criteria</button></div>' +
+      '<div class="hint" style="margin:0 2px 8px;">'+all.length+' product'+(all.length===1?'':'s')+' saved'+(rows.length!==all.length?' &middot; '+rows.length+' shown':'')+'. Copy the product name and its feature list from the GeM catalogue page and use <b>Paste L1 criteria</b>. Several products can be pasted together.</div>' +
+      (rows.length ? rows.map(p=>'<details class="card" style="margin-bottom:10px;"'+(this.q||rows.length===1?' open':'')+'><summary style="padding:12px 14px;cursor:pointer;display:flex;gap:10px;align-items:center;flex-wrap:wrap;"><b>'+E(p.name)+'</b>' +
+          (p.q?'<span style="background:#fff3e8;color:#c2410c;border-radius:10px;padding:1px 8px;font-size:11px;">'+E(p.q)+' Category</span>':'') + '<span class="cell-mute" style="font-size:12px;">'+p.features.length+' criteria</span></summary>' +
+          '<div style="padding:0 14px 12px;">' + (p.features.length ? '<div class="table-wrap"><table><thead><tr><th style="width:55%;">Feature</th><th>L1 value</th></tr></thead><tbody>'+p.features.map(f=>'<tr><td>'+E(f.name)+'</td><td><b>'+E(f.value)+'</b></td></tr>').join('')+'</tbody></table></div>' : '<div class="hint">No criteria saved.</div>') +
+          '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">' +
+            '<button class="btn btn-outline btn-sm" onclick="GemL1.openForm(\''+p.id+'\')">&#9998; Edit</button><button class="btn btn-outline btn-sm" onclick="GemL1.copyText(\''+p.id+'\')">Copy text</button>' +
+            (p.insightsUrl?'<a class="btn btn-outline btn-sm" href="'+E(p.insightsUrl)+'" target="_blank" rel="noopener noreferrer">Category insights</a>':'') + (p.sellUrl?'<a class="btn btn-outline btn-sm" href="'+E(p.sellUrl)+'" target="_blank" rel="noopener noreferrer">Sell in this category</a>':'') +
+            '<span style="flex:1"></span><button class="btn btn-outline btn-sm" onclick="GemL1.remove(\''+p.id+'\')">Delete</button></div></div></details>').join('')
+        : '<div class="card"><div class="empty-state"><div class="ic">&#128203;</div><div class="t">'+(all.length?'No products match':'No L1 criteria saved yet')+'</div><div class="d">'+(all.length?'Clear the search.':'Use Paste L1 criteria to save the first product.')+'</div></div></div>');
+  },
+  setQ(v){ this.q=v; clearTimeout(this._t); this._t=setTimeout(()=>{ this.draw(); const i=document.getElementById('l1_q'); if(i){ i.focus(); try{ i.setSelectionRange(v.length,v.length); }catch(e){} } },200); },
+  /* ---------- paste ---------- */
+  openPaste(){
+    this._blocks=null;
+    UI.openModal('Paste L1 criteria',
+      '<div class="hint" style="margin-bottom:8px;">Copy from the GeM catalogue page: the product name, then the feature lines (name, value, X). One product or many.</div>' +
+      '<div class="field"><label>Product name <span class="hint">(only needed if it is not in the pasted text)</span></label><input id="l1p_name" oninput="GemL1.checkPaste()"></div>' +
+      '<textarea id="l1p_text" rows="10" style="width:100%;font-family:monospace;font-size:12px;" placeholder="Paste here&hellip;" oninput="GemL1.checkPaste()"></textarea><div id="l1p_out" style="margin-top:10px;"></div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" id="l1p_go" disabled onclick="GemL1.doImport()">Save</button>', true);
+  },
+  checkPaste(){
+    const t=document.getElementById('l1p_text').value, out=document.getElementById('l1p_out'), go=document.getElementById('l1p_go'), E=Util.escapeHtml;
+    if(!t.trim()){ out.innerHTML=''; go.disabled=true; this._blocks=null; return; }
+    const b=this.parse(t, GemTools.clean(document.getElementById('l1p_name').value)); this._blocks=b;
+    const have=new Map(this.list().map(p=>[p.name.toLowerCase(),p]));
+    out.innerHTML = b.length ? b.map(x=>'<div style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:6px;"><b>'+(x.name?E(x.name):'<span style="color:#b91c1c;">(no product name)</span>')+'</b> '+(x.q?'<span class="cell-mute">'+E(x.q)+' Category</span> ':'')+'&middot; '+x.features.length+' criteria &middot; '+(!x.name?'':(have.has(x.name.toLowerCase())?'<span style="color:#b45309;">will update the saved one</span>':'<span style="color:#15803d;">new</span>'))+
+        '<div class="cell-mute" style="font-size:12px;margin-top:4px;">'+x.features.slice(0,4).map(f=>E(f.name)+': <b>'+E(f.value)+'</b>').join(' &middot; ')+(x.features.length>4?' &hellip;':'')+'</div></div>').join('') : '<div style="color:#b91c1c;">No product or criteria found in this text.</div>';
+    go.disabled = !b.length || b.some(x=>!x.name || !x.features.length);
+  },
+  async doImport(){
+    if(this.busy || !this._blocks) return; this.busy=true; const btn=document.getElementById('l1p_go'); if(btn) btn.disabled=true;
+    try{
+      const list=Store.data.gemL1=Store.data.gemL1||[]; const before=JSON.stringify(list), now=new Date().toISOString(); let add=0, upd=0;
+      this._blocks.forEach(b=>{ const e=list.find(p=>p.name.toLowerCase()===b.name.toLowerCase());
+        if(e){ Object.assign(e,{q:b.q||e.q, insightsUrl:b.insightsUrl||e.insightsUrl||'', sellUrl:b.sellUrl||e.sellUrl||'', features:b.features, updatedAt:now}); upd++; }
+        else { list.push({id:GemTools.uid('L1'), name:b.name, q:b.q, insightsUrl:b.insightsUrl, sellUrl:b.sellUrl, features:b.features, addedAt:now, updatedAt:now}); add++; } });
+      if(!(await Store.save('gemL1'))){ Store.data.gemL1=JSON.parse(before); if(btn) btn.disabled=false; this.busy=false; return; }
+      try{ await Activity.log('GeM L1 criteria pasted', add+' new, '+upd+' updated'); }catch(e){}
+      UI.closeModal(); UI.toast('L1 criteria saved: '+add+' new, '+upd+' updated'); this.draw();
+    }catch(e){ console.error('gem l1 import', e); UI.toast('Could not save. Try again.'); if(btn) btn.disabled=false; }
+    this.busy=false;
+  },
+  /* ---------- manual edit ---------- */
+  openForm(id){
+    const p=id?this.list().find(x=>x.id===id):null; if(id && !p) return; const E=Util.escapeHtml;
+    UI.openModal(id?'Edit L1 criteria':'Add L1 criteria',
+      '<div class="form-row"><div class="field"><label>Product name</label><input id="l1f_name" value="'+E(p?p.name:'')+'"></div><div class="field"><label>Category type</label><select id="l1f_q">'+['','Q1','Q2','Q3','Q4'].map(v=>'<option value="'+v+'" '+((p&&p.q===v)?'selected':'')+'>'+(v?v+' Category':'Not set')+'</option>').join('')+'</select></div></div>' +
+      '<div class="field"><label>Criteria <span class="hint">(one per line, written as Feature : Value)</span></label><textarea id="l1f_feat" rows="10">'+E(p?p.features.map(f=>f.name+' : '+f.value).join('\n'):'')+'</textarea></div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="GemL1.saveForm('+(id?'\''+id+'\'':'null')+')">Save</button>');
+  },
+  async saveForm(id){
+    if(this.busy) return; const name=GemTools.clean(document.getElementById('l1f_name').value); if(!name) return UI.toast('Enter the product name');
+    const feats=document.getElementById('l1f_feat').value.split('\n').map(l=>l.trim()).filter(Boolean).map(l=>{ const i=l.indexOf(':'); return i<0 ? {name:GemTools.clean(l), value:''} : {name:GemTools.clean(l.slice(0,i)), value:GemTools.clean(l.slice(i+1))}; }).filter(f=>f.name);
+    const list=Store.data.gemL1=Store.data.gemL1||[]; const clash=list.find(x=>x.id!==id && x.name.toLowerCase()===name.toLowerCase()); if(clash) return UI.toast('A product with this name already exists');
+    this.busy=true; const before=JSON.stringify(list), now=new Date().toISOString(), q=document.getElementById('l1f_q').value;
+    if(id) Object.assign(list.find(x=>x.id===id), {name,q,features:feats,updatedAt:now}); else list.push({id:GemTools.uid('L1'), name, q, insightsUrl:'', sellUrl:'', features:feats, addedAt:now, updatedAt:now});
+    if(!(await Store.save('gemL1'))){ Store.data.gemL1=JSON.parse(before); this.busy=false; return; }
+    this.busy=false; UI.closeModal(); UI.toast('Saved'); this.draw();
+  },
+  async remove(id){
+    const p=this.list().find(x=>x.id===id); if(!p || !confirm('Delete the L1 criteria of "'+p.name+'"?')) return;
+    const before=JSON.stringify(Store.data.gemL1); Store.data.gemL1=Store.data.gemL1.filter(x=>x.id!==id);
+    if(!(await Store.save('gemL1'))){ Store.data.gemL1=JSON.parse(before); return; }
+    UI.toast('Deleted'); this.draw();
+  },
+  async copyText(id){ const p=this.list().find(x=>x.id===id); if(!p) return; const t=p.name+(p.q?' ('+p.q+' Category)':'')+'\n'+p.features.map(f=>f.name+' : '+f.value).join('\n'); UI.toast((await GemTools.copy(t))?'Copied':'Could not copy'); },
+  exportXlsx(){
+    if(typeof XLSX==='undefined') return UI.toast('Excel library is still loading. Try again.');
+    const rows=this.filtered(); if(!rows.length) return UI.toast('Nothing to export');
+    const aoa=[['Product','Category type','Feature','L1 value']]; rows.forEach(p=>{ if(!p.features.length) aoa.push([p.name,p.q||'','','']); p.features.forEach(f=>aoa.push([p.name,p.q||'',f.name,f.value])); });
+    const ws=XLSX.utils.aoa_to_sheet(aoa); ws['!cols']=[{wch:34},{wch:14},{wch:46},{wch:34}]; const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'GeM L1 Criteria'); XLSX.writeFile(wb,'gem-l1-criteria-'+Util.todayISO()+'.xlsx');
+  }
+};
+Views.gemlisting = ()=>GemListing.render();
+Views.geml1 = ()=>GemL1.render();
 
 App.init();
 </script>
