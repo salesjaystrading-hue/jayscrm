@@ -3251,7 +3251,7 @@ function navBadgeCount(id){
    localStorage only (never in the business-data store). */
 /* Which version is running on this device, and a way to drop the saved copy of the app (service worker + cache)
    so that a newly uploaded index.html is really used. Login, settings and saved data are not touched. */
-const APP_BUILD = '2026-11-25 (build 63)';
+const APP_BUILD = '2026-11-25 (build 65)';
 const AppUpdate = {
   reload(){ location.reload(); },
   async refresh(){
@@ -13258,6 +13258,314 @@ Views.rate_docs = ()=>{ RatePDF.seedTerms().then(()=>RatePDF.render()); };
    only Admins (Auth.isAdmin(), the same check already used for Users &
    Settings) can see/edit everyone's records and approve/reject leave.
 ===================================================================== */
+/* ============================================================
+   AttSess - Attendance sessions (build 64). Explicit Check In / Check Out
+   stored in the relational table attendance_sessions and written ONLY
+   through the server functions att_check_in / att_check_out (idempotent,
+   one open session per person, no overlaps). GPS is optional and read only
+   at the moment of check-in / check-out. Actions made offline wait in a
+   local queue (Pending -> Synced / Failed) and are re-sent safely.
+   The legacy jays_attendance records are still kept in step so the older
+   Team / Leave / Summary tabs and the dashboard keep working.
+   ============================================================ */
+const AttSess = {
+  enabled: false, rows: [], team: [], loaded: false, _flushing: false, _timer: null, location: 'Office',
+  qKey(){ return 'jays_att_queue_' + (Auth.session ? Auth.session.id : 'x'); },
+  queue(){ try{ return JSON.parse(localStorage.getItem(this.qKey())||'[]'); }catch(e){ return []; } },
+  setQueue(q){ try{ localStorage.setItem(this.qKey(), JSON.stringify(q)); }catch(e){} },
+  gpsPref(){ try{ return localStorage.getItem('jays_att_gps')==='1'; }catch(e){ return false; } },
+  setGps(v){ try{ localStorage.setItem('jays_att_gps', v?'1':'0'); }catch(e){} },
+  newOp(p){ return p + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,10); },
+  fmtDur(ms){ if(!(ms>0)) return '0m'; const m = Math.floor(ms/60000); return Math.floor(m/60)+'h '+String(m%60).padStart(2,'0')+'m'; },
+  async init(){
+    if(!Auth.session) return;
+    await this.load();
+    await this.flush();
+  },
+  async load(){
+    try{
+      const { data, error } = await sb.from('attendance_sessions').select('*')
+        .eq('user_id', Auth.session.id).order('check_in', {ascending:false}).limit(120);
+      if(error) throw error;
+      this.rows = data || []; this.enabled = true; this.loaded = true;
+      if(Auth.isAdmin()) await this.loadOpenTeam();
+    }catch(e){ console.warn('AttSess.load failed', e); if(!this.loaded) this.enabled = false; }
+  },
+  async loadOpenTeam(){
+    try{
+      const { data, error } = await sb.from('attendance_sessions').select('*').is('check_out', null).eq('incomplete', false).order('check_in');
+      if(!error) this.team = data || [];
+    }catch(e){}
+  },
+  /* effective state = server rows + actions still waiting in the queue */
+  state(){
+    const q = this.queue();
+    const open = this.rows.find(r=>!r.check_out && !r.incomplete);
+    const pin = q.find(x=>x.kind==='in' && x.status!=='Failed');
+    const pout = q.find(x=>x.kind==='out' && x.status!=='Failed');
+    let cur = null, pending = false;
+    if(open && !pout) cur = open;
+    else if(open && pout){ cur = null; pending = true; }
+    else if(!open && pin && !pout){ cur = { check_in: pin.at, location: pin.args.p_location, _local:true }; pending = true; }
+    return { cur, pending, q };
+  },
+  gps(){
+    return new Promise(res=>{
+      if(!navigator.geolocation){ res(null); return; }
+      let done = false; const fin = v=>{ if(!done){ done = true; res(v); } };
+      setTimeout(()=>fin(null), 9000);
+      try{
+        navigator.geolocation.getCurrentPosition(
+          p=>fin({ lat:p.coords.latitude, lng:p.coords.longitude, acc:p.coords.accuracy, at:new Date(p.timestamp).toISOString() }),
+          ()=>fin(null), { enableHighAccuracy:false, timeout:8000, maximumAge:60000 });
+      }catch(e){ fin(null); }
+    });
+  },
+  async act(kind){
+    if(this._busy) return; this._busy = true;
+    try{
+      const st = this.state();
+      if(kind==='in' && st.cur){ UI.toast('You are already checked in'); return; }
+      if(kind==='out' && !st.cur){ UI.toast('You are not checked in'); return; }
+      const g = this.gpsPref() ? await this.gps() : null;
+      const at = new Date().toISOString();
+      const a = { p_op_id: this.newOp(kind==='in'?'ci':'co'), p_at: at };
+      if(g){ a.p_lat = g.lat; a.p_lng = g.lng; a.p_acc = g.acc; a.p_gps_at = g.at; }
+      if(kind==='in'){
+        a.p_location = this.location;
+        const pu = document.getElementById('attPurpose'); if(pu && pu.value.trim()) a.p_purpose = pu.value.trim().slice(0,300);
+      }
+      const q = this.queue(); q.push({ id:a.p_op_id, kind, args:a, at, status:'Pending', err:'' }); this.setQueue(q);
+      this.render();
+      await this.flush();
+      if(this.gpsPref() && !g) UI.toast('Location not available - saved without GPS');
+    } finally { this._busy = false; this.render(); }
+  },
+  async flush(){
+    if(this._flushing) return; this._flushing = true;
+    try{
+      let q = this.queue(), changed = false;
+      for(const item of q){
+        if(item.status==='Failed') continue;
+        if(!navigator.onLine) break;
+        const fn = item.kind==='in' ? 'att_check_in' : 'att_check_out';
+        let res;
+        try{ res = await sb.rpc(fn, item.args); }catch(e){ res = { error:{ message:String(e&&e.message||e) } }; }
+        if(res.error){
+          const code = res.error.code;
+          if(!code){ break; }                                   /* network / server busy: keep Pending, retry later */
+          item.status = 'Failed'; item.err = res.error.message || 'Rejected'; changed = true;
+          UI.toast('Attendance not saved: ' + item.err);
+        } else {
+          item.status = 'Synced'; changed = true;
+          this._mirror(item.kind, res.data);
+        }
+      }
+      if(changed){
+        q = q.filter(x=>x.status!=='Synced'); this.setQueue(q);
+        await this.load();
+      }
+    } finally { this._flushing = false; }
+    if(UI.currentView==='attendance') Attendance.render();
+  },
+  dismissFailed(id){ this.setQueue(this.queue().filter(x=>x.id!==id)); this.render(); },
+  /* keep the legacy per-day record in step (best effort, never blocks the real session) */
+  async _mirror(kind, row){
+    try{
+      if(!row || !Auth.session) return;
+      const day = row.work_date;
+      let rec = Store.data.attendance.find(a=>a.userId===Auth.session.id && a.date===day);
+      if(kind==='in'){
+        if(rec) return;
+        Store.data.attendance.unshift({ id: Util.uid('ATT', Store.data.attendance), userId:Auth.session.id, username:Auth.session.username,
+          name:Auth.session.name||Auth.session.username, date:day, loginTime:row.check_in, logoutTime:'', location:row.location,
+          status:'Present', editedBy:'', notes:'' });
+      } else {
+        if(!rec) return; rec.logoutTime = row.check_out;
+      }
+      await Store.save('attendance');
+    }catch(e){ console.warn('attendance mirror failed (non-blocking)', e); }
+  },
+  setLoc(l){ this.location = l; this.render(); },
+  toggleGps(el){ this.setGps(el.checked); },
+  render(){ if(UI.currentView==='attendance') Attendance.render(); },
+  tick(){
+    clearInterval(this._timer);
+    this._timer = setInterval(()=>{
+      const el = document.getElementById('attDur'); if(!el){ clearInterval(this._timer); return; }
+      const t = Number(el.getAttribute('data-since')); el.textContent = AttSess.fmtDur(Date.now()-t);
+    }, 30000);
+  },
+  rowHTML(r){
+    const dur = r.incomplete ? '<span class="cell-mute">No check-out recorded</span>' : r.check_out ? this.fmtDur(new Date(r.check_out)-new Date(r.check_in)) : '<span class="badge badge-green">Active</span>';
+    const gps = (r.in_lat!=null||r.out_lat!=null) ? ' <span title="GPS saved">&#128205;</span>' : '';
+    return '<tr><td class="cell-main">'+Util.fmtDate(r.work_date)+'</td><td>'+Util.escapeHtml(r.location)+gps+'</td>' +
+      '<td class="cell-mute">'+Util.fmtDateTime(r.check_in)+'</td><td class="cell-mute">'+(r.check_out?Util.fmtDateTime(r.check_out):'-')+'</td><td>'+dur+'</td></tr>';
+  },
+  totals(){
+    const now = new Date(), iso = Util.todayISO();
+    const wk = new Date(now); wk.setDate(wk.getDate()-((wk.getDay()+6)%7)); const wkISO = Util.isoLocal(wk);
+    const mo = iso.slice(0,7); let d=0,w=0,m=0;
+    this.rows.forEach(r=>{
+      if(r.incomplete) return; const ms = (r.check_out?new Date(r.check_out):now) - new Date(r.check_in); if(!(ms>0)) return;
+      if(r.work_date===iso) d+=ms; if(r.work_date>=wkISO) w+=ms; if(r.work_date.slice(0,7)===mo) m+=ms;
+    });
+    return { d, w, m };
+  },
+  sessionsTable(limit){
+    const list = this.rows.slice(0, limit||30);
+    return '<div class="table-wrap"><table><thead><tr><th>Date</th><th>Where</th><th>Check In</th><th>Check Out</th><th>Duration</th></tr></thead><tbody>' +
+      (list.length ? list.map(r=>this.rowHTML(r)).join('') : '<tr><td colspan="5" class="cell-mute" style="text-align:center;padding:18px;">No check-ins yet</td></tr>') +
+      '</tbody></table></div>';
+  },
+  renderToday(){
+    const st = this.state(), cur = st.cur, t = this.totals();
+    const btn = (l,ic)=>'<button class="btn '+(this.location===l?'btn-primary':'btn-outline')+'" style="flex:1;padding:16px 6px;" onclick="AttSess.setLoc(\''+l+'\')">'+ic+'<br>'+l+'</button>';
+    let h = '<div class="card card-pad" style="max-width:520px;margin-bottom:14px;"><h3 style="margin:0 0 10px;font-size:14px;">Today &middot; '+Util.fmtDate(Util.todayISO())+'</h3>';
+    if(cur){
+      h += '<div style="display:flex;flex-direction:column;gap:8px;font-size:13.5px;">' +
+        '<div><span class="badge badge-green">Checked in</span>'+(st.pending?' <span class="badge badge-orange">Pending sync</span>':'')+'</div>' +
+        '<div><span class="hint">Working from:</span> <b>'+Util.escapeHtml(cur.location)+'</b></div>' +
+        '<div><span class="hint">Checked in at:</span> '+Util.fmtDateTime(cur.check_in)+'</div>' +
+        '<div><span class="hint">Working time:</span> <b id="attDur" data-since="'+new Date(cur.check_in).getTime()+'">'+this.fmtDur(Date.now()-new Date(cur.check_in))+'</b></div>' +
+        '<div class="field" style="margin:0;"><label style="display:flex;gap:6px;align-items:center;font-weight:600;"><input type="checkbox" '+(this.gpsPref()?'checked':'')+' onchange="AttSess.toggleGps(this)"> Save my location when I check out (optional)</label></div>' +
+        '<button class="btn btn-primary" style="padding:14px;" onclick="AttSess.act(\'out\')">Check Out</button></div>';
+    } else {
+      h += '<div class="hint" style="margin-bottom:8px;">'+(st.pending?'Check-out is waiting to sync.':'You are not checked in. Choose where you are working:')+'</div>' +
+        '<div style="display:flex;gap:10px;margin-bottom:10px;">'+btn('Office','&#127970;')+btn('Home','&#127968;')+btn('Field','&#128663;')+'</div>' +
+        (this.location==='Field' ? '<div class="field"><label>Visit / purpose (optional)</label><input id="attPurpose" maxlength="300" placeholder="e.g. site visit, customer meeting"></div>' : '') +
+        '<div class="field" style="margin:0 0 10px;"><label style="display:flex;gap:6px;align-items:center;font-weight:600;"><input type="checkbox" '+(this.gpsPref()?'checked':'')+' onchange="AttSess.toggleGps(this)"> Save my location when I check in (optional)</label></div>' +
+        '<button class="btn btn-primary" style="padding:14px;width:100%;" onclick="AttSess.act(\'in\')">Check In</button>';
+    }
+    h += '<div class="hint" style="margin-top:10px;">Signing out of the CRM does not check you out. Location is read only at the moment you tap Check In / Check Out.</div></div>';
+    const q = st.q;
+    if(q.length){
+      h += '<div class="card card-pad" style="max-width:520px;margin-bottom:14px;"><h3 style="margin:0 0 8px;font-size:13px;">Sync status</h3>' +
+        q.map(x=>'<div style="display:flex;justify-content:space-between;gap:8px;font-size:12.5px;padding:4px 0;"><span>'+(x.kind==='in'?'Check In':'Check Out')+' &middot; '+Util.fmtDateTime(x.at)+'</span>' +
+          (x.status==='Failed' ? '<span><span class="badge badge-red" title="'+Util.escapeHtml(x.err)+'">Failed</span> <button class="icon-btn" onclick="AttSess.dismissFailed(\''+x.id+'\')">&#10005;</button></span>'
+            : '<span class="badge badge-orange">Pending</span>')+'</div>').join('') +
+        (q.some(x=>x.status==='Pending') ? '<button class="btn btn-outline btn-sm" style="margin-top:6px;" onclick="AttSess.flush()">Sync now</button>' : '') + '</div>';
+    }
+    h += '<div class="card card-pad" style="max-width:520px;margin-bottom:14px;display:flex;gap:18px;flex-wrap:wrap;font-size:13px;">' +
+      '<div><span class="hint">Today</span><br><b>'+this.fmtDur(t.d)+'</b></div><div><span class="hint">This week</span><br><b>'+this.fmtDur(t.w)+'</b></div><div><span class="hint">This month</span><br><b>'+this.fmtDur(t.m)+'</b></div></div>';
+    if(Auth.isAdmin() && this.team.length){
+      h += '<div class="card card-pad" style="max-width:520px;margin-bottom:14px;"><h3 style="margin:0 0 8px;font-size:13px;">Checked in now ('+this.team.length+')</h3>' +
+        this.team.map(r=>{ const u = Store.data.users.find(x=>x.id===r.user_id);
+          return '<div style="font-size:12.5px;padding:3px 0;">'+Util.escapeHtml(Attendance.userLabel(u))+' &middot; '+Util.escapeHtml(r.location)+' &middot; since '+Util.fmtDateTime(r.check_in)+'</div>'; }).join('') + '</div>';
+    }
+    h += '<div class="card"><div class="card-pad"><h3 style="margin:0;font-size:14px;">Recent check-ins</h3></div>'+this.sessionsTable(30)+'</div>';
+    setTimeout(()=>AttSess.tick(),0);
+    return h;
+  }
+};
+window.addEventListener('online', ()=>{ try{ if(AttSess.enabled) AttSess.flush(); }catch(e){} });
+
+/* ============================================================
+   AttAdmin - Admin view of check-in records (build 65): filters, monthly
+   summary, add a missed record, correct or delete with a mandatory reason.
+   Every change is made by a server function that also writes an audit row.
+   ============================================================ */
+const AttAdmin = {
+  f: { userId:'', month:'', location:'' }, rows: [], audit: [], loaded: false, loading: false, showAudit: false, err: '',
+  month(){ return this.f.month || Util.todayISO().slice(0,7); },
+  label(uid){ const u = Store.data.users.find(x=>x.id===uid); return Attendance.userLabel(u); },
+  toLocalInput(iso){ if(!iso) return ''; const d = new Date(iso); const z = n=>String(n).padStart(2,'0'); return d.getFullYear()+'-'+z(d.getMonth()+1)+'-'+z(d.getDate())+'T'+z(d.getHours())+':'+z(d.getMinutes()); },
+  async load(){
+    this.loading = true; this.err = '';
+    try{
+      const m = this.month(); const from = m+'-01';
+      const d = new Date(from+'T00:00:00'); d.setMonth(d.getMonth()+1); const to = Util.isoLocal(d);
+      let q = sb.from('attendance_sessions').select('*').gte('work_date', from).lt('work_date', to).order('check_in', {ascending:false}).limit(3000);
+      const { data, error } = await q; if(error) throw error;
+      this.rows = data || [];
+      const a = await sb.from('attendance_audit').select('*').order('at', {ascending:false}).limit(100);
+      this.audit = (a && a.data) || [];
+      this.loaded = true;
+    }catch(e){ this.err = String(e && e.message || e); }
+    this.loading = false;
+    if(UI.currentView==='attendance' && Attendance.tab==='sessions') Attendance.render();
+  },
+  filtered(){ return this.rows.filter(r=>(!this.f.userId||r.user_id===this.f.userId) && (!this.f.location||r.location===this.f.location)); },
+  setF(k,v){ this.f[k] = v; if(k==='month'){ this.loaded=false; this.load(); Attendance.render(); } else Attendance.render(); },
+  summary(list){
+    const by = {};
+    list.forEach(r=>{ const o = by[r.user_id] = by[r.user_id] || { uid:r.user_id, days:new Set(), ms:0, open:0, inc:0, Office:0, Home:0, Field:0 };
+      o.days.add(r.work_date); o[r.location]++;
+      if(r.incomplete) o.inc++; else if(!r.check_out) o.open++; else o.ms += new Date(r.check_out)-new Date(r.check_in); });
+    return Object.values(by).sort((a,b)=>this.label(a.uid).localeCompare(this.label(b.uid)));
+  },
+  html(){
+    if(!this.loaded){ if(!this.loading) this.load(); return '<div class="card card-pad">'+(this.err ? 'Could not load: '+Util.escapeHtml(this.err)+' <button class="btn btn-outline btn-sm" onclick="AttAdmin.load()">Retry</button>' : 'Loading check-in records...')+'</div>'; }
+    const list = this.filtered(), info = Paginate.slice('attendance_sess_admin', list), sm = this.summary(list);
+    const opt = (v,l,sel)=>'<option value="'+v+'" '+(sel?'selected':'')+'>'+l+'</option>';
+    let h = '<div class="card card-pad" style="margin-bottom:14px;"><div class="form-row" style="align-items:end;">' +
+      '<div class="field"><label>Employee</label><select onchange="AttAdmin.setF(\'userId\',this.value)">'+opt('','All',!this.f.userId)+Store.data.users.map(u=>opt(u.id,Util.escapeHtml(Attendance.userLabel(u)),this.f.userId===u.id)).join('')+'</select></div>' +
+      '<div class="field"><label>Month</label><input type="month" value="'+this.month()+'" onchange="AttAdmin.setF(\'month\',this.value)"></div>' +
+      '<div class="field"><label>Where</label><select onchange="AttAdmin.setF(\'location\',this.value)">'+opt('','All',!this.f.location)+['Office','Home','Field'].map(l=>opt(l,l,this.f.location===l)).join('')+'</select></div></div>' +
+      '<div style="display:flex;gap:8px;flex-wrap:wrap;"><button class="btn btn-primary btn-sm" onclick="AttAdmin.openForm(null)">&#65291; Add missed record</button>' +
+      '<button class="btn btn-outline btn-sm" onclick="AttAdmin.exportCSV()">Export</button>' +
+      '<button class="btn btn-outline btn-sm" onclick="AttAdmin.showAudit=!AttAdmin.showAudit;Attendance.render()">'+(this.showAudit?'Hide':'Show')+' change history</button></div></div>';
+    h += '<div class="card" style="margin-bottom:14px;"><div class="card-pad"><h3 style="margin:0;font-size:14px;">Monthly summary</h3></div><div class="table-wrap"><table><thead><tr><th>Employee</th><th>Days</th><th>Total time</th><th>Office</th><th>Home</th><th>Field</th><th>Missing check-out</th></tr></thead><tbody>' +
+      (sm.length ? sm.map(o=>'<tr><td class="cell-main">'+Util.escapeHtml(this.label(o.uid))+'</td><td>'+o.days.size+'</td><td>'+AttSess.fmtDur(o.ms)+'</td><td>'+o.Office+'</td><td>'+o.Home+'</td><td>'+o.Field+'</td><td>'+(o.inc+o.open||'-')+'</td></tr>').join('') : '<tr><td colspan="7" class="cell-mute" style="text-align:center;padding:16px;">No records for this month</td></tr>') +
+      '</tbody></table></div></div>';
+    h += '<div class="card"><div class="card-pad"><h3 style="margin:0;font-size:14px;">Check-in records ('+list.length+')</h3></div><div class="table-wrap"><table><thead><tr><th>Date</th><th>Employee</th><th>Where</th><th>Check In</th><th>Check Out</th><th>Time</th><th></th></tr></thead><tbody>' +
+      (info.pageItems.length ? info.pageItems.map(r=>'<tr><td class="cell-main">'+Util.fmtDate(r.work_date)+'</td><td>'+Util.escapeHtml(this.label(r.user_id))+'</td><td>'+Util.escapeHtml(r.location)+((r.in_lat!=null||r.out_lat!=null)?' &#128205;':'')+'</td>' +
+        '<td class="cell-mute">'+Util.fmtDateTime(r.check_in)+'</td><td class="cell-mute">'+(r.check_out?Util.fmtDateTime(r.check_out):'-')+'</td>' +
+        '<td>'+(r.incomplete?'<span class="cell-mute">No check-out</span>':r.check_out?AttSess.fmtDur(new Date(r.check_out)-new Date(r.check_in)):'<span class="badge badge-green">Active</span>')+(r.source!=='app'?' <span class="badge badge-blue" title="'+Util.escapeHtml(r.note||'')+'">'+(r.source==='legacy'?'earlier':r.source)+'</span>':'')+'</td>' +
+        '<td><button class="icon-btn" title="Correct" onclick="AttAdmin.openForm(\''+r.id+'\')">&#9998;</button><button class="icon-btn" title="Delete" onclick="AttAdmin.openDelete(\''+r.id+'\')">&#128465;</button></td></tr>').join('') : '<tr><td colspan="7" class="cell-mute" style="text-align:center;padding:16px;">No records</td></tr>') +
+      '</tbody></table></div>'+Paginate.controlsHTML('attendance_sess_admin', info, "Attendance.render()")+'</div>';
+    if(this.showAudit){
+      h += '<div class="card" style="margin-top:14px;"><div class="card-pad"><h3 style="margin:0;font-size:14px;">Change history (latest 100)</h3></div><div class="table-wrap"><table><thead><tr><th>When</th><th>Action</th><th>Employee</th><th>By</th><th>Reason</th></tr></thead><tbody>' +
+        (this.audit.length ? this.audit.map(a=>'<tr><td class="cell-mute">'+Util.fmtDateTime(a.at)+'</td><td>'+Util.escapeHtml(a.action)+'</td><td>'+Util.escapeHtml(this.label(a.user_id))+'</td><td>'+Util.escapeHtml(this.label(a.by_user))+'</td><td>'+Util.escapeHtml(a.reason)+'</td></tr>').join('') : '<tr><td colspan="5" class="cell-mute" style="text-align:center;padding:16px;">No changes yet</td></tr>') +
+        '</tbody></table></div></div>';
+    }
+    return h;
+  },
+  openForm(id){
+    const r = id ? this.rows.find(x=>x.id===id) : null;
+    UI.openModal(r ? 'Correct check-in record' : 'Add missed record',
+      '<div class="field"><label>Employee *</label>'+(r ? '<input value="'+Util.escapeHtml(this.label(r.user_id))+'" disabled>' :
+        '<select id="aa_user"><option value="">Select...</option>'+Store.data.users.map(u=>'<option value="'+u.id+'">'+Util.escapeHtml(Attendance.userLabel(u))+'</option>').join('')+'</select>')+'</div>' +
+      '<div class="field"><label>Where *</label><select id="aa_loc">'+['Office','Home','Field'].map(l=>'<option '+(r&&r.location===l?'selected':'')+'>'+l+'</option>').join('')+'</select></div>' +
+      '<div class="form-row"><div class="field"><label>Check In *</label><input type="datetime-local" id="aa_in" value="'+(r?this.toLocalInput(r.check_in):'')+'"></div>' +
+      '<div class="field"><label>Check Out'+(r&&!r.check_out?'':' *')+'</label><input type="datetime-local" id="aa_out" value="'+(r?this.toLocalInput(r.check_out):'')+'"></div></div>' +
+      '<div class="field"><label>Reason * (kept in the change history)</label><input id="aa_reason" maxlength="300" placeholder="e.g. forgot to check out, phone had no network"></div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="AttAdmin.save('+(id?"'"+id+"'":'null')+')">Save</button>');
+  },
+  async save(id){
+    const g = k=>{ const e = document.getElementById(k); return e ? e.value : ''; };
+    const inV = g('aa_in'), outV = g('aa_out'), reason = g('aa_reason').trim();
+    const existing = id ? this.rows.find(x=>x.id===id) : null;
+    const uid = existing ? existing.user_id : g('aa_user');
+    if(!uid){ UI.toast('Select the employee'); return; }
+    if(!inV){ UI.toast('Enter the check-in time'); return; }
+    if(reason.length<3){ UI.toast('Enter a reason'); return; }
+    const { error } = await sb.rpc('att_admin_save', { p_id:id||null, p_user:uid, p_location:g('aa_loc'),
+      p_check_in:new Date(inV).toISOString(), p_check_out: outV ? new Date(outV).toISOString() : null, p_reason:reason });
+    if(error){ UI.toast('Not saved: '+error.message); return; }
+    UI.closeModal(); UI.toast('Saved'); try{ await Activity.log('Attendance corrected', this.label(uid)+' - '+reason); }catch(e){}
+    this.loaded = false; this.load(); Attendance.render();
+  },
+  openDelete(id){
+    const r = this.rows.find(x=>x.id===id); if(!r) return;
+    UI.openModal('Delete check-in record', '<div class="hint" style="margin-bottom:8px;">'+Util.escapeHtml(this.label(r.user_id))+' &middot; '+Util.fmtDateTime(r.check_in)+'</div><div class="field"><label>Reason * (kept in the change history)</label><input id="aa_reason" maxlength="300"></div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="AttAdmin.doDelete(\''+id+'\')">Delete</button>');
+  },
+  async doDelete(id){
+    const reason = (document.getElementById('aa_reason')||{value:''}).value.trim();
+    if(reason.length<3){ UI.toast('Enter a reason'); return; }
+    const { error } = await sb.rpc('att_admin_delete', { p_id:id, p_reason:reason });
+    if(error){ UI.toast('Not deleted: '+error.message); return; }
+    UI.closeModal(); UI.toast('Deleted (kept in change history)'); this.loaded = false; this.load(); Attendance.render();
+  },
+  exportCSV(){
+    const list = this.filtered(); if(!list.length){ UI.toast('Nothing to export'); return; }
+    Reports.download(list.map(r=>({ Date:r.work_date, Employee:this.label(r.user_id), Where:r.location, 'Check In':Util.fmtDateTime(r.check_in),
+      'Check Out': r.check_out?Util.fmtDateTime(r.check_out):'', 'Minutes': (r.check_out&&!r.incomplete)?Math.round((new Date(r.check_out)-new Date(r.check_in))/60000):'',
+      Note: r.incomplete?'No check-out recorded':'', Source:r.source, 'GPS in': r.in_lat!=null?(r.in_lat+','+r.in_lng):'', 'GPS out': r.out_lat!=null?(r.out_lat+','+r.out_lng):'' })), 'checkin-records');
+  }
+};
+
 const Attendance = {
   tab: 'today',
   teamFilter: { userId:'', month:'', status:'' },
@@ -13283,8 +13591,15 @@ const Attendance = {
   checkFirstLoginToday(){
     if(!Auth.session) return;
     if(Store.data.loadFailed && Store.data.loadFailed['jays_attendance']) return;
-    if(this.todayRecord()) return;              // already recorded today - never re-ask
-    setTimeout(()=>this.promptWorkLocation(), 400);
+    AttSess.init().then(()=>{
+      if(AttSess.enabled){
+        const st = AttSess.state();
+        if(!st.cur && !AttSess.rows.some(r=>r.work_date===Util.todayISO())) UI.toast('Good morning - remember to Check In (Attendance > Today)');
+        return;
+      }
+      if(this.todayRecord()) return;              // sessions unavailable: fall back to the old once-a-day prompt
+      setTimeout(()=>this.promptWorkLocation(), 400);
+    }).catch(()=>{});
   },
   promptWorkLocation(){
     if(this.todayRecord()) return;               // e.g. an admin already logged it for them
@@ -13323,6 +13638,7 @@ const Attendance = {
      break the actual sign-out, so every failure mode is swallowed here. */
   async markLogoutTime(){
     try{
+      if(AttSess.enabled) return;                 // build 64: signing out is NOT a check-out
       const rec = this.todayRecord();
       if(!rec || rec.logoutTime) return;
       rec.logoutTime = new Date().toISOString();
@@ -13516,7 +13832,7 @@ const Attendance = {
   switcherHTML(){
     const tabs = [['today','&#128197; Today'],['my','&#128203; My Attendance'],['leave','&#9995; Leave']];
     if(Auth.isAdmin()){
-      tabs.push(['team','&#128101; Team Attendance'],['approvals','&#9989; Leave Approvals'],['reports','&#128202; Reports']);
+      tabs.push(['sessions','&#128338; Check-in Records'],['team','&#128101; Team Attendance'],['approvals','&#9989; Leave Approvals'],['reports','&#128202; Reports']);
     } else {
       tabs.push(['reports','&#128202; My Reports']);
     }
@@ -13528,7 +13844,9 @@ const Attendance = {
   },
   render(){
     if(this.tab==='team' || this.tab==='approvals') if(!Auth.isAdmin()) this.tab = 'today';
+    if(this.tab==='sessions' && (!Auth.isAdmin() || !AttSess.enabled)) this.tab = 'today';
     const body = this.tab==='today' ? this.renderToday()
+      : this.tab==='sessions' ? AttAdmin.html()
       : this.tab==='my' ? this.renderMy()
       : this.tab==='leave' ? this.renderLeave()
       : this.tab==='team' ? this.renderTeam()
@@ -13538,6 +13856,10 @@ const Attendance = {
   },
 
   renderToday(){
+    if(AttSess.enabled) return AttSess.renderToday();
+    return this.renderTodayLegacy();
+  },
+  renderTodayLegacy(){
     const rec = this.todayRecord();
     const s = Auth.session;
     return '<div class="card card-pad" style="max-width:480px;">' +
@@ -13559,8 +13881,9 @@ const Attendance = {
     const uid = Auth.session.id;
     const list = Store.data.attendance.filter(a=>a.userId===uid).sort((a,b)=>b.date.localeCompare(a.date));
     const info = Paginate.slice('attendance_my', list);
-    return '<div class="card"><div class="card-pad" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">' +
-      '<h3 style="margin:0;font-size:14px;">My Attendance</h3>' +
+    return (AttSess.enabled ? '<div class="card" style="margin-bottom:14px;"><div class="card-pad"><h3 style="margin:0;font-size:14px;">My check-ins (new)</h3></div>'+AttSess.sessionsTable(60)+'</div>' : '') +
+      '<div class="card"><div class="card-pad" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">' +
+      '<h3 style="margin:0;font-size:14px;">My Attendance'+(AttSess.enabled?' (earlier records)':'')+'</h3>' +
       '<button class="btn btn-outline btn-sm" onclick="Attendance.exportAttendanceCSV(Store.data.attendance.filter(a=>a.userId===\''+uid+'\'))">Export</button>' +
       '</div>' +
       '<div class="table-wrap"><table><thead><tr><th>Date</th><th>Login Time</th><th>Logout Time</th><th>Location</th><th>Status</th></tr></thead><tbody>' +
