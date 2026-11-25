@@ -3251,7 +3251,7 @@ function navBadgeCount(id){
    localStorage only (never in the business-data store). */
 /* Which version is running on this device, and a way to drop the saved copy of the app (service worker + cache)
    so that a newly uploaded index.html is really used. Login, settings and saved data are not touched. */
-const APP_BUILD = '2026-11-25 (build 66)';
+const APP_BUILD = '2026-11-25 (build 70)';
 const AppUpdate = {
   reload(){ location.reload(); },
   async refresh(){
@@ -11866,16 +11866,19 @@ const RatePDF = {
     if(s.companyLogo){
       try{
         const props = doc.getImageProperties(s.companyLogo);
-        const maxW = 52, maxH = 26;
+        const maxW = 68, maxH = 34;
         const scale = Math.min(maxW/props.width, maxH/props.height);
         logoW = props.width*scale; logoH = props.height*scale;
         doc.addImage(s.companyLogo,'JPEG',M,y,logoW,logoH);
       }catch(e){ console.warn('logo skipped',e); }
     }
     const tx = logoW ? M + logoW + 6 : M;
-    doc.setFont('helvetica','bold'); doc.setFontSize(15);
+    doc.setFont('helvetica','bold');
+    const _cn = String(s.companyName||'JAYS TRADING AND BUSINESS SOLUTION').toUpperCase();
+    let _fs = 15; doc.setFontSize(_fs);
+    while(_fs > 9 && doc.getTextWidth(_cn) > PW - tx - M){ _fs -= 0.5; doc.setFontSize(_fs); }   /* a bigger logo leaves less room: shrink the name to fit on one line */
     doc.setTextColor(accent[0],accent[1],accent[2]);
-    doc.text(String(s.companyName||'JAYS TRADING AND BUSINESS SOLUTION').toUpperCase(), tx, y + Math.max(6, logoH/2 + 2));
+    doc.text(_cn, tx, y + Math.max(6, logoH/2 + 2));
     let hy = y + Math.max(11, logoH + 3);
     if(s.companySlogan){
       doc.setFont('helvetica','italic'); doc.setFontSize(8.2); doc.setTextColor(120);
@@ -12188,6 +12191,7 @@ const RatePDF = {
        A card grid, one per item, auto-flowing across as many pages as the
        item count needs - never a fixed page count. A missing image gets a
        clean placeholder box instead of ever breaking the PDF. --- */
+    let galleryEnd = 0;       /* bottom (mm) of the last photo card, so a short gallery can share its page with the closing section */
     if(d.items.length){
       doc.addPage();
       let gy = 24;
@@ -12199,7 +12203,7 @@ const RatePDF = {
 
       const cols = 3, gap = 6;
       const cardW = (PW - M*2 - gap*(cols-1)) / cols;
-      const cardH = 62, imgH = 34;
+      const cardH = 68, imgH = 43;
       const maxRowsPerPage = Math.max(1, Math.floor((PH - gy - 18) / (cardH+gap)));
       let col = 0, row = 0;
 
@@ -12211,7 +12215,18 @@ const RatePDF = {
         doc.roundedRect(cx, cy, cardW, cardH, 1.5, 1.5, 'S');
         let imageDrawn = false;
         if(it.imageUrl){
-          try{ doc.addImage(it.imageUrl, 'JPEG', cx+3, cy+3, cardW-6, imgH); imageDrawn = true; }
+          try{
+            /* keep the photo's own proportions: fit inside the box and centre it (never stretch) */
+            const bw = cardW-6; let iw = bw, ih = imgH, ix = cx+3, iy = cy+3;
+            try{
+              const pr = doc.getImageProperties(it.imageUrl);
+              if(pr && pr.width > 0 && pr.height > 0){
+                const k = Math.min(bw/pr.width, imgH/pr.height);
+                iw = pr.width*k; ih = pr.height*k; ix = cx+3 + (bw-iw)/2; iy = cy+3 + (imgH-ih)/2;
+              }
+            }catch(e){ /* unknown size: fall back to the full box */ }
+            doc.addImage(it.imageUrl, 'JPEG', ix, iy, iw, ih); imageDrawn = true;
+          }
           catch(e){ console.warn('product gallery image skipped', e); }
         }
         if(!imageDrawn){
@@ -12230,7 +12245,8 @@ const RatePDF = {
           doc.splitTextToSize(specLine, cardW-6).slice(0,1).forEach(l=>doc.text(l, cx+3, ty));
         }
         doc.setFont('helvetica','bold'); doc.setFontSize(7); doc.setTextColor(accent[0],accent[1],accent[2]);
-        doc.text('Qty: '+this.num(it.qty)+' '+(it.unit||'Nos')+'  \u2022  '+this.rupee(it.rate), cx+3, cy+cardH-3);
+        doc.text('Qty: '+this.num(it.qty)+' '+(it.unit||'Nos')+'  \u2022  Rs. '+this.money(it.rate), cx+3, cy+cardH-3);   /* the PDF font has no rupee sign: write Rs. like the rest of the PDF */
+        galleryEnd = cy + cardH;
         col++;
         if(col>=cols){ col=0; row++; }
       });
@@ -12242,8 +12258,24 @@ const RatePDF = {
        it. No stock photograph - a geometric navy/orange band built from
        the company's own real, already-configured details, so it renders
        correctly even with zero image assets on file. --- */
-    doc.addPage();
-    let fy = 24;
+    /* Few product photos? Put the closing section straight under the last photo
+       row instead of on a mostly empty new page - but only when it all fits. */
+    let mergeAtY = 0, compactBand = false;
+    if(galleryEnd){
+      const _terms = Store.data.rateTerms.filter(x=>d.termIds.includes(x.id) && x.isActive !== false);
+      doc.setFont('helvetica','normal'); doc.setFontSize(8.5);
+      let est = 10 + 5 + 5.5 + 8 + 16 + 4;
+      est += _terms.length ? _terms.reduce((a,tm,i)=>a + doc.splitTextToSize((i+1)+'. '+tm.title+': '+tm.body, PW-M*2).length*4.3, 0) : 4.3;
+      if(infoFields.length){
+        doc.setFontSize(8.3);
+        est += 10 + infoFields.reduce((a,[l,v])=>a + Math.max(5, doc.splitTextToSize(String(v), PW-M*2-42).length*4 + 1), 0);
+      }
+      const startY = galleryEnd + 9;
+      if(startY + est <= PH - 38 - 19) mergeAtY = startY;                                   /* fits with the full branded band */
+      else if(startY + est <= PH - 14 - 17){ mergeAtY = startY; compactBand = true; }       /* fits with a slim one-line brand strip */
+    }
+    let fy;
+    if(mergeAtY){ fy = mergeAtY; } else { doc.addPage(); fy = 24; }
     doc.setFont('helvetica','bold'); doc.setFontSize(13); doc.setTextColor(accent[0],accent[1],accent[2]);
     doc.text('TERMS & CONDITIONS', M, fy); fy += 3;
     doc.setDrawColor(accent[0],accent[1],accent[2]); doc.setLineWidth(0.5);
@@ -12251,7 +12283,7 @@ const RatePDF = {
 
     doc.setFont('helvetica','normal'); doc.setFontSize(8.5); doc.setTextColor(60);
     const closingTerms = Store.data.rateTerms.filter(x=>d.termIds.includes(x.id) && x.isActive !== false);
-    const bandH = 38;
+    const bandH = compactBand ? 12 : 38;     /* height reserved at the bottom for the brand band / slim strip */
     if(closingTerms.length){
       closingTerms.forEach((tm,i)=>{
         const line = (i+1) + '. ' + tm.title + ': ' + tm.body;
@@ -12306,7 +12338,18 @@ const RatePDF = {
        only - deliberately stops short of the universal footer zone below
        (drawn once, after every page exists) so that footer text always
        stays legible on a plain background on every page, including this one. */
-    if(!minimal){
+    if(!minimal && compactBand){
+      const sy = PH - bandH - 15;
+      doc.setFillColor(11,20,36); doc.rect(0, sy, PW, 12, 'F');
+      doc.setFillColor(accent[0],accent[1],accent[2]); doc.triangle(0, sy, 14, sy, 0, sy+12, 'F');
+      doc.setFont('helvetica','bold'); doc.setFontSize(8.5); doc.setTextColor(255);
+      doc.text(String(s.companyName||'JAYS TRADING AND BUSINESS SOLUTION').toUpperCase(), M, sy+5);
+      doc.setFont('helvetica','normal'); doc.setFontSize(6.8); doc.setTextColor(200);
+      const cl = [s.companyPhone, s.companyEmail].filter(Boolean).join('   \u2022   ');
+      if(cl) doc.text(cl, M, sy+9.2);
+      doc.setFont('helvetica','bold'); doc.setFontSize(7.4); doc.setTextColor(255);
+      doc.text('Your Trusted Partner in Business Growth', PW-M, sy+7.2, {align:'right'});
+    } else if(!minimal){
       const bandY = PH - bandH - 15;
       doc.setFillColor(11,20,36);
       doc.rect(0, bandY, PW, bandH, 'F');
@@ -12325,7 +12368,7 @@ const RatePDF = {
       doc.text('Your Trusted Partner', PW-M, bandY+9, {align:'right'});
       doc.text('in Business Growth', PW-M, bandY+14, {align:'right'});
       doc.setFont('helvetica','normal'); doc.setFontSize(6.8); doc.setTextColor(220);
-      ['Quality Products','Best Prices','Reliable Support'].forEach((t,i)=>doc.text('\u2713 '+t, PW-M, bandY+20+i*4.2, {align:'right'}));
+      ['Quality Products','Best Prices','Reliable Support'].forEach((t,i)=>doc.text('\u2022 '+t, PW-M, bandY+20+i*4.2, {align:'right'}));
     }
 
     /* --- footers: slim band + page numbers on every page --- */
