@@ -3251,7 +3251,7 @@ function navBadgeCount(id){
    localStorage only (never in the business-data store). */
 /* Which version is running on this device, and a way to drop the saved copy of the app (service worker + cache)
    so that a newly uploaded index.html is really used. Login, settings and saved data are not touched. */
-const APP_BUILD = '2026-11-25 (build 65)';
+const APP_BUILD = '2026-11-25 (build 66)';
 const AppUpdate = {
   reload(){ location.reload(); },
   async refresh(){
@@ -13280,6 +13280,7 @@ const AttSess = {
   async init(){
     if(!Auth.session) return;
     await this.load();
+    try{ AttReq.load(); }catch(e){}
     await this.flush();
   },
   async load(){
@@ -13396,11 +13397,12 @@ const AttSess = {
       const t = Number(el.getAttribute('data-since')); el.textContent = AttSess.fmtDur(Date.now()-t);
     }, 30000);
   },
-  rowHTML(r){
+  rowHTML(r, act){
     const dur = r.incomplete ? '<span class="cell-mute">No check-out recorded</span>' : r.check_out ? this.fmtDur(new Date(r.check_out)-new Date(r.check_in)) : '<span class="badge badge-green">Active</span>';
     const gps = (r.in_lat!=null||r.out_lat!=null) ? ' <span title="GPS saved">&#128205;</span>' : '';
     return '<tr><td class="cell-main">'+Util.fmtDate(r.work_date)+'</td><td>'+Util.escapeHtml(r.location)+gps+'</td>' +
-      '<td class="cell-mute">'+Util.fmtDateTime(r.check_in)+'</td><td class="cell-mute">'+(r.check_out?Util.fmtDateTime(r.check_out):'-')+'</td><td>'+dur+'</td></tr>';
+      '<td class="cell-mute">'+Util.fmtDateTime(r.check_in)+'</td><td class="cell-mute">'+(r.check_out?Util.fmtDateTime(r.check_out):'-')+'</td><td>'+dur+'</td>' +
+      (act ? '<td>'+((r.check_out||r.incomplete)?'<button class="btn btn-outline btn-sm" onclick="AttReq.openCorr(\''+r.id+'\')">Correct</button>':'')+'</td>' : '') + '</tr>';
   },
   totals(){
     const now = new Date(), iso = Util.todayISO();
@@ -13414,8 +13416,8 @@ const AttSess = {
   },
   sessionsTable(limit){
     const list = this.rows.slice(0, limit||30);
-    return '<div class="table-wrap"><table><thead><tr><th>Date</th><th>Where</th><th>Check In</th><th>Check Out</th><th>Duration</th></tr></thead><tbody>' +
-      (list.length ? list.map(r=>this.rowHTML(r)).join('') : '<tr><td colspan="5" class="cell-mute" style="text-align:center;padding:18px;">No check-ins yet</td></tr>') +
+    return '<div class="table-wrap"><table><thead><tr><th>Date</th><th>Where</th><th>Check In</th><th>Check Out</th><th>Duration</th>'+(AttReq.enabled?'<th></th>':'')+'</tr></thead><tbody>' +
+      (list.length ? list.map(r=>this.rowHTML(r, AttReq.enabled)).join('') : '<tr><td colspan="6" class="cell-mute" style="text-align:center;padding:18px;">No check-ins yet</td></tr>') +
       '</tbody></table></div>';
   },
   renderToday(){
@@ -13454,6 +13456,7 @@ const AttSess = {
           return '<div style="font-size:12.5px;padding:3px 0;">'+Util.escapeHtml(Attendance.userLabel(u))+' &middot; '+Util.escapeHtml(r.location)+' &middot; since '+Util.fmtDateTime(r.check_in)+'</div>'; }).join('') + '</div>';
     }
     h += '<div class="card"><div class="card-pad"><h3 style="margin:0;font-size:14px;">Recent check-ins</h3></div>'+this.sessionsTable(30)+'</div>';
+    if(AttReq.enabled) h += AttReq.myCorrHTML();
     setTimeout(()=>AttSess.tick(),0);
     return h;
   }
@@ -13563,6 +13566,156 @@ const AttAdmin = {
     Reports.download(list.map(r=>({ Date:r.work_date, Employee:this.label(r.user_id), Where:r.location, 'Check In':Util.fmtDateTime(r.check_in),
       'Check Out': r.check_out?Util.fmtDateTime(r.check_out):'', 'Minutes': (r.check_out&&!r.incomplete)?Math.round((new Date(r.check_out)-new Date(r.check_in))/60000):'',
       Note: r.incomplete?'No check-out recorded':'', Source:r.source, 'GPS in': r.in_lat!=null?(r.in_lat+','+r.in_lng):'', 'GPS out': r.out_lat!=null?(r.out_lat+','+r.out_lng):'' })), 'checkin-records');
+  }
+};
+
+/* ============================================================
+   AttReq - Correction requests + Leave (build 66). Both live in
+   relational tables and change only through server functions:
+   att_request_correction / att_cancel_correction / att_decide_correction
+   leave_apply / leave_cancel / leave_decide. Employees see only their own
+   rows; admins see all. An approved correction is applied by the server
+   (and logged in the change history). Approved full-day leave is also
+   mirrored into the older day records so the Summary tab stays right.
+   ============================================================ */
+const AttReq = {
+  enabled: false, leaves: [], corrs: [], loaded: false, _busy: false,
+  newOp(){ return 'lv-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,10); },
+  label(uid){ const u = Store.data.users.find(x=>x.id===uid); return Attendance.userLabel(u); },
+  async load(){
+    try{
+      const a = await sb.from('leave_requests').select('*').order('created_at', {ascending:false}).limit(500);
+      if(a.error) throw a.error;
+      const b = await sb.from('attendance_corrections').select('*').order('created_at', {ascending:false}).limit(500);
+      if(b.error) throw b.error;
+      this.leaves = a.data || []; this.corrs = b.data || []; this.enabled = true; this.loaded = true;
+    }catch(e){ console.warn('AttReq.load failed', e); if(!this.loaded) this.enabled = false; }
+    if(UI.currentView==='attendance') Attendance.render();
+  },
+  pendingCount(){ return this.leaves.filter(l=>l.status==='Pending').length + this.corrs.filter(c=>c.status==='Pending').length; },
+  badge(st){ return '<span class="badge badge-'+(st==='Approved'?'green':st==='Rejected'?'red':st==='Cancelled'?'gray':'amber')+'">'+st+'</span>'; },
+  halfLabel(h){ return h==='AM'?'First half':h==='PM'?'Second half':'Full day'; },
+  /* ---------- leave: employee ---------- */
+  leaveHTML(){
+    const uid = Auth.session.id, list = this.leaves.filter(l=>l.user_id===uid), today = Util.todayISO();
+    return '<div class="toolbar"><div class="toolbar-spacer"></div><button class="btn btn-primary btn-sm" onclick="AttReq.openLeave()">&#65291; Apply for Leave</button></div>' +
+      '<div class="card"><div class="card-pad" style="padding-bottom:0;"><h3 style="margin:0;font-size:14px;">My Leave History</h3></div><div class="table-wrap"><table><thead><tr><th class="col-actions">Actions</th><th>From</th><th>To</th><th>Days</th><th>Type</th><th>Reason</th><th>Status</th><th>Note</th></tr></thead><tbody>' +
+      (list.length ? list.map(l=>'<tr><td class="col-actions">'+((l.status==='Pending'||(l.status==='Approved'&&l.from_date>today))?'<button class="icon-btn" title="Withdraw" onclick="AttReq.cancelLeave(\''+l.id+'\')">&#128465;</button>':'')+'</td>' +
+        '<td class="cell-mute">'+Util.fmtDate(l.from_date)+'</td><td class="cell-mute">'+Util.fmtDate(l.to_date)+'</td>' +
+        '<td class="mono">'+Number(l.days)+(l.half_day?' ('+this.halfLabel(l.half_day)+')':'')+'</td><td>'+Util.escapeHtml(l.leave_type)+'</td>' +
+        '<td class="cell-mute" style="max-width:220px;white-space:normal;">'+Util.escapeHtml(l.reason)+'</td><td>'+this.badge(l.status)+'</td><td class="cell-mute">'+Util.escapeHtml(l.decision_note||'-')+'</td></tr>').join('')
+        : '<tr><td colspan="8" class="cell-mute" style="text-align:center;padding:18px;">No leave requests yet</td></tr>') + '</tbody></table></div></div>';
+  },
+  openLeave(){
+    const t = Util.todayISO();
+    UI.openModal('Apply for Leave',
+      '<div class="form-row"><div class="field"><label>From Date *</label><input type="date" id="lv_from" value="'+t+'"></div><div class="field"><label>To Date *</label><input type="date" id="lv_to" value="'+t+'"></div></div>' +
+      '<div class="form-row"><div class="field"><label>Duration</label><select id="lv_half"><option value="">Full day(s)</option><option value="AM">Half day - first half</option><option value="PM">Half day - second half</option></select></div>' +
+      '<div class="field"><label>Leave Type *</label><select id="lv_type">'+DROPDOWNS.leaveType.map(x=>'<option>'+x+'</option>').join('')+'</select></div></div>' +
+      '<div class="field"><label>Reason *</label><textarea id="lv_reason" rows="3" maxlength="300" placeholder="Briefly explain the reason for leave"></textarea></div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="AttReq.saveLeave()">Submit Request</button>');
+  },
+  async saveLeave(){
+    if(this._busy) return;
+    const g = k=>document.getElementById(k).value;
+    const from = g('lv_from'); let to = g('lv_to'); const half = g('lv_half') || null, reason = g('lv_reason').trim();
+    if(!from || !to){ UI.toast('Select both dates'); return; }
+    if(half) to = from;
+    if(to < from){ UI.toast('"To" date must be on or after "From" date'); return; }
+    if(reason.length < 3){ UI.toast('Enter a reason for the leave'); return; }
+    this._busy = true;
+    try{
+      const { error } = await sb.rpc('leave_apply', { p_op_id:this._pendingOp || (this._pendingOp=this.newOp()), p_from:from, p_to:to, p_half:half, p_type:g('lv_type'), p_reason:reason });
+      if(error){ UI.toast('Not submitted: '+error.message); return; }
+      this._pendingOp = null; UI.closeModal(); UI.toast('Leave request sent');
+      try{ await Activity.log('Leave applied', (Auth.session.name||Auth.session.username)+' - '+g('lv_type')+' ('+from+(half?' '+half:' to '+to)+')'); }catch(e){}
+      await this.load();
+    } finally { this._busy = false; }
+  },
+  async cancelLeave(id){
+    if(!confirm('Withdraw this leave request?')) return;
+    const { data, error } = await sb.rpc('leave_cancel', { p_id:id });
+    if(error){ UI.toast('Not withdrawn: '+error.message); return; }
+    await this.mirrorLeave(data, false); await this.load();
+  },
+  /* ---------- correction requests: employee ---------- */
+  openCorr(sessionId){
+    const r = sessionId ? AttSess.rows.find(x=>x.id===sessionId) : null;
+    const li = iso=>AttAdmin.toLocalInput(iso);
+    UI.openModal(r ? 'Request a correction' : 'Request a missed record',
+      '<div class="hint" style="margin-bottom:8px;">'+(r ? 'Your manager will review this. The record changes only after approval.' : 'Forgot to check in? Enter the times and your manager will review it.')+'</div>' +
+      '<div class="field"><label>Where *</label><select id="rc_loc">'+['Office','Home','Field'].map(l=>'<option '+(r&&r.location===l?'selected':'')+'>'+l+'</option>').join('')+'</select></div>' +
+      '<div class="form-row"><div class="field"><label>Check In *</label><input type="datetime-local" id="rc_in" value="'+(r?li(r.check_in):'')+'"></div><div class="field"><label>Check Out *</label><input type="datetime-local" id="rc_out" value="'+(r&&r.check_out&&!r.incomplete?li(r.check_out):'')+'"></div></div>' +
+      '<div class="field"><label>Reason *</label><input id="rc_reason" maxlength="300" placeholder="e.g. phone had no network, forgot to check out"></div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="AttReq.saveCorr('+(sessionId?"'"+sessionId+"'":'null')+')">Send request</button>');
+  },
+  async saveCorr(sessionId){
+    if(this._busy) return;
+    const g = k=>document.getElementById(k).value;
+    if(!g('rc_in') || !g('rc_out')){ UI.toast('Enter both check-in and check-out times'); return; }
+    if(new Date(g('rc_out')) <= new Date(g('rc_in'))){ UI.toast('Check-out must be after check-in'); return; }
+    if(g('rc_reason').trim().length < 3){ UI.toast('Enter a reason'); return; }
+    this._busy = true;
+    try{
+      const { error } = await sb.rpc('att_request_correction', { p_session_id:sessionId||null, p_location:g('rc_loc'),
+        p_check_in:new Date(g('rc_in')).toISOString(), p_check_out:new Date(g('rc_out')).toISOString(), p_reason:g('rc_reason').trim() });
+      if(error){ UI.toast('Not sent: '+error.message); return; }
+      UI.closeModal(); UI.toast('Request sent for approval'); await this.load();
+    } finally { this._busy = false; }
+  },
+  async cancelCorr(id){
+    const { error } = await sb.rpc('att_cancel_correction', { p_id:id });
+    if(error){ UI.toast('Not withdrawn: '+error.message); return; }
+    await this.load();
+  },
+  myCorrHTML(){
+    const mine = this.corrs.filter(c=>c.user_id===Auth.session.id).slice(0,10);
+    return '<div class="card" style="margin-top:14px;"><div class="card-pad" style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;"><h3 style="margin:0;font-size:14px;">My correction requests</h3><button class="btn btn-outline btn-sm" onclick="AttReq.openCorr(null)">Missed a check-in? Request a record</button></div>' +
+      (mine.length ? '<div class="table-wrap"><table><thead><tr><th>Date</th><th>Requested</th><th>Reason</th><th>Status</th><th></th></tr></thead><tbody>' +
+        mine.map(c=>'<tr><td class="cell-main">'+Util.fmtDate(c.work_date)+'</td><td class="cell-mute">'+Util.escapeHtml(c.location)+' &middot; '+Util.fmtDateTime(c.check_in)+' - '+Util.fmtDateTime(c.check_out)+'</td><td class="cell-mute" style="white-space:normal;">'+Util.escapeHtml(c.reason)+'</td><td>'+this.badge(c.status)+(c.decision_note?' <span class="hint">'+Util.escapeHtml(c.decision_note)+'</span>':'')+'</td>' +
+          '<td>'+(c.status==='Pending'?'<button class="icon-btn" title="Withdraw" onclick="AttReq.cancelCorr(\''+c.id+'\')">&#128465;</button>':'')+'</td></tr>').join('') + '</tbody></table></div>' : '') + '</div>';
+  },
+  /* ---------- admin: approvals ---------- */
+  approvalsHTML(){
+    const pl = this.leaves.slice().sort((a,b)=>(a.status==='Pending'?0:1)-(b.status==='Pending'?0:1) || String(b.created_at).localeCompare(String(a.created_at)));
+    const pc = this.corrs.slice().sort((a,b)=>(a.status==='Pending'?0:1)-(b.status==='Pending'?0:1) || String(b.created_at).localeCompare(String(a.created_at)));
+    const act = (k,id)=>'<button class="btn btn-primary btn-sm" onclick="AttReq.openDecide(\''+k+'\',\''+id+'\',true)">Approve</button> <button class="btn btn-outline btn-sm" onclick="AttReq.openDecide(\''+k+'\',\''+id+'\',false)">Reject</button>';
+    return '<div class="card" style="margin-bottom:14px;"><div class="card-pad" style="padding-bottom:0;"><h3 style="margin:0;font-size:14px;">Leave requests</h3></div><div class="table-wrap"><table><thead><tr><th class="col-actions">Actions</th><th>Employee</th><th>From</th><th>To</th><th>Days</th><th>Type</th><th>Reason</th><th>Status</th></tr></thead><tbody>' +
+      (pl.length ? pl.map(l=>'<tr><td class="col-actions">'+(l.status==='Pending'?act('leave',l.id):(l.status==='Approved'?'<button class="icon-btn" title="Cancel leave" onclick="AttReq.cancelLeave(\''+l.id+'\')">&#128465;</button>':''))+'</td>' +
+        '<td class="cell-main">'+Util.escapeHtml(this.label(l.user_id))+'</td><td class="cell-mute">'+Util.fmtDate(l.from_date)+'</td><td class="cell-mute">'+Util.fmtDate(l.to_date)+'</td>' +
+        '<td class="mono">'+Number(l.days)+(l.half_day?' ('+this.halfLabel(l.half_day)+')':'')+'</td><td>'+Util.escapeHtml(l.leave_type)+'</td><td class="cell-mute" style="white-space:normal;max-width:200px;">'+Util.escapeHtml(l.reason)+'</td><td>'+this.badge(l.status)+'</td></tr>').join('')
+        : '<tr><td colspan="8" class="cell-mute" style="text-align:center;padding:18px;">No leave requests</td></tr>') + '</tbody></table></div></div>' +
+      '<div class="card"><div class="card-pad" style="padding-bottom:0;"><h3 style="margin:0;font-size:14px;">Attendance correction requests</h3></div><div class="table-wrap"><table><thead><tr><th class="col-actions">Actions</th><th>Employee</th><th>Date</th><th>Requested</th><th>Reason</th><th>Status</th></tr></thead><tbody>' +
+      (pc.length ? pc.map(c=>'<tr><td class="col-actions">'+(c.status==='Pending'?act('corr',c.id):'')+'</td><td class="cell-main">'+Util.escapeHtml(this.label(c.user_id))+'</td><td class="cell-mute">'+Util.fmtDate(c.work_date)+'</td>' +
+        '<td class="cell-mute">'+Util.escapeHtml(c.location)+' &middot; '+Util.fmtDateTime(c.check_in)+' - '+Util.fmtDateTime(c.check_out)+(c.session_id?' <span class="badge badge-blue">correction</span>':' <span class="badge badge-blue">missed record</span>')+'</td>' +
+        '<td class="cell-mute" style="white-space:normal;max-width:220px;">'+Util.escapeHtml(c.reason)+'</td><td>'+this.badge(c.status)+(c.decision_note?' <span class="hint">'+Util.escapeHtml(c.decision_note)+'</span>':'')+'</td></tr>').join('')
+        : '<tr><td colspan="6" class="cell-mute" style="text-align:center;padding:18px;">No correction requests</td></tr>') + '</tbody></table></div></div>';
+  },
+  openDecide(kind, id, approve){
+    UI.openModal((approve?'Approve':'Reject')+(kind==='leave'?' leave':' correction'),
+      '<div class="field"><label>Note to employee (optional)</label><input id="dc_note" maxlength="300"></div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Cancel</button><button class="btn btn-primary" onclick="AttReq.decide(\''+kind+'\',\''+id+'\','+(approve?'true':'false')+')">'+(approve?'Approve':'Reject')+'</button>');
+  },
+  async decide(kind, id, approve){
+    if(this._busy) return; this._busy = true;
+    try{
+      const note = (document.getElementById('dc_note')||{value:''}).value.trim() || null;
+      const { data, error } = await sb.rpc(kind==='leave'?'leave_decide':'att_decide_correction', { p_id:id, p_approve:approve, p_note:note });
+      if(error){ UI.toast('Not saved: '+error.message); return; }
+      UI.closeModal(); UI.toast(approve?'Approved':'Rejected');
+      try{ await Activity.log((kind==='leave'?'Leave ':'Attendance correction ')+(approve?'approved':'rejected'), this.label(data.user_id)); }catch(e){}
+      if(kind==='leave' && approve) await this.mirrorLeave(data, true);
+      await this.load();
+      if(kind==='corr' && approve && AttAdmin.loaded){ AttAdmin.loaded = false; }
+    } finally { this._busy = false; }
+  },
+  /* keep the older day records in step for full-day leave (best effort) */
+  async mirrorLeave(l, approved){
+    try{
+      if(!l || l.half_day) return;
+      const u = Store.data.users.find(x=>x.id===l.user_id) || {};
+      await Attendance.syncLeaveAttendance({ id:l.id, userId:l.user_id, username:u.username||'', name:Attendance.userLabel(u), fromDate:l.from_date, toDate:l.to_date }, approved);
+    }catch(e){ console.warn('leave mirror failed (non-blocking)', e); }
   }
 };
 
@@ -13838,7 +13991,7 @@ const Attendance = {
     }
     return '<div class="rp-switcher" style="flex-wrap:wrap;">' +
       tabs.map(([id,label])=>'<button class="'+(this.tab===id?'active':'')+'" onclick="Attendance.setTab(\''+id+'\')">'+label+
-        (id==='approvals' ? (()=>{ const n=Store.data.leaveRequests.filter(l=>l.status==='Pending').length; return n?' ('+n+')':''; })() : '') +
+        (id==='approvals' ? (()=>{ const n=AttReq.enabled?AttReq.pendingCount():Store.data.leaveRequests.filter(l=>l.status==='Pending').length; return n?' ('+n+')':''; })() : '') +
       '</button>').join('') +
     '</div>';
   },
@@ -13898,6 +14051,7 @@ const Attendance = {
   },
 
   renderLeave(){
+    if(AttReq.enabled) return AttReq.leaveHTML();
     const uid = Auth.session.id;
     const list = Store.data.leaveRequests.filter(l=>l.userId===uid).sort((a,b)=>String(b.appliedAt).localeCompare(String(a.appliedAt)));
     return '<div class="toolbar"><div class="toolbar-spacer"></div><button class="btn btn-primary btn-sm" onclick="Attendance.openLeaveForm()">&#65291; Apply for Leave</button></div>' +
@@ -13966,6 +14120,7 @@ const Attendance = {
   },
 
   renderApprovals(){
+    if(AttReq.enabled) return AttReq.approvalsHTML();
     const list = Store.data.leaveRequests.slice().sort((a,b)=>{
       if(a.status==='Pending' && b.status!=='Pending') return -1;
       if(b.status==='Pending' && a.status!=='Pending') return 1;
