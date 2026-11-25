@@ -3251,7 +3251,7 @@ function navBadgeCount(id){
    localStorage only (never in the business-data store). */
 /* Which version is running on this device, and a way to drop the saved copy of the app (service worker + cache)
    so that a newly uploaded index.html is really used. Login, settings and saved data are not touched. */
-const APP_BUILD = '2026-11-24 (build 62)';
+const APP_BUILD = '2026-11-25 (build 63)';
 const AppUpdate = {
   reload(){ location.reload(); },
   async refresh(){
@@ -4894,6 +4894,7 @@ const Products = {
         <div class="toolbar-spacer"></div>
         <button class="btn btn-outline btn-sm" onclick="go('backup')">&#128228; Import Excel</button>
         <button class="btn btn-outline btn-sm" onclick="Products.openWebImport()">&#127760; Import from website</button>
+        <button class="btn btn-outline btn-sm" onclick="Products.openCsvImport()">&#128247; Photos &amp; details</button>
         <button class="btn btn-primary btn-sm" onclick="Products.openForm(null)">&#65291; Add Product</button>
       </div>
       <div class="card"><div class="table-wrap">
@@ -5028,6 +5029,136 @@ const Products = {
     for(const r of made){ try{ await DbSync.upsertProduct(r); }catch(e){ console.warn('upsertProduct skipped', e); } }
     await Activity.log('Products imported from website', made.length+' products');
     UI.closeModal(); UI.toast(made.length+' products added'); Router.render(UI.currentView);
+  },
+  /* ---- Build 63: photos & details from the WooCommerce CSV export ---- */
+  _csv: null, _csvItems: null,
+  csvRows(text){
+    const rows = []; let row = [], cell = '', q = false; const t = String(text||'').replace(/^﻿/,'');
+    for(let i=0;i<t.length;i++){
+      const ch = t[i];
+      if(q){ if(ch==='"'){ if(t[i+1]==='"'){ cell+='"'; i++; } else q=false; } else cell+=ch; }
+      else if(ch==='"') q = true;
+      else if(ch===','){ row.push(cell); cell=''; }
+      else if(ch==='\n' || ch==='\r'){ if(ch==='\r' && t[i+1]==='\n') i++; row.push(cell); cell=''; if(row.length>1 || row[0]!=='') rows.push(row); row=[]; }
+      else cell+=ch;
+    }
+    if(cell!=='' || row.length){ row.push(cell); rows.push(row); }
+    return rows;
+  },
+  htmlText(h){
+    let t = String(h||'').replace(/\\r\\n|\\n|\\r/g,'\n').replace(/<\s*br\s*\/?>/gi,'\n').replace(/<\/t[dh]>\s*<t[dh][^>]*>/gi,': ').replace(/<li[^>]*>/gi,'\n• ').replace(/<\/(p|h\d|div|ul|ol|table|tr|thead|tbody)>/gi,'\n').replace(/<[^>]+>/g,'');
+    const d = document.createElement('textarea'); d.innerHTML = t; t = d.value;
+    const lines = t.split('\n').map(x=>x.replace(/\s+/g,' ').trim()).filter(x=>x && !/^key features(\s*&\s*[a-z ]+)?:?$/i.test(x) && !/for bulk, institutional or project orders/i.test(x) && !/^\$.*\$$/.test(x));
+    let out = ''; for(const l of lines){ if((out+'\n'+l).length>520) break; out += (out?'\n':'')+l; }
+    return out;
+  },
+  normName(n){ return String(n||'').toLowerCase().replace(/[–—]/g,'-').replace(/\s+/g,' ').trim(); },
+  csvParse(text){
+    const rows = this.csvRows(text); if(rows.length<2) throw new Error('That does not look like the product export file.');
+    const head = rows[0].map(x=>x.trim()); const ix = k=>head.indexOf(k);
+    const iN = ix('Name'), iP = ix('Published'), iD = ix('Description'), iS = ix('Short description'), iI = ix('Images');
+    if(iN<0 || iI<0) throw new Error('Columns "Name" and "Images" were not found. Use the WooCommerce product export (CSV).');
+    const out = [], seen = new Set();
+    rows.slice(1).forEach(r=>{
+      const name = (r[iN]||'').replace(/\s+/g,' ').trim(); if(!name) return;
+      if(iP>=0 && String(r[iP]).trim()!=='1') return;                   // drafts / private are skipped
+      const k = this.normName(name); if(seen.has(k)) return; seen.add(k);
+      const img = String(r[iI]||'').split(',')[0].trim();
+      const desc = this.htmlText(iD>=0 ? r[iD] : '') || this.htmlText(iS>=0 ? r[iS] : '');
+      out.push({name, desc, img: /^https?:\/\//i.test(img) ? img : ''});
+    });
+    return out;
+  },
+  csvPlan(items){
+    const idx = new Map(); Store.data.products.forEach(p=>{ idx.set(this.normName(p.name), p); });
+    const match = [], add = [];
+    items.forEach(it=>{ const p = idx.get(this.normName(it.name)); if(p) match.push({p, it}); else add.push(it); });
+    return {match, add, total: items.length, fill: match.filter(m=>!m.p.description && m.it.desc).length, photos: items.filter(i=>i.img).length};
+  },
+  openCsvImport(){
+    this._csv = null; this._csvItems = null;
+    UI.openModal('Product photos & details from website',
+      '<p style="font-size:13px;margin:0 0 8px;"><b>Step 1.</b> Choose the WooCommerce export file (CSV). Products already in the CRM are matched by name; their photo link and description are added (nothing is overwritten). Products not in the CRM yet are added under <b>Other Products</b>.</p>'+
+      '<div style="margin:6px 0;"><input type="file" id="csvImpFile" accept=".csv,text/csv" onchange="Products.csvFile(this.files[0])"></div>'+
+      '<div id="csvImpOut" style="font-size:13px;"></div>'+
+      '<hr style="margin:12px 0;">'+
+      '<p style="font-size:13px;margin:0 0 8px;"><b>Step 2.</b> Photos. Try <i>Download from website</i>; if the website does not allow it, choose the photo files from your computer instead (select all the images at once).</p>'+
+      '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;"><button class="btn btn-outline btn-sm" onclick="Products.photoDownload()">Download from website</button>'+
+      '<label class="btn btn-outline btn-sm" style="margin:0;cursor:pointer;">Choose photo files<input type="file" id="photoFiles" multiple accept="image/*" style="display:none" onchange="Products.photoFiles(this.files)"></label></div>'+
+      '<div id="photoOut" style="font-size:13px;margin-top:8px;"></div>',
+      '<button class="btn btn-outline" onclick="UI.closeModal()">Close</button> <button class="btn btn-primary" id="csvImpGo" disabled onclick="Products.csvApply()">Step 1: Import details</button>', true);
+  },
+  csvFile(f){
+    if(!f) return; const out = document.getElementById('csvImpOut'), go_ = document.getElementById('csvImpGo');
+    const r = new FileReader();
+    r.onload = ()=>{
+      try{
+        this._csvItems = this.csvParse(r.result); const pl = this.csvPlan(this._csvItems); this._csv = pl;
+        out.innerHTML = '<b>'+pl.total+'</b> published products in the file. <b>'+pl.match.length+'</b> already in CRM (details added for '+pl.fill+'), <b>'+pl.add.length+'</b> new (added under Other Products). Photos available: '+pl.photos+'.'+
+          (pl.add.length ? '<div class="hint" style="font-size:12px;margin-top:6px;">New: '+Util.escapeHtml(pl.add.slice(0,12).map(x=>x.name).join(', '))+(pl.add.length>12?' …':'')+'</div>' : '');
+        go_.disabled = !(pl.match.length || pl.add.length);
+      }catch(e){ out.innerHTML = '<span style="color:var(--red,#dc2626);">'+Util.escapeHtml(e.message)+'</span>'; go_.disabled = true; this._csv = null; }
+    };
+    r.readAsText(f);
+  },
+  async csvApply(){
+    if(!this._csvItems) return; const pl = this.csvPlan(this._csvItems); const btn = document.getElementById('csvImpGo'); if(btn) btn.disabled = true;
+    const before = JSON.parse(JSON.stringify(Store.data.products));
+    const changed = [];
+    pl.match.forEach(m=>{ if(!m.p.description && m.it.desc) m.p.description = m.it.desc; if(m.it.img) m.p.imageSrc = m.it.img; changed.push(m.p); });
+    let code = Math.max(0, ...Store.data.products.map(p=>Number(p.code)||0));
+    const tmp = Store.data.products.slice(); const made = [];
+    pl.add.forEach(it=>{ const r = { id:null, code:++code, category:'Other Products', name:it.name, unit:'Nos', price:0, stock:0, description:it.desc||'', imageSrc:it.img||'' }; r.id = Util.uid('P', tmp); tmp.unshift(r); made.push(r); });
+    Store.data.products = tmp;
+    const ok = await Store.save('products');
+    if(!ok){ Store.data.products = before; UI.toast('Import failed: nothing was changed. Try again.', 6000); if(btn) btn.disabled=false; return; }
+    for(const r of changed.concat(made)){ try{ await DbSync.upsertProduct(r); }catch(e){ console.warn('upsertProduct skipped', e); } }
+    await Activity.log('Product details imported from website', pl.match.length+' matched, '+made.length+' added');
+    UI.toast('Details saved. Now Step 2: photos.', 5000);
+    const o = document.getElementById('csvImpOut'); if(o) o.innerHTML += '<div style="margin-top:6px;color:#15803d;"><b>Done.</b> Now do Step 2 for the photos.</div>';
+    this._csv = null; this._csvItems = null;
+  },
+  _todoPhotos(){ return Store.data.products.filter(p=>p.imageSrc && !ProductImages.get(p.id)); },
+  async photoDownload(){
+    const out = document.getElementById('photoOut'); if(!out) return;
+    if(!(await ProductImages.ensure())){ out.textContent = 'Could not open the photo list. Try again.'; return; }
+    const todo = this._todoPhotos(); if(!todo.length){ out.textContent = 'No products are waiting for a photo (run Step 1 first, or all photos are done).'; return; }
+    const got = {}; let done = 0, fail = 0, corsFail = 0, stop = false, i = 0;
+    const worker = async()=>{
+      while(!stop){
+        const p = todo[i++]; if(!p) return;
+        try{
+          const res = await fetch(p.imageSrc, {mode:'cors'}); if(!res.ok) throw new Error('HTTP '+res.status);
+          got[p.id] = await ProductImages.shrink(await res.blob()); done++;
+        }catch(e){ fail++; if(e && e.name==='TypeError') corsFail++; if(corsFail>=3 && done===0) stop = true; }
+        out.textContent = 'Downloading… '+done+' done, '+fail+' failed of '+todo.length;
+      }
+    };
+    await Promise.all([worker(), worker(), worker(), worker()]);
+    if(stop && done===0){ out.innerHTML = '<span style="color:var(--red,#dc2626);">The website does not allow downloading its photos from the CRM. Use <b>Choose photo files</b> instead (select the images from your computer).</span>'; return; }
+    await this._savePhotos(got, out, todo.length, fail);
+  },
+  async photoFiles(files){
+    const out = document.getElementById('photoOut'); if(!out || !files || !files.length) return;
+    if(!(await ProductImages.ensure())){ out.textContent = 'Could not open the photo list. Try again.'; return; }
+    const todo = this._todoPhotos(); const byBase = {}; todo.forEach(p=>{ (byBase[ProductImages.base(p.imageSrc)] = byBase[ProductImages.base(p.imageSrc)] || []).push(p); });
+    const got = {}; let used = 0, unmatched = 0, bad = 0, n = 0;
+    for(const f of Array.from(files)){
+      const ps = byBase[ProductImages.base(f.name)]; if(!ps){ unmatched++; continue; }
+      try{ const d = await ProductImages.shrink(f); ps.forEach(p=>{ got[p.id] = d; }); used++; }catch(e){ bad++; }
+      n++; if(n%10===0) out.textContent = 'Processing… '+n+' of '+files.length;
+    }
+    await this._savePhotos(got, out, todo.length, bad, unmatched);
+  },
+  async _savePhotos(got, out, total, fail, unmatched){
+    const n = Object.keys(got).length;
+    if(!n){ out.textContent = 'No photos could be added.'+(unmatched?' ('+unmatched+' files did not match any product photo name.)':''); return; }
+    const ok = await ProductImages.saveMany(got);
+    if(!ok){ out.innerHTML = '<span style="color:var(--red,#dc2626);">Photos could not be saved. Nothing was changed. Try again.</span>'; return; }
+    await Activity.log('Product photos added', n+' photos');
+    const left = this._todoPhotos().length;
+    out.innerHTML = '<span style="color:#15803d;"><b>'+n+' photos saved.</b></span> '+(left?left+' products still have no photo'+(unmatched?' ('+unmatched+' chosen files did not match)':'')+'.':'All products with a website photo now have one.')+(fail?' ('+fail+' failed)':'');
+    try{ Router.render(UI.currentView); }catch(e){}
   },
   async remove(id){
     if(!confirm('Delete this product?')) return;
@@ -11643,7 +11774,8 @@ const RatePDF = {
       (p.name||'').toLowerCase().includes(q) || (p.category||'').toLowerCase().includes(q));
     document.getElementById('rpProdList').innerHTML = window.__rpProdRows(list);
   },
-  useProduct(uid, pid){
+  async useProduct(uid, pid){
+    await ProductImages.ensure();
     const p = Store.data.products.find(x=>x.id===pid);
     const it = this.draft.items.find(x=>x.uid===uid);
     if(!p || !it) return;
@@ -11652,7 +11784,7 @@ const RatePDF = {
     it.unit     = p.unit || 'Nos';
     if(p.price != null && p.price !== '') it.rate = Number(p.price)||'';
     if(p.description) it.specs = p.description;
-    if(p.imageUrl) it.imageUrl = p.imageUrl;
+    { const im = ProductImages.get(p.id); if(im) it.imageUrl = im; else if(p.imageUrl) it.imageUrl = p.imageUrl; }
     it.templateId = '';
     UI.closeModal();
     this.render();
@@ -21227,6 +21359,52 @@ const BIDDOC_TEMPLATES = {
   }
 };
 
+/* Build 63: product photos + details from the jaystrading.in WooCommerce CSV export.
+   Photos are shrunk to ~320 px JPEG and kept in their own small list (key jays_productimages,
+   {productId: dataUrl}) so the Products list stays light. Rate / Offer PDF picks the photo up
+   automatically when a product is chosen. One-time use; nothing is overwritten. */
+const ProductImages = {
+  KEY:'jays_productimages', map:{}, loaded:false, _p:null, MAX:320, Q:0.72,
+  ensure(){
+    if(this.loaded) return Promise.resolve(true);
+    if(!this._p) this._p = (async()=>{
+      let ok = false;
+      try{
+        const v = await Store.loadKey(this.KEY, {});
+        if(!(Store.loadFailed && Store.loadFailed[this.KEY])){ this.map = (v && typeof v==='object' && !Array.isArray(v)) ? v : {}; this.loaded = ok = true; }
+      }catch(e){ console.warn('productimages load failed', e); }
+      this._p = null; return ok;
+    })();
+    return this._p;
+  },
+  get(id){ return this.map[id] || ''; },
+  async saveMany(add){
+    const next = Object.assign({}, this.map, add);
+    const ok = await Store.saveKey(this.KEY, next);
+    if(ok) this.map = next;
+    return !!ok;
+  },
+  /* any image Blob/File -> small white-background JPEG data URL */
+  shrink(blob){
+    return new Promise((resolve, reject)=>{
+      const url = URL.createObjectURL(blob), img = new Image();
+      img.onload = ()=>{
+        try{
+          let w = img.naturalWidth, h = img.naturalHeight; if(!w || !h) throw new Error('empty image');
+          const k = Math.min(1, this.MAX / Math.max(w, h)); w = Math.max(1, Math.round(w*k)); h = Math.max(1, Math.round(h*k));
+          const c = document.createElement('canvas'); c.width = w; c.height = h;
+          const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0,0,w,h); x.drawImage(img,0,0,w,h);
+          resolve(c.toDataURL('image/jpeg', this.Q));
+        }catch(e){ reject(e); } finally { URL.revokeObjectURL(url); }
+      };
+      img.onerror = ()=>{ URL.revokeObjectURL(url); reject(new Error('cannot read image')); };
+      img.src = url;
+    });
+  },
+  base(u){ return String(u||'').split('?')[0].split('/').pop().toLowerCase().replace(/-\d+x\d+(?=\.[a-z0-9]+$)/,''); }
+};
+
+
 /* Build 60: Bid Documents used to store the same ~20 KB company logo (a base64 picture)
    inside every one of the 686 documents, so the Bid Documents list was ~15 MB and every
    single save re-uploaded all of it. Pictures are now kept ONCE in their own small list
@@ -22306,7 +22484,7 @@ const ACCESS_MODULES = [
   {id:'bids',      label:'GeM bids, GEM CRAC, EMD/PBG',keys:['jays_bids','jays_gemcrac','jays_emdpbg'], menus:['bidsearch','gemcrac','emdpbg']},
   {id:'biddocs',   label:'Bid documents & letters',    keys:['jays_biddocs','jays_biddocassets'], menus:['biddocs']},
   {id:'opp',       label:'Project Opportunity (tracking, products, keywords)', keys:['jays_opptracking','jays_oppproducts','jays_oppimporthistory','jays_oppkeywordgroups','jays_lbcontacts'], menus:['oppfinder']},
-  {id:'products',  label:'Products, suppliers, purchase orders', keys:['jays_products','jays_suppliers','jays_purchaseorders'], menus:['products','inventory','suppliers','purchaseorders']},
+  {id:'products',  label:'Products, suppliers, purchase orders', keys:['jays_products','jays_productimages','jays_suppliers','jays_purchaseorders'], menus:['products','inventory','suppliers','purchaseorders']},
   {id:'rfq',       label:'Supplier RFQs & price comparison (supplier costs)', keys:['jays_rfqs'], menus:['rfq']},
   {id:'officework',label:'Office work register & handover', keys:['jays_officework','jays_handovers'], menus:['officework','handover']},
   {id:'expenses',  label:'Office expenses', keys:['jays_officeexpenses'], menus:['expenses']},
