@@ -274,6 +274,11 @@
   .nav-item{position:relative;min-height:36px;}
   .nav-item .nav-star{margin-left:auto;background:transparent;border:0;color:#7d93ab;font-size:14px;line-height:1;cursor:pointer;padding:4px;border-radius:6px;opacity:0;}
   .nav-item .cnt + .nav-star{margin-left:4px;}
+  .nav-mv{background:transparent;border:0;color:#7d93ab;font-size:9px;line-height:1;cursor:pointer;padding:4px 3px;border-radius:6px;opacity:0;}
+  .nav-item:hover .nav-mv,.nav-item:focus-within .nav-mv{opacity:1;} .nav-mv:hover{color:#fff;}
+  .nav-fav .nav-item[draggable="true"]{cursor:grab;}
+  .nav-recent .nav-section-label{opacity:.8;}
+  button.nav-fold{width:100%;background:transparent;border:0;text-align:left;cursor:pointer;display:flex;justify-content:space-between;align-items:center;font:inherit;color:inherit;}
   .nav-item:hover .nav-star,.nav-item:focus-within .nav-star,.nav-star.on{opacity:1;}
   .nav-star.on{color:#fbbf24;}
   .nav-item:not(:has(.cnt)) .nav-star{margin-left:auto;}
@@ -1262,7 +1267,7 @@ body:not(.no-anim) .lf-row{transition:background-color .15s ease;}
   <div class="mbn-item" data-view="dashboard" onclick="go('dashboard')"><span class="ic" data-ico="home"></span><span>Home</span></div>
   <div class="mbn-item" data-view="mywork" onclick="go('mywork')"><span class="ic" data-ico="target"></span><span>My Work</span></div>
   <div class="mbn-item" data-view="customers" onclick="go('customers')"><span class="ic" data-ico="user"></span><span>Customers</span></div>
-  <div class="mbn-item" data-view="followupcentre" onclick="go('followupcentre')"><span class="ic" data-ico="clock"></span><span>Follow-ups</span></div>
+  <div class="mbn-item" data-view="visits" data-grp="visits,requirements,travel" onclick="go('visits')"><span class="ic" data-ico="pin"></span><span>Visits</span></div>
   <div class="mbn-item" onclick="UI.toggleSidebar()"><span class="ic" data-ico="menu"></span><span>More</span></div>
 </div>
 
@@ -3037,14 +3042,15 @@ const UI = {
    NAV
 ===================================================================== */
 const NAV = [
-  {sec:'Overview', ic:'&#127968;', items:[
+  {sec:'Home', ic:'&#127968;', items:[
     {id:'dashboard', ic:'&#127968;', label:'Dashboard'},
     {id:'growth', ic:'&#128200;', label:'Growth Centre'},
     {id:'notifications', ic:'&#128276;', label:'Notifications'},
   ]},
-  {sec:'Work Centre', ic:'&#9889;', items:[
+  {sec:'My Work', ic:'&#9889;', items:[
     {id:'actioncentre', ic:'&#9889;', label:'Action Centre'},
     {id:'mywork', ic:'&#127919;', label:'My Work'},
+    {id:'fieldhome', ic:'&#128204;', label:'My Day'},
     {id:'tasks', ic:'&#9989;', label:'Tasks &amp; To-Do'},
     {id:'followupcentre', ic:'&#9200;', label:'Follow-ups'},
     {id:'mycalls', ic:'&#9742;', label:'My Calling List'},
@@ -3061,10 +3067,11 @@ const NAV = [
     {id:'quotations', ic:'&#128196;', label:'Quotations'},
     {id:'rate_docs', ic:'&#128196;', label:'Rate / Offer PDF'},
     {id:'orders', ic:'&#128230;', label:'Orders'},
+    {id:'complaints', ic:'&#128736;', label:'Complaints'},
   ]},
   {sec:'Government Business', ic:'&#127963;', items:[
-    {id:'bidsearch', ic:'&#128269;', label:'GeM Bid Search'},
     {id:'oppfinder', ic:'&#127963;', label:'Project Opportunities'},
+    {id:'bidsearch', ic:'&#128269;', label:'GeM Bid Search'},
     {id:'tenders', ic:'&#128209;', label:'Tender Centre'},
     {id:'biddocs', ic:'&#128196;', label:'Bid Documents'},
     {id:'tendervault', ic:'&#128193;', label:'Tender Vault'},
@@ -3085,26 +3092,24 @@ const NAV = [
     {id:'outstanding', ic:'&#9888;', label:'Outstanding'},
     {id:'expenses', ic:'&#129534;', label:'Office Expenses'},
     {id:'siteexp', ic:'&#127959;', label:'Site Expenses'},
-  ]},
-  {sec:'Field Operations &amp; Service', ic:'&#128204;', items:[
-    {id:'fieldapp', ic:'&#128241;', label:'Field App'},
     {id:'fieldmoney', ic:'&#128176;', label:'Collections &amp; Claims'},
-    {id:'fieldhome', ic:'&#128204;', label:'My Day'},
+  ]},
+  {sec:'Field Operations', ic:'&#128204;', items:[
+    {id:'fieldapp', ic:'&#128241;', label:'Field App'},
     {id:'visits', ic:'&#128100;', label:'Visits'},
     {id:'requirements', ic:'&#128221;', label:'Requirements'},
     {id:'travel', ic:'&#128664;', label:'Travel Log'},
     {id:'fieldmap', ic:'&#128506;', label:'Field Map'},
     {id:'findlocation', ic:'&#128205;', label:'Find Location'},
     {id:'officefinder', ic:'&#127970;', label:'Nearby Offices'},
-    {id:'complaints', ic:'&#128736;', label:'Complaints'},
     {id:'amc', ic:'&#128295;', label:'Service &amp; AMC'},
   ]},
-  {sec:'Reports &amp; Administration', ic:'&#9881;', items:[
+  {sec:'Reports &amp; Admin', ic:'&#9881;', items:[
     {id:'reports', ic:'&#128200;', label:'Reports'},
     {id:'fieldreports', ic:'&#128202;', label:'Field Reports'},
-    {id:'datahealth', ic:'&#129658;', label:'Data Health', adminOnly:true},
     {id:'workmgmt', ic:'&#128203;', label:'Work Management', adminOnly:true},
     {id:'callalloc', ic:'&#128222;', label:'Contact Allocation', adminOnly:true},
+    {id:'datahealth', ic:'&#129658;', label:'Data Health', adminOnly:true},
     {id:'users', ic:'&#128272;', label:'Users &amp; Roles', adminOnly:true},
     {id:'settings', ic:'&#9881;', label:'Settings', adminOnly:true},
     {id:'backup', ic:'&#9729;', label:'Backup &amp; Restore'},
@@ -3246,7 +3251,7 @@ function navBadgeCount(id){
    localStorage only (never in the business-data store). */
 /* Which version is running on this device, and a way to drop the saved copy of the app (service worker + cache)
    so that a newly uploaded index.html is really used. Login, settings and saved data are not touched. */
-const APP_BUILD = '2026-11-23 (build 61)';
+const APP_BUILD = '2026-11-24 (build 62)';
 const AppUpdate = {
   reload(){ location.reload(); },
   async refresh(){
@@ -3260,7 +3265,15 @@ const NavPrefs = {
   read(n, d){ try{ const v = JSON.parse(localStorage.getItem(this.key(n))); return Array.isArray(v) ? v : d; }catch(e){ return d; } },
   write(n, v){ try{ localStorage.setItem(this.key(n), JSON.stringify(v)); }catch(e){} },
   favs(){ return this.read('fav', []); },
-  openGroups(){ return this.read('open', null); },
+  /* Build 62: group names changed - map each user's saved open/closed groups to the new names (favourites are stored by page id, so they are untouched) */
+  OLD_SEC:{ 'Overview':'Home', 'Work Centre':'My Work', 'Field Operations &amp; Service':'Field Operations', 'Reports &amp; Administration':'Reports &amp; Admin' },
+  openGroups(){ const o = this.read('open', null); if(o===null) return null; return o.map(x=>this.OLD_SEC[x]||x).filter((x,i,a)=>a.indexOf(x)===i); },
+  fold(){ return this.read('fold', []); },
+  toggleFold(k){ const f = this.fold(), i = f.indexOf(k); if(i>=0) f.splice(i,1); else f.push(k); this.write('fold', f); },
+  recent(){ return this.read('recent', []); },
+  pushRecent(id){ if(!NAV.some(sec=>sec.items.some(it=>it.id===id))) return; const r = this.recent().filter(x=>x!==id); r.unshift(id); this.write('recent', r.slice(0,8)); },
+  moveFav(id, dir){ const f = this.favs(), i = f.indexOf(id), j = i + dir; if(i<0 || j<0 || j>=f.length) return false; const t = f[i]; f[i] = f[j]; f[j] = t; this.write('fav', f); return true; },
+  dropFav(id, beforeId){ const f = this.favs(); const i = f.indexOf(id); if(i<0 || id===beforeId) return false; f.splice(i,1); const k = beforeId ? f.indexOf(beforeId) : -1; if(k<0) f.push(id); else f.splice(k,0,id); this.write('fav', f); return true; },
   compact(){ try{ return localStorage.getItem('jays_nav_compact')!=='0'; }catch(e){ return true; } },
   setCompact(on){ try{ localStorage.setItem('jays_nav_compact', on?'1':'0'); }catch(e){} },
   toggleFav(id){ const f = this.favs(), i = f.indexOf(id); if(i>=0) f.splice(i,1); else f.push(id); this.write('fav', f); },
@@ -3282,20 +3295,27 @@ function renderNav(){
   const members = it=>{ const g = grpOf(it); return (compact && g) ? g.filter(id=>allowed.has(id)) : [it.id]; };
   const isHidden = it=>{ const m = members(it); return m.length>1 && m[0]!==it.id; };       /* only the first page of a tab group gets a sidebar entry */
   const rowCnt = it=>it.id==='actioncentre' ? (navBadgeCount('actioncentre')||0) : members(it).reduce((n,id)=>n+(navBadgeCount(id)||0),0);   /* Action Centre already includes tasks and follow-ups */
-  const row = (it, inFav)=>{
+  const row = (it, inFav, mv)=>{
     const act = UI.currentView===it.id || (!inFav && members(it).length>1 && members(it).includes(UI.currentView));
     /* compact menu: one row stands for a group of tabbed pages - when you are on another page of that group, the row shows THAT page's name */
     const sh = (act && !inFav && UI.currentView!==it.id) ? (NAV.reduce((f,sec)=>f||sec.items.find(x=>x.id===UI.currentView),null) || it) : it;
     const cnt = rowCnt(it), label = plain(sh.label), pinned = favs.includes(it.id);
-    return `<div class="nav-item ${act?'active':''}" role="link" tabindex="0" data-view="${sh.id}" title="${Util.escapeHtml(label)}"${act?' aria-current="page"':''}>
+    return `<div class="nav-item ${act?'active':''}" role="link" tabindex="0"${mv?` draggable="true" data-favrow="${it.id}"`:''} data-view="${sh.id}" title=""${Util.escapeHtml(label)}"${act?' aria-current="page"':''}>
       <span class="ic" aria-hidden="true">${NavIcons.item(sh)}</span><span>${sh.label}</span>${cnt?`<span class="cnt" aria-label="${cnt} pending">${cnt}</span>`:''}
-      <button type="button" class="nav-star ${pinned?'on':''}" data-fav="${it.id}" aria-pressed="${pinned}" aria-label="${pinned?'Remove '+Util.escapeHtml(label)+' from Favorites':'Add '+Util.escapeHtml(label)+' to Favorites'}" title="${pinned?'Unpin from Favorites':'Pin to Favorites'}">${pinned?'&#9733;':'&#9734;'}</button>
+      <button type="button" class="nav-star ${pinned?'on':''}" data-fav="${it.id}" aria-pressed="${pinned}" aria-label="${pinned?'Remove '+Util.escapeHtml(label)+' from Favorites':'Add '+Util.escapeHtml(label)+' to Favorites'}" title="${pinned?'Unpin from Favorites':'Pin to Favorites'}">${pinned?'&#9733;':'&#9734;'}</button>${mv?`<button type="button" class="nav-mv" data-mv="-1" data-fav="${it.id}" aria-label="Move ${Util.escapeHtml(label)} up" title="Move up">&#9650;</button><button type="button" class="nav-mv" data-mv="1" data-fav="${it.id}" aria-label="Move ${Util.escapeHtml(label)} down" title="Move down">&#9660;</button>`:''}
     </div>`;
   };
   let html = '';
   const favItems = favs.map(id=>id==='todayplan'?'actioncentre':id).filter((id,i,a)=>a.indexOf(id)===i).map(id=>{ for(const sec of NAV){ const it = sec.items.find(x=>x.id===id); if(it) return it; } return null; }).filter(it=>it && navItemAllowed(it));
   if(favItems.length){
-    html += `<div class="nav-group nav-fav"><div class="nav-section-label">&#9733; Favorites</div>${favItems.map(it=>row(it,true)).join('')}</div>`;
+    const fold = NavPrefs.fold(), fF = fold.includes('fav');
+    html += `<div class="nav-group nav-fav"><button type="button" class="nav-section-label nav-fold" data-fold="fav" aria-expanded="${!fF}">&#9733; Favorites <span class="chev" aria-hidden="true">${fF?'&#9656;':'&#9662;'}</span></button>${fF?'':favItems.map(it=>row(it,true,true)).join('')}</div>`;
+  }
+  /* Build 62: recently visited pages (this device, this user) - not shown while empty, never repeats the open page or a favourite */
+  const recItems = NavPrefs.recent().filter(id=>id!==UI.currentView && !favs.includes(id)).map(id=>{ for(const sec of NAV){ const it = sec.items.find(x=>x.id===id); if(it) return it; } return null; }).filter(it=>it && allowed.has(it.id)).slice(0,4);
+  if(recItems.length){
+    const fR = NavPrefs.fold().includes('recent');
+    html += `<div class="nav-group nav-recent"><button type="button" class="nav-section-label nav-fold" data-fold="recent" aria-expanded="${!fR}">&#128339; Recently visited <span class="chev" aria-hidden="true">${fR?'&#9656;':'&#9662;'}</span></button>${fR?'':recItems.map(it=>row(it,true)).join('')}</div>`;
   }
   NAV.forEach((sec, gi)=>{
     const items = sec.items.filter(navItemAllowed).filter(it=>!isHidden(it));
@@ -3318,6 +3338,11 @@ function renderNav(){
       if(e.target.closest('.nav-refresh-btn')){ AppUpdate.refresh(); return; }
       const cb = e.target.closest('.nav-compact-btn');
       if(cb){ NavPrefs.setCompact(cb.getAttribute('data-compact')==='1'); renderNav(); return; }
+      const fb = e.target.closest('.nav-fold');
+      if(fb){ NavPrefs.toggleFold(fb.getAttribute('data-fold')); renderNav(); return; }
+      const mvb = e.target.closest('.nav-mv');
+      if(mvb){ e.stopPropagation(); NavPrefs.moveFav(mvb.getAttribute('data-fav'), Number(mvb.getAttribute('data-mv'))); renderNav();
+        const again = box.querySelector('.nav-mv[data-fav="'+mvb.getAttribute('data-fav')+'"][data-mv="'+mvb.getAttribute('data-mv')+'"]'); if(again) again.focus(); return; }
       const star = e.target.closest('.nav-star');
       if(star){ e.stopPropagation(); NavPrefs.toggleFav(star.getAttribute('data-fav')); renderNav(); return; }
       const head = e.target.closest('.nav-group-head');
@@ -3326,7 +3351,13 @@ function renderNav(){
       const item = e.target.closest('.nav-item');
       if(item) go(item.getAttribute('data-view'));
     });
+    box.addEventListener('dragstart', e=>{ const r = e.target.closest && e.target.closest('[data-favrow]'); if(!r) return; box._drag = r.getAttribute('data-favrow'); try{ e.dataTransfer.effectAllowed='move'; e.dataTransfer.setData('text/plain', box._drag); }catch(x){} });
+    box.addEventListener('dragover', e=>{ if(box._drag && e.target.closest && e.target.closest('[data-favrow]')) e.preventDefault(); });
+    box.addEventListener('drop', e=>{ const r = e.target.closest && e.target.closest('[data-favrow]'); if(!r || !box._drag) return; e.preventDefault(); const id = box._drag; box._drag = null; if(NavPrefs.dropFav(id, r.getAttribute('data-favrow'))) renderNav(); });
+    box.addEventListener('dragend', ()=>{ box._drag = null; });
     box.addEventListener('keydown', e=>{
+      const fr = e.target.closest && e.target.closest('[data-favrow]');
+      if(fr && e.altKey && (e.key==='ArrowUp' || e.key==='ArrowDown')){ e.preventDefault(); const id = fr.getAttribute('data-favrow'); if(NavPrefs.moveFav(id, e.key==='ArrowUp'?-1:1)){ renderNav(); const again = box.querySelector('[data-favrow="'+id+'"]'); if(again) again.focus(); } return; }
       if((e.key==='Enter' || e.key===' ') && e.target.classList && e.target.classList.contains('nav-item')){ e.preventDefault(); go(e.target.getAttribute('data-view')); }
     });
   }
@@ -3335,6 +3366,7 @@ function renderNav(){
 function go(view){
   if(!hasMenuAccess(view)){ UI.toast("You don't have access to this menu"); return; }
   UI.currentView = view;
+  try{ NavPrefs.pushRecent(view); }catch(e){}
   document.getElementById('sidebar').classList.remove('open');
   const meta = PAGE_META[view] || [view,''];
   document.getElementById('pageTitle').innerHTML = meta[0];
@@ -3345,7 +3377,8 @@ function go(view){
 function updateMobileNav(){
   try{ Design.refreshTop(); }catch(e){}
   document.querySelectorAll('.mbn-item[data-view]').forEach(el=>{
-    el.classList.toggle('active', el.getAttribute('data-view')===UI.currentView);
+    const grp = (el.getAttribute('data-grp')||'').split(',').filter(Boolean);
+    el.classList.toggle('active', el.getAttribute('data-view')===UI.currentView || grp.includes(UI.currentView));
   });
 }
 
@@ -3900,6 +3933,16 @@ const GlobalSearch = {
     if(!box) return;
     if(q.length < 2){ box.style.display = 'none'; this.results = []; return; }
     const out = [];
+    /* Build 62: menu pages first (only the ones this user may open) */
+    try{
+      const plainL = h=>String(h).replace(/&amp;/g,'&');
+      NAV.forEach(sec=>sec.items.forEach(it=>{
+        if(out.filter(x=>x.group==='Menus').length>=6) return;
+        if(!navItemAllowed(it)) return;
+        const lab = plainL(it.label);
+        if(lab.toLowerCase().includes(q)) out.push({group:'Menus', label:lab, sub:plainL(sec.sec), go(){ go(it.id); }});
+      }));
+    }catch(e){}
     Store.data.customers.forEach(c=>{
       if((c.name||'').toLowerCase().includes(q) || (c.phone||'').includes(q) || (c.district||'').toLowerCase().includes(q))
         out.push({group:'Customers & Leads', label:c.name, sub:[c.phone,c.district].filter(Boolean).join(' \u2022 '),
@@ -19298,7 +19341,6 @@ const TAB_GROUPS = [
   ['reports','fieldreports','datahealth'],
   ['visits','requirements','travel'],
   ['fieldmap','findlocation','officefinder'],
-  ['complaints','amc'],
   ['products','inventory'],
   ['gemlisting','geml1']
 ];
@@ -24041,7 +24083,7 @@ const NAV_ICON = { fieldapp:'phone', datahealth:'check', actioncentre:'bolt', da
   products:'box', inventory:'store', suppliers:'truck', purchaseorders:'cart', rfq:'list', payments:'wallet', outstanding:'alert', expenses:'receipt', siteexp:'wallet',
   fieldhome:'pin', visits:'pin', requirements:'list', travel:'truck', fieldmap:'pin', findlocation:'search', officefinder:'search',
   complaints:'alert', amc:'wrench', tasks:'check', attendance:'calendar', notes:'file', reports:'chart', fieldreports:'chart', workmgmt:'list', callalloc:'phone', users:'users', settings:'sliders', backup:'db' };
-const NAV_SEC_ICON = { 'Overview':'dashboard', 'Work Centre':'bolt', 'Sales &amp; Customers':'users', 'Government Business':'landmark', 'Products &amp; Procurement':'box', 'Finance':'wallet', 'Field Operations &amp; Service':'pin', 'Reports &amp; Administration':'sliders' };
+const NAV_SEC_ICON = { 'Home':'dashboard', 'My Work':'bolt', 'Sales &amp; Customers':'users', 'Government Business':'landmark', 'Products &amp; Procurement':'box', 'Finance':'wallet', 'Field Operations':'pin', 'Reports &amp; Admin':'sliders' };
 const NavIcons = {
   item(it){ return NAV_ICON[it.id] ? Ico.svg(NAV_ICON[it.id]) : it.ic; },
   sec(s){ return NAV_SEC_ICON[s.sec] ? Ico.svg(NAV_SEC_ICON[s.sec]) : s.ic; }
