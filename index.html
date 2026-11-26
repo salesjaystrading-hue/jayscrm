@@ -692,7 +692,7 @@
   /* ---------- BID DOCUMENTS (Government Business → Bid Documents) ---------- */
   .bd-preview-page{background:#fff;border:1px solid var(--border);border-radius:8px;padding:22px 24px;font-size:12.3px;line-height:1.55;color:#222;}
   .bd-preview-head{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap;}
-  .bd-preview-logo{max-height:56px;max-width:110px;object-fit:contain;}
+  .bd-preview-logo{max-height:80px;max-width:160px;object-fit:contain;}
   .bd-preview-logo-empty{width:70px;height:50px;}
   .bd-preview-companyblock{text-align:right;font-size:11.3px;color:#444;}
   .bd-preview-companyname{font-weight:800;color:var(--navy);font-size:15px;margin-bottom:4px;}
@@ -3251,7 +3251,7 @@ function navBadgeCount(id){
    localStorage only (never in the business-data store). */
 /* Which version is running on this device, and a way to drop the saved copy of the app (service worker + cache)
    so that a newly uploaded index.html is really used. Login, settings and saved data are not touched. */
-const APP_BUILD = '2026-11-25 (build 70)';
+const APP_BUILD = '2026-11-25 (build 73)';
 const AppUpdate = {
   reload(){ location.reload(); },
   async refresh(){
@@ -13333,6 +13333,7 @@ const AttSess = {
       if(error) throw error;
       this.rows = data || []; this.enabled = true; this.loaded = true;
       if(Auth.isAdmin()) await this.loadOpenTeam();
+      this.refreshHome();
     }catch(e){ console.warn('AttSess.load failed', e); if(!this.loaded) this.enabled = false; }
   },
   async loadOpenTeam(){
@@ -13430,14 +13431,85 @@ const AttSess = {
       await Store.save('attendance');
     }catch(e){ console.warn('attendance mirror failed (non-blocking)', e); }
   },
+  /* Daily check-in popup (like the earlier CRM): shown after login when the person has not
+     checked in today. One tap on Office / Home / Field checks in. */
+  _promptKey(){ return 'jays_att_prompt_' + (Auth.session ? Auth.session.id : 'x') + '_' + Util.todayISO(); },
+  _closePrompt(){
+    const cb = document.querySelector('#modalBox .modal-close'); if(cb) cb.style.display = '';
+    UI.closeModal();
+  },
+  promptDaily(){
+    try{
+      if(!this.enabled || !Auth.session) return;
+      try{ if(sessionStorage.getItem(this._promptKey())) return; }catch(e){}
+      const today = Util.todayISO(), st = this.state();
+      if(st.q.some(x=>x.status==='Pending')) return;
+      const hold = (html)=>{
+        UI.openModal(html.title, html.body, '', false);
+        const cb = document.querySelector('#modalBox .modal-close'); if(cb) cb.style.display = 'none';
+      };
+      const later = '<div style="text-align:center;margin-top:10px;"><a href="#" style="font-size:12px;color:var(--text-muted,#888);" onclick="AttSess.skipPrompt();return false;">Not now</a></div>';
+      if(st.cur){
+        if(st.cur._local || (st.cur.work_date || '') >= today) return;           /* checked in today: nothing to ask */
+        const open = st.cur;
+        hold({ title:'You are still checked in', body:
+          '<div class="hint" style="margin-bottom:10px;">You checked in on <b>'+Util.fmtDateTime(open.check_in)+'</b> ('+Util.escapeHtml(open.location)+') and did not check out.</div>' +
+          '<div style="display:flex;gap:10px;flex-wrap:wrap;"><button class="btn btn-primary" style="flex:1;" onclick="AttSess._closePrompt();AttSess.act(\'out\')">Check Out now</button>' +
+          '<button class="btn btn-outline" style="flex:1;" onclick="AttSess._closePrompt();AttSess.skipPrompt(true);AttReq.enabled?AttReq.openCorr(\''+open.id+'\'):UI.toast(\'Ask your manager to correct it\')">Request correction</button></div>' + later });
+        return;
+      }
+      if(this.rows.some(r=>r.work_date===today)) return;                          /* already checked in (and out) today */
+      const gps = '<label style="display:flex;gap:6px;align-items:center;justify-content:center;font-size:12.5px;margin-top:12px;"><input type="checkbox" '+(this.gpsPref()?'checked':'')+' onchange="AttSess.toggleGps(this)"> Save my location with this check-in (optional)</label>';
+      const b = (l,ic)=>'<button class="btn btn-primary" style="flex:1;padding:22px 8px;font-size:15px;" onclick="AttSess.quickIn(\''+l+'\')">'+ic+'<br>'+l+'</button>';
+      hold({ title:'Good morning! Where are you working today?', body:
+        '<div style="display:flex;gap:12px;justify-content:center;padding:10px 0 2px;">'+b('Office','&#127970;')+b('Home','&#127968;')+b('Field','&#128663;')+'</div>' + gps +
+        '<div class="hint" style="text-align:center;margin-top:8px;">Tap one to Check In. Check Out when you finish work (Attendance &gt; Today).</div>' + later });
+    }catch(e){ console.warn('promptDaily failed', e); }
+  },
+  skipPrompt(silent){ try{ sessionStorage.setItem(this._promptKey(), '1'); }catch(e){} this._closePrompt(); },
+  async quickIn(loc){
+    try{ sessionStorage.setItem(this._promptKey(), '1'); }catch(e){}
+    this.location = loc; this._closePrompt();
+    await this.act('in');
+  },
+  /* Home-screen attendance card: shows today's status and gives one-tap Check In / Check Out */
+  homeInner(){
+    if(!this.enabled || !this.loaded) return '';
+    const st = this.state(), cur = st.cur, today = Util.todayISO();
+    const wrap = body=>'<div class="card card-pad" style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px;">'+body+'</div>';
+    if(cur){
+      const stale = !cur._local && (cur.work_date||'') < today;
+      return wrap('<div style="display:flex;flex-direction:column;gap:2px;font-size:13.5px;"><div><span class="badge badge-green">Checked in</span>'+(st.pending?' <span class="badge badge-orange">Pending sync</span>':'')+(stale?' <span class="badge badge-red">Since earlier day</span>':'')+'</div>' +
+        '<div><b>'+Util.escapeHtml(cur.location)+'</b> &middot; since '+Util.fmtDateTime(cur.check_in)+' &middot; <b id="attHomeDur" data-since="'+new Date(cur.check_in).getTime()+'">'+this.fmtDur(Date.now()-new Date(cur.check_in))+'</b></div></div>' +
+        '<button class="btn btn-primary" style="padding:12px 22px;font-weight:700;" onclick="AttSess.homeOut()">Check Out</button>');
+    }
+    const doneToday = this.rows.filter(r=>r.work_date===today && r.check_out && !r.incomplete).length, t = this.totals();
+    const b = (l,ic)=>'<button class="btn btn-primary btn-sm" onclick="AttSess.homeIn(\''+l+'\')">'+ic+' '+l+'</button>';
+    return wrap('<div style="display:flex;flex-direction:column;gap:2px;font-size:13.5px;"><div><span class="badge badge-gray">'+(st.pending?'Check-out pending sync':(doneToday?'Checked out':'Not checked in'))+'</span></div>' +
+        '<div class="hint">'+(doneToday ? 'Today: <b>'+this.fmtDur(t.d)+'</b> worked' : 'Check in to start your day')+'</div></div>' +
+        (st.pending ? '' : '<div style="display:flex;gap:8px;flex-wrap:wrap;">'+b('Office','&#127970;')+b('Home','&#127968;')+b('Field','&#128663;')+'</div>'));
+  },
+  homeHTML(){ return '<div id="attHome">'+this.homeInner()+'</div>'; },
+  refreshHome(){
+    const el = document.getElementById('attHome'); if(!el) return;
+    el.innerHTML = this.homeInner();
+    setTimeout(()=>AttSess.tick(),0);
+  },
+  homeIn(loc){ this.location = loc; this.act('in'); },
+  homeOut(){
+    const st = this.state(); if(!st.cur){ this.refreshHome(); return; }
+    if(!confirm('Check out now?\nWorking time: '+this.fmtDur(Date.now()-new Date(st.cur.check_in)))) return;
+    this.act('out');
+  },
   setLoc(l){ this.location = l; this.render(); },
   toggleGps(el){ this.setGps(el.checked); },
-  render(){ if(UI.currentView==='attendance') Attendance.render(); },
+  render(){ if(UI.currentView==='attendance') Attendance.render(); this.refreshHome(); },
   tick(){
     clearInterval(this._timer);
     this._timer = setInterval(()=>{
-      const el = document.getElementById('attDur'); if(!el){ clearInterval(this._timer); return; }
-      const t = Number(el.getAttribute('data-since')); el.textContent = AttSess.fmtDur(Date.now()-t);
+      const els = ['attDur','attHomeDur'].map(i=>document.getElementById(i)).filter(Boolean);
+      if(!els.length){ clearInterval(this._timer); return; }
+      els.forEach(el=>{ el.textContent = AttSess.fmtDur(Date.now()-Number(el.getAttribute('data-since'))); });
     }, 30000);
   },
   rowHTML(r, act){
@@ -13789,8 +13861,7 @@ const Attendance = {
     if(Store.data.loadFailed && Store.data.loadFailed['jays_attendance']) return;
     AttSess.init().then(()=>{
       if(AttSess.enabled){
-        const st = AttSess.state();
-        if(!st.cur && !AttSess.rows.some(r=>r.work_date===Util.todayISO())) UI.toast('Good morning - remember to Check In (Attendance > Today)');
+        setTimeout(()=>AttSess.promptDaily(), 400);
         return;
       }
       if(this.todayRecord()) return;              // sessions unavailable: fall back to the old once-a-day prompt
@@ -19940,6 +20011,7 @@ const DashboardV2 = {
       '<div class="d2-wrap"><div class="card card-pad d2-hello"><div><div class="d2-greet">'+greet+', '+E(me||'there')+'</div><div class="hint">'+Util.fmtDate(today)+(all?' · showing the whole team':'')+'</div></div><div class="d2-qa">' +
         (admin ? '<select aria-label="Whose items" onchange="DashboardV2.setScope(this.value)"><option value="mine"'+(all?'':' selected')+'>My items</option><option value="all"'+(all?' selected':'')+'>Everyone</option></select>' : '') +
         qa.map(x=>'<button class="btn '+(x[0]==='plus'?'btn-primary':'btn-outline')+' btn-sm" onclick="'+E(x[2])+'">'+(x[0]==='plus'?'+ ':'')+x[1]+'</button>').join('') + '</div></div>' +
+      AttSess.homeHTML() +
       (kpis ? '<div class="d2-kpis">'+kpis+'</div>' : '') +
       '<div class="d2-grid2'+(snapHTML?'':' d2-one')+'">'+prio+snapHTML+'</div>' +
       ((salesHTML||glanceHTML) ? '<div class="d2-grid2 d2-grid2b'+((salesHTML&&glanceHTML)?'':' d2-one')+'">'+salesHTML+glanceHTML+'</div>' : '') +
@@ -22492,25 +22564,29 @@ const BidDocs = {
     const ctx = this.tokenCtx();
     const merge = (t)=>String(t||'').replace(/\{\{(\w+)\}\}/g,(m,k)=>(ctx[k]!==undefined&&ctx[k]!=='')?ctx[k]:'');
 
-    let y = M, logoBottom = y;
+    let y = M, logoBottom = y, logoW = 0;
     const _logo = BidAssets.get(c.logo), _sig = BidAssets.get(c.signatureImage), _stamp = BidAssets.get(c.stampImage);
     if(_logo){
       try{
         const props = doc.getImageProperties(_logo);
-        const maxW=28, maxH=22;
+        const maxW=68, maxH=34;          /* same generous size as the Quotation PDF */
         const sc = Math.min(maxW/props.width, maxH/props.height);
         const lw = props.width*sc, lh = props.height*sc;
         doc.addImage(_logo, 'JPEG', M, y, lw, lh);
-        logoBottom = y + lh;
+        logoBottom = y + lh; logoW = lw;
       }catch(e){ console.warn('logo skipped', e); }
     }
-    doc.setFont('helvetica','bold'); doc.setFontSize(16); doc.setTextColor(NAVY[0],NAVY[1],NAVY[2]);
-    const nameLines = doc.splitTextToSize(String(c.name||'JAYS TRADING AND BUSINESS SOLUTION').toUpperCase(), PW-M*2-40);
+    doc.setFont('helvetica','bold'); doc.setTextColor(NAVY[0],NAVY[1],NAVY[2]);
+    const textW = PW - M*2 - (logoW ? logoW + 6 : 0) ;       /* room to the right of the logo */
+    const nameTxt = String(c.name||'JAYS TRADING AND BUSINESS SOLUTION').toUpperCase();
+    let nfs = 16; doc.setFontSize(nfs);
+    while(nfs > 11 && doc.getTextWidth(nameTxt) > textW){ nfs -= 0.5; doc.setFontSize(nfs); }     /* a bigger logo leaves less room: shrink the name to fit on one line */
+    const nameLines = doc.splitTextToSize(nameTxt, textW);
     let hy = y+6;
-    nameLines.slice(0,2).forEach(l=>{ doc.text(l, PW-M, hy, {align:'right'}); hy += 6.5; });
+    nameLines.slice(0,2).forEach(l=>{ doc.text(l, PW-M, hy, {align:'right'}); hy += nfs*0.41; });
     doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(60);
     [c.phone, c.address, c.gstin?('GSTIN: '+c.gstin):'', c.email].filter(Boolean).forEach(l=>{
-      doc.splitTextToSize(String(l), PW-M-40).forEach(w=>{ doc.text(w, PW-M, hy, {align:'right'}); hy += 4.6; });
+      doc.splitTextToSize(String(l), textW).forEach(w=>{ doc.text(w, PW-M, hy, {align:'right'}); hy += 4.6; });
     });
     y = Math.max(hy, logoBottom) + 4;
     doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(80);
